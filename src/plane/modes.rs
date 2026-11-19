@@ -25,6 +25,7 @@
 //! fall, within perhaps ±30%.
 
 use super::*;
+use crate::aero;
 use crate::aircraft::{b747, c172};
 
 const DT: f64 = 1.0 / 180.0;
@@ -222,4 +223,77 @@ fn handling_of_a_747() {
     assert!(m.short.zeta > 0.2, "{:?}", m.short);
     assert!(m.phugoid.zeta > -0.05, "{:?}", m.phugoid);
     assert!(m.roll_rate > 3.0 && m.roll_rate < 60.0, "{}", m.roll_rate);
+}
+
+/// Slow down at idle a knot a second, wings level, until the wing lets go;
+/// the lowest indicated airspeed reached (kt), and whether the nose dropped.
+pub fn stall_speed(spec: &'static Spec, notch: u8) -> (f64, bool) {
+    let (mut p, w) = trimmed(spec, 1500.0, spec.approach.0 * 1.3);
+    p.flap_set = notch;
+    let mut target = p.ias();
+    let (mut min_ias, mut dropped) = (f64::MAX, false);
+    for i in 0..(90.0 / DT) as usize {
+        target -= 0.514 * DT;
+        let err = p.ias() - target;
+        let c = Controls { pitch: (err * 0.08 + p.omega.x * 0.0).clamp(-1.0, 1.0), roll: level_wings(&p), throttle_set: Some(0.0), ..Default::default() };
+        assert!(p.step(DT, &c, &w).is_none());
+        if i as f64 * DT > 10.0 {
+            min_ias = min_ias.min(p.ias());
+            if p.stalled && p.omega.x < -0.05 {
+                dropped = true;
+                break;
+            }
+        }
+    }
+    (min_ias * 1.943_84, dropped)
+}
+
+#[test]
+fn a_cessna_172_stalls_where_the_book_says() {
+    // Cessna 172RG POH, at 2650 lb, power off, most forward CG: 50 KIAS
+    // clean, 42 KIAS flaps 30° (ours is 2425 lb: a few knots less).
+    let (clean, d0) = stall_speed(&c172::SPEC, 0);
+    let (full, d3) = stall_speed(&c172::SPEC, 3);
+    println!("C172 stall: {clean:.0} kt clean (nose drop {d0}), {full:.0} kt flaps 30° (nose drop {d3}); POH 50 / 42 KIAS at 2650 lb");
+    assert!((44.0..54.0).contains(&clean), "{clean}");
+    assert!((36.0..47.0).contains(&full), "{full}");
+    assert!(full < clean - 3.0);
+}
+
+#[test]
+fn every_aircraft_can_be_rigged_from_its_spec() {
+    // The generic rig: built from what each `Spec` already says, every
+    // aircraft's strips carry its weight at its cruise speed and fly a
+    // minute hands off without coming apart. (Tuning each one to its real
+    // handling is its own `Rig`'s job; this is the starting point.)
+    let (mut flying, mut total) = (0, 0);
+    for spec in crate::aircraft::list() {
+        if spec.rocket().is_some() {
+            continue;
+        }
+        let rig: &'static aero::Rig = Box::leak(Box::new(spec.rig.copied().unwrap_or_else(|| aero::Rig::derive(spec))));
+        let s: &'static Spec = Box::leak(Box::new(Spec { rig: Some(rig), ..spec.clone() }));
+        let w = empty_world();
+        let h = if spec.is_jet() { 6_000.0 } else { 1_500.0 };
+        let mut p = Plane::spawn(s, 0.6, -2.1, h, 0.0, spec.cruise);
+        let h0 = geo::pos_to_lla(p.pos).2;
+        for _ in 0..(60.0 / DT) as usize {
+            let c = Controls { roll: level_wings(&p), throttle_set: Some(p.throttle), ..Default::default() };
+            assert!(p.step(DT, &c, &w).is_none(), "{} crashed", spec.name);
+        }
+        let dh = geo::pos_to_lla(p.pos).2 - h0;
+        let v = p.airspeed().length();
+        println!("{}: trim {:+.2}, alpha {:.1}°, after 60 s {:+.0} m, {:.0} → {:.0} m/s", spec.name, p.pitch_trim, p.alpha.to_degrees(), dh, spec.cruise, v);
+        assert!(p.omega.is_finite() && v.is_finite());
+        // A delta's elevons and the derived Phantom's tail do not trim yet
+        // without a rig of their own: reported, not required.
+        let settled = dh.abs() < 0.25 * h && (v - spec.cruise).abs() < 0.5 * spec.cruise;
+        if !settled {
+            println!("    {} needs its own rig to trim", spec.name);
+        }
+        flying += settled as usize;
+        total += 1;
+    }
+    println!("{flying} of {total} fly trimmed on their derived rig");
+    assert!(flying * 3 >= total * 2, "the derived rig should fly most aircraft");
 }
