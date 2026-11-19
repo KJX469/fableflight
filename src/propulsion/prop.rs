@@ -22,7 +22,7 @@
 //! A constant-speed propeller's governor moves the blades to hold the revs
 //! the lever sets, as fast as its oil can move them; at the fine stop it is
 //! a fixed-pitch propeller again.
-use super::{interp, Ambient, Mount};
+use super::{Ambient, Mount};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::f64::consts::{PI, TAU};
@@ -181,8 +181,6 @@ impl Tables {
     /// Ct and Cp at advance ratio `j`, blade angle `beta` (rad).
     pub fn at(&self, beta: f64, j: f64) -> (f64, f64) {
         let row = |k: usize| {
-            let t: Vec<(f64, f64)> = Vec::new();
-            let _ = t;
             let jj = j.clamp(0.0, *self.js.last().unwrap());
             let dj = self.js[1] - self.js[0];
             let i = ((jj / dj) as usize).min(self.js.len() - 2);
@@ -274,10 +272,9 @@ impl Prop {
         let n = self.w / TAU;
         let axis = mount.axis;
         let v_ax = vb.dot(axis);
-        let v_ip = vb - axis * v_ax;
         // Two directions in the disc: "up" and "right" as seen from behind.
         let up0 = (DVec3::Y - axis * axis.y).normalize_or(DVec3::Y);
-        let right0 = axis.cross(up0) * -1.0;
+        let right0 = axis.cross(up0);
         let r_c = 0.75 * 0.5 * d;
         let tip_mach = ((PI * n * d).powi(2) + v_ax * v_ax).sqrt() / amb.sound();
         // Past the critical Mach at the tips, drag rises and thrust falls.
@@ -289,7 +286,7 @@ impl Prop {
             let psi = TAU * (s as f64 + 0.5) / SECTORS as f64;
             // Radial direction of this sector, and the way a blade there moves.
             let radial = up0 * psi.cos() + right0 * psi.sin();
-            let tangent = (axis.cross(radial) * -mount.spin).normalize();
+            let tangent = (axis.cross(radial) * mount.spin).normalize();
             // The airflow across the disc adds to (or takes from) the blade's own speed.
             let n_eff = n + vb.dot(tangent) / (TAU * r_c);
             let (t, q) = if n_eff.abs() < 0.05 {
@@ -312,7 +309,6 @@ impl Prop {
             force -= tangent * (q / r_c);
             moment += (radial * r_c).cross(axis * t);
         }
-        let _ = v_ip;
         // The engine turns the propeller one way; the airframe is turned the other.
         moment -= axis * (mount.spin * torque);
         PropOut { force: force * k, moment: moment * k, thrust: thrust * k, torque: torque * k, j, tip_mach }
@@ -336,11 +332,6 @@ pub fn static_rpm(p: &PropData, power: f64, rho: f64) -> f64 {
     let cp = t.at(beta, 0.0).1;
     // P = Cp ρ n³ D⁵
     (power / (cp * rho * p.d.powi(5))).cbrt() * 60.0
-}
-
-#[allow(dead_code)]
-fn _unused(t: &[(f64, f64)]) -> f64 {
-    interp(t, 0.0)
 }
 
 #[cfg(test)]
