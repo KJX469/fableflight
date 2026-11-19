@@ -21,6 +21,8 @@ use crate::world::{TreeRef, World};
 use glam::{DMat3, DQuat, DVec3, Mat4, Vec3};
 
 mod rocket;
+#[cfg(test)]
+mod modes;
 
 #[derive(Default, Clone, Copy)]
 pub struct Controls {
