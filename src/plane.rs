@@ -1401,7 +1401,9 @@ impl Plane {
         let rig = &af.rig;
         aero::Input {
             vb,
-            omega: self.omega - self.gust_rot,
+            // (With gusts sampled at each strip, the strips feel the air's
+            // rotation themselves: `aero_st.gust`, see `strip_gusts`.)
+            omega: if self.aero_st.gust.is_empty() { self.omega - self.gust_rot } else { self.omega },
             rho,
             cg: af.cg_at(self.cg()),
             elevator: self.stick.x,
@@ -1442,6 +1444,7 @@ impl Plane {
             }
             _ => 1.0,
         };
+        self.strip_gusts(&af);
         let inp = self.strip_input(&af, vb, rho, ge);
         let out = af.forces(&inp, &mut self.aero_st, dt);
         self.alpha = out.alpha;
@@ -1484,6 +1487,29 @@ impl Plane {
         (force, moment / spec.inertia)
     }
 
+    /// The gust field and any wakes sampled at every strip, as each strip's
+    /// difference from the gust the whole aircraft feels (`gust`, in its
+    /// airspeed already), in the body frame. A vertical gust stronger under
+    /// one wing than the other rolls it, one stronger at the tail than the
+    /// nose pitches it, and so on, strip by strip.
+    fn strip_gusts(&mut self, af: &aero::Airframe) {
+        let mut g = std::mem::take(&mut self.aero_st.gust);
+        g.clear();
+        if self.gusts.calm() && self.wake.is_empty() {
+            self.aero_st.gust = g;
+            return;
+        }
+        let up = self.pos.normalize();
+        let inv = self.rot.inverse();
+        let calm = self.gusts.calm();
+        for s in &af.strips {
+            let at = self.pos + self.rot * s.at;
+            let u = if calm { DVec3::ZERO } else { self.gusts.at(at, up) } + crate::wake::induced(&self.wake, at);
+            g.push(inv * (u - self.gust) * smooth(5.0, 25.0, self.airspeed().length()));
+        }
+        self.aero_st.gust = g;
+    }
+
     /// The pitching moment (N m) hands off, steady, wings level, at true
     /// airspeed `v` and angle of attack `alpha` with the trim at `trim`, and the lift (N).
     fn strip_pitch(&self, af: &aero::Airframe, v: f64, rho: f64, alpha: f64, trim: f64) -> (f64, f64, f64) {
@@ -1493,7 +1519,7 @@ impl Plane {
         (inp.elevator, inp.aileron, inp.rudder) = (0.0, 0.0, 0.0);
         inp.trim = trim * if trim > 0.0 { af.rig.trim[1] } else { af.rig.trim[0] };
         // Settled downwash for this lift.
-        let mut st = aero::State { sep: self.aero_st.sep.iter().map(|_| 0.0).collect(), eps: 0.0 };
+        let mut st = aero::State { sep: self.aero_st.sep.iter().map(|_| 0.0).collect(), eps: 0.0, gust: Vec::new() };
         let mut out = af.forces(&inp, &mut st, 0.0);
         for _ in 0..3 {
             st.eps = af.rig.downwash * 2.0 * out.cl_wing / (std::f64::consts::PI * af.ar);

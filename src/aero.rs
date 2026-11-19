@@ -447,6 +447,9 @@ pub struct Input {
 pub struct State {
     pub sep: Vec<f64>,
     pub eps: f64,
+    /// the gust at each strip (body frame, m/s): the air's own motion there
+    /// beyond what `Input::vb` already has (the gust at the CG); empty: none
+    pub gust: Vec<DVec3>,
 }
 
 /// What the strips add up to.
@@ -509,6 +512,10 @@ impl Airframe {
             let r = s.at - inp.cg;
             // The strip's velocity through the air around it.
             let mut fl = inp.vb + inp.omega.cross(r);
+            // The gust where this strip is (wind_strips: turbulence, wakes).
+            if let Some(g) = st.gust.get(i) {
+                fl -= *g;
+            }
             let mut eta = 1.0;
             if !matches!(s.part, Part::Wing(_)) {
                 eta = rig.eta_tail;
