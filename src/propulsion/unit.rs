@@ -69,6 +69,16 @@ pub struct UnitOut {
     pub running: bool,
 }
 
+/// The mixture the auto-mixture assist holds: rich for cooling at high power,
+/// rich at idle as a carburettor's idle circuit runs it, best power between.
+fn auto_phi(throttle: f64) -> f64 {
+    if throttle > 0.85 {
+        1.26
+    } else {
+        PHI_BEST + (1.3 - PHI_BEST) * (1.0 - super::smooth(0.02, 0.12, throttle))
+    }
+}
+
 #[derive(Clone)]
 pub struct Unit {
     pub mount: Mount,
@@ -115,9 +125,7 @@ impl Unit {
                 let q = 0.5 * amb.rho() * amb.v * amb.v;
                 let q_cool = q + self.out.thrust.max(0.0) / disc;
                 let mixture = if lv.auto_mixture && lv.mixture > 0.05 {
-                    // Rich for cooling at high power, best power otherwise.
-                    let phi = if throttle > 0.85 { 1.26 } else { PHI_BEST };
-                    eng.lever_for(phi, &amb, lv.carb_heat).min(1.0)
+                    eng.lever_for(auto_phi(throttle), &amb, lv.carb_heat).min(1.0)
                 } else {
                     lv.mixture
                 };
@@ -135,7 +143,7 @@ impl Unit {
                 };
                 let o = eng.step(&inp, dt);
                 // The starter cranks it at ~200 rpm; its torque falls away as it spins up.
-                let crank = if lv.starter { 120.0 * (1.0 - w / 25.0).max(0.0) } else { 0.0 };
+                let crank = if lv.starter { 180.0 * (1.0 - w / 25.0).max(0.0) } else { 0.0 };
                 // Not firing, each cylinder compresses its charge for nothing: a
                 // drag that stops a shut-down engine in a couple of seconds.
                 let comp = if o.firing { 0.0 } else { 40.0 * (1.0 - w / 90.0).clamp(0.0, 1.0) };
@@ -186,7 +194,7 @@ impl Unit {
         let amb = fl.ambient(&self.mount);
         match &mut self.kind {
             Kind::Piston { eng, prop } => {
-                let lever = if lv.auto_mixture || lv.mixture <= 0.05 { eng.lever_for(if throttle > 0.85 { 1.26 } else { PHI_BEST }, &amb, 0.0).min(1.0) } else { lv.mixture };
+                let lever = if lv.auto_mixture || lv.mixture <= 0.05 { eng.lever_for(auto_phi(throttle), &amb, 0.0).min(1.0) } else { lv.mixture };
                 let disc = std::f64::consts::FRAC_PI_4 * prop.data.d * prop.data.d;
                 let q_cool = 0.5 * amb.rho() * amb.v * amb.v + 0.5 * eng.data.power / disc / 30.0;
                 let inp = |w: f64| PistonIn { throttle, mixture: lever, w, amb, mags: 2, fuel: true, carb_heat: 0.0, cowl: 0.0, q_cool, health: 1.0 };

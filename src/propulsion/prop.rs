@@ -73,7 +73,7 @@ fn section(a: f64) -> (f64, f64) {
     let plate_cd = 0.03 + 1.8 * a.sin().powi(2);
     let k = super::smooth(stall, stall + 8.0_f64.to_radians(), a.abs());
     let cl_att = if a > stall { lin.min(1.25) } else if a < -stall + a0 { lin.max(-0.9) } else { lin };
-    let cd_att = 0.009 + 0.008 * (cl_att - 0.4).powi(2);
+    let cd_att = 0.011 + 0.008 * (cl_att - 0.4).powi(2);
     (cl_att * (1.0 - k) + plate_cl * k, cd_att * (1.0 - k) + plate_cd * k)
 }
 
@@ -103,14 +103,18 @@ fn bem(p: &PropData, beta75: f64, j: f64) -> (f64, f64) {
             let phi = ua.atan2(ut);
             let (cl, cd) = section(beta - phi);
             let w2 = ua * ua + ut * ut;
+            // Prandtl's tip and hub (spinner) losses.
             let f = {
                 let s = phi.sin().abs().max(1e-3);
-                let e = (-0.5 * b * (1.0 - x) / (x * s)).exp();
-                (2.0 / PI * e.clamp(0.0, 1.0).acos()).max(0.02)
+                let tip = (-0.5 * b * (1.0 - x) / (x * s)).exp();
+                let hub = (-0.5 * b * (x - 0.15) / (0.15 * s)).exp();
+                (4.0 / (PI * PI) * tip.clamp(0.0, 1.0).acos() * hub.clamp(0.0, 1.0).acos()).max(0.02)
             };
             let dt = 0.5 * w2 * sigma * TAU * r * (cl * phi.cos() - cd * phi.sin());
             let dq = 0.5 * w2 * sigma * TAU * r * (cl * phi.sin() + cd * phi.cos()) * r;
-            let mom = 4.0 * PI * r * f * (v + vi).abs() * vi;
+            // (κ 1.15: the inflow through a real disc is not uniform, which
+            // costs induced power, as blade-element analyses of rotors allow.)
+            let mom = 4.0 * PI * r * f * (v + vi).abs() * vi / 1.15;
             (dt - mom, dt, dq)
         };
         let (mut lo, mut hi) = (-0.5 * v - 0.5 * ut, 2.0 * v + ut);
@@ -125,8 +129,15 @@ fn bem(p: &PropData, beta75: f64, j: f64) -> (f64, f64) {
         ct += dt * dr;
         cp += dq * dr * omega;
     }
-    // T = Ct ρ n² D⁴, P = Cp ρ n³ D⁵ with n = 1, ρ = 1.
-    (ct / p.d.powi(4), cp / p.d.powi(5))
+    // T = Ct ρ n² D⁴, P = Cp ρ n³ D⁵ with n = 1, ρ = 1. The analysis leaves
+    // out the slipstream's swirl and the spinner and cowling behind the disc,
+    // which together cost a real installation about 3% of its thrust. Standing
+    // still the slipstream is fastest beside the free stream, so it scrubs the
+    // cowling hardest and the thick blade roots work worst: strip analysis
+    // over-predicts static thrust by some 10-15% (figures of merit near 0.7
+    // against the 0.55-0.6 measured), a loss that is gone by the climb.
+    let static_loss = 0.12 * (1.0 - j / 0.6).max(0.0).powi(2);
+    ((0.97 - static_loss) * ct / p.d.powi(4), cp / p.d.powi(5))
 }
 
 impl PropData {
@@ -206,6 +217,8 @@ pub struct Prop {
     /// blade angle at 75% radius (rad), and its speed (rad/s)
     pub beta: f64,
     pub w: f64,
+    /// the revs at the governor's last look
+    w_prev: f64,
 }
 
 /// What the propeller does to the airframe this step (body frame).
@@ -230,7 +243,7 @@ impl Prop {
             Pitch::Fixed(p) => data.beta_of_pitch(p),
             Pitch::Constant { fine, .. } => fine.to_radians(),
         };
-        Prop { data, tables, beta, w: 0.0 }
+        Prop { data, tables, beta, w: 0.0, w_prev: 0.0 }
     }
 
     /// The governor's revs for a lever at `lever` (0..1), or None to feather.
@@ -247,20 +260,29 @@ impl Prop {
         }
     }
 
-    /// Move the blades: the governor's flyweights against the speeder spring,
-    /// the oil pressure (only with the engine turning) moving them.
+    /// Move the blades: the governor's flyweights against the speeder spring
+    /// open its pilot valve as far as the revs are off, and oil flows to the
+    /// hub as fast as that lets it (so the blades move at a rate set by the
+    /// error, an integral action); the flyweights' own swing as the revs
+    /// change damps it. The oil pressure is there only with the engine
+    /// turning.
     pub fn govern(&mut self, lever: f64, oil: bool, dt: f64) {
         let Pitch::Constant { fine, coarse, feather, .. } = self.data.pitch else { return };
         let (fine, coarse) = (fine.to_radians(), coarse.to_radians());
-        let want = match self.governed(lever) {
+        let max_rate = 20.0_f64.to_radians();
+        let rate = match self.governed(lever) {
+            Some(target) if oil => {
+                let e = (self.w - target) / target;
+                let de = if dt > 0.0 { (self.w - self.w_prev) / target / dt } else { 0.0 };
+                (2.5 * e + 0.25 * de).clamp(-max_rate, max_rate)
+            }
             // Without oil pressure a single's blades go to fine (a twin's springs feather them).
-            Some(target) if oil => self.beta + (self.w - target) / target * 1.8,
-            Some(_) => if feather > 0.0 { feather.to_radians() } else { fine },
-            None => feather.to_radians(),
+            Some(_) => if feather > 0.0 { max_rate } else { -max_rate },
+            None => max_rate,
         };
-        let hi = if feather > 0.0 && (want > coarse + 0.01 || self.beta > coarse + 0.01) { feather.to_radians() } else { coarse };
-        let rate = 20.0_f64.to_radians() * dt;
-        self.beta += (want.clamp(fine, hi) - self.beta).clamp(-rate, rate);
+        self.w_prev = self.w;
+        let hi = if feather > 0.0 && (self.governed(lever).is_none() || !oil || self.beta > coarse + 0.01) { feather.to_radians() } else { coarse };
+        self.beta = (self.beta + rate * dt).clamp(fine, hi);
     }
 
     /// The loads with the air at `amb` coming at it with velocity `vb` (body

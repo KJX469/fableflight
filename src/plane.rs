@@ -1887,7 +1887,7 @@ impl Plane {
             let vb = DVec3::new(0.0, -v * alpha.sin(), -v * alpha.cos());
             // The engines at cruise power: their torque, P-factor and slipstream.
             let mut lv = self.levers(false, false);
-            (lv.throttle, lv.auto_mixture, lv.prop) = (0.75, true, 0.8);
+            (lv.throttle, lv.auto_mixture) = (0.75, true);
             let fl = Self::flight(vb, DVec3::ZERO, h);
             let (mut thrust, mut em) = (0.0, DVec3::ZERO);
             for u in &self.engines {
@@ -2410,7 +2410,13 @@ impl Plane {
                 }
             }
             force_b += self.eng_force;
-            wdot += self.eng_moment / spec.inertia;
+            // On the strips the engines' moments are physical (torque reaction,
+            // P-factor, the disc's side force, thrust lines off the CG), and the
+            // rig balances them in the cruise. The older gain-based handling
+            // has its own tuned stand-ins for them below instead.
+            if self.airframe.is_some() {
+                wdot += self.eng_moment / spec.inertia;
+            }
         }
         match &spec.engine {
             Engine::Piston(pe) => {
@@ -2422,6 +2428,15 @@ impl Plane {
                 // added here. A share of it reaches the rudder (the rest passes
                 // below and beside it), and it fades out by 30 m/s.
                 if v > 2.0 && self.airframe.is_none() {
+                    // Torque rolls it left and the spiralling slipstream (and
+                    // P-factor, climbing slowly) yaws it left; the fin and
+                    // ailerons are rigged for the cruise, so it is full power at
+                    // low speed that needs right rudder. (Static thrust at full
+                    // power is about the rated power over 54 m/s.)
+                    let slow = (1.0 - v / 60.0).max(0.0);
+                    let tk = thrust.max(0.0) / (pe.power / 54.0);
+                    wdot.y += tk * slow * (0.22 + 0.25 * self.alpha.max(0.0));
+                    wdot.z += tk * slow * 0.12 * if self.on_ground { 0.3 } else { 1.0 };
                     let disc = std::f64::consts::FRAC_PI_4 * pe.prop_d * pe.prop_d;
                     if self.on_ground && disc > 0.01 {
                         let q_wash = thrust.max(0.0) / disc;
@@ -3576,15 +3591,21 @@ mod tests {
         // Nose pitched down with the propeller turning clockwise (seen from the
         // cockpit): it precesses the nose to the left, about prop_i·ω_prop·q / I_yaw.
         let w = empty_world();
-        let yaw_after = |prop_rate: f64| {
+        // Pitching down and then up at the same rate, at the same revs: the
+        // airframe's own yaw from a pitch rate cancels, the gyroscope's does not.
+        let w_prop = 2400.0 * std::f64::consts::TAU / 60.0;
+        let yaw_after = |q: f64| {
             let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 55.0);
-            p.prop_rate = prop_rate;
-            p.omega = DVec3::new(-1.0, 0.0, 0.0);
+            for u in &mut p.engines {
+                if let crate::propulsion::unit::Kind::Piston { prop, .. } = &mut u.kind {
+                    prop.w = w_prop;
+                }
+            }
+            p.omega = DVec3::new(q, 0.0, 0.0);
             p.step(1.0 / 180.0, &Controls { throttle_set: Some(p.throttle), ..Default::default() }, &w);
             p.omega.y
         };
-        let w_prop = 2400.0 * std::f64::consts::TAU / 60.0;
-        let kick = (yaw_after(w_prop) - yaw_after(0.0)) * 180.0;
+        let kick = (yaw_after(-1.0) - yaw_after(1.0)) * 0.5 * 180.0;
         let want = piston().prop_i * w_prop / C172.inertia.y;
         println!("yaw acceleration from the propeller: {kick:.3} rad/s² (expected {want:.3})");
         assert!(kick > 0.0, "nose left");
@@ -4635,11 +4656,15 @@ mod tests {
         println!("75% at 8000 ft: {:.0} kt true, {:.0} kt indicated, {:.0} rpm, power {:.2}", v * KT, p.ias() * KT, rpm(&p), p.power);
         assert!(v * KT > 110.0 && v * KT < 128.0, "{}", v * KT);
 
-        // Full power at the best-rate speed (74 kt): 700-900 fpm.
+        // Full power at the best-rate speed (74 kt). The 172RG's book gives 800
+        // fpm at its 1,202 kg gross weight, its constant-speed propeller letting
+        // the engine turn its full 2,700 rpm; at this test's 1,100 kg (half
+        // fuel) that is about 880-960 fpm.
         let mut p = Plane::spawn(C172, 0.6, -2.1, 300.0, 0.0, 40.0);
         let (v, vs) = fly(&mut p, &w, 90.0, 1.0, |p| (p.airspeed().length() - 38.0) * 0.04);
         println!("climb at {:.0} kt: {:.0} fpm, {:.0} rpm", v * KT, vs * 196.85, rpm(&p));
-        assert!(vs * 196.85 > 650.0 && vs * 196.85 < 950.0, "{}", vs * 196.85);
+        assert!(vs * 196.85 > 750.0 && vs * 196.85 < 1000.0, "{}", vs * 196.85);
+        assert!((rpm(&p) - 2700.0).abs() < 40.0, "the governor holds the red line: {}", rpm(&p));
 
         // Engine at idle at the best glide speed (68 kt): about 9 to 1.
         let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 35.0);
@@ -4657,15 +4682,17 @@ mod tests {
         assert!(clean > 46.0 && clean < 54.0 && full > 39.0 && full < 46.0);
 
         // On the ground: the constant-speed propeller on its fine stop lets the
-        // engine reach about 2,600-2,700 rpm flat out; 600-800 at idle; static
-        // thrust about a fifth to a quarter of the weight.
+        // engine reach about 2,600-2,700 rpm flat out; 600-850 at idle. Static
+        // thrust: 180 hp through a 76 in two-blade propeller at a figure of
+        // merit of 0.55-0.6 makes some 700-780 lbf (an estimate from momentum
+        // theory, not a measurement), a little under a third of the weight.
         let p0 = Plane::spawn(C172, 0.6, -2.1, 0.0, 0.0, 0.0);
         let ws = p0.settled_rpm(1.0, 0.0, 0.0);
         let wi = p0.settled_rpm(0.0, 0.0, 0.0);
         let t0 = p0.thrust(1.0, 0.0, 0.0);
         println!("static {ws:.0} rpm, idle {wi:.0} rpm, thrust {t0:.0} N = {:.2} W", t0 / (s.mass * 9.81));
         assert!(ws > 2500.0 && ws < 2710.0 && wi > 550.0 && wi < 850.0, "{ws} {wi}");
-        assert!(t0 / (s.mass * 9.81) > 0.18 && t0 / (s.mass * 9.81) < 0.28, "{t0}");
+        assert!(t0 / (s.mass * 9.81) > 0.26 && t0 / (s.mass * 9.81) < 0.34, "{t0}");
         // Diving at Vne at full throttle the governor holds the red line.
         let wd = p0.settled_rpm(1.0, s.vne, 0.0);
         println!("full throttle at Vne: {wd:.0} rpm");

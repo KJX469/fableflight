@@ -736,6 +736,12 @@ pub(crate) struct Part {
     mil: f64,
     max: f64,
     augmented: bool,
+    /// a piston engine's displacement (cu in); a turbine's bypass ratio and
+    /// fuel consumption dry and with the afterburner (lb/lbf/h), when given
+    displacement: Option<f64>,
+    bpr: Option<f64>,
+    tsfc: Option<f64>,
+    atsfc: Option<f64>,
 }
 
 pub(crate) fn read_part(xml: &str) -> Result<Part, String> {
@@ -751,6 +757,10 @@ pub(crate) fn read_part(xml: &str) -> Result<Part, String> {
     p.mil = num("milthrust").unwrap_or(0.0);
     p.max = num("maxthrust").unwrap_or(p.mil).max(p.mil);
     p.augmented = num("augmented").unwrap_or(0.0) > 0.5;
+    p.displacement = num("displacement").filter(|d| *d > 0.0);
+    p.bpr = num("bypassratio").filter(|b| *b >= 0.0);
+    p.tsfc = num("tsfc").filter(|t| *t > 0.0);
+    p.atsfc = num("atsfc").filter(|t| *t > 0.0);
     Ok(p)
 }
 
@@ -1008,8 +1018,10 @@ pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], 
     match &mut s.engine {
         Engine::Piston(pe) => {
             pe.power = power;
-            // The engine: displacement and friction in proportion to its power.
-            pe.litres *= p;
+            // The engine: its own displacement where its file gives it (else in
+            // proportion to its power), friction in proportion to its power.
+            let cu_in: Option<f64> = eng.iter().map(|e| e.displacement).sum();
+            pe.litres = cu_in.map_or(pe.litres * p, |c| c * 0.016_387);
             pe.fric0 *= p;
             pe.fric1 *= p;
             // The propeller: a bigger disc for more power (diameter as the
@@ -1024,6 +1036,16 @@ pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], 
         Engine::Fan(f) => {
             f.thrust = mil / f.n as f64;
             f.boost = if augmented { wet / mil } else { 1.0 };
+            // Its build, where its file says (else the body's).
+            if let Some(b) = eng.iter().find_map(|e| e.bpr) {
+                f.bpr = b;
+            }
+            if let Some(t) = eng.iter().find_map(|e| e.tsfc) {
+                f.tsfc[0] = t;
+            }
+            if let Some(t) = eng.iter().find_map(|e| e.atsfc) {
+                f.tsfc[1] = t;
+            }
         }
         Engine::Rocket(_) => unreachable!("a rocket is never a downloaded type's body"),
     }

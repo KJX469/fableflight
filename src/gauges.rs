@@ -86,10 +86,31 @@ fn truth(p: &Plane) -> Truth {
     let running = smooth(250.0, 600.0, rpm);
     let thr = p.throttle;
     let eng = (p.dmg.engine as f64).clamp(0.0, 1.0);
-    // Manifold pressure: the outside air's, less what the throttle plate holds
-    // back while the engine draws; stopped, it reads the outside air.
+    // The engine gauges read the first engine (piston types have one): the
+    // manifold pressure it draws, and its exhaust, head and oil temperatures
+    // (propulsion/piston.rs; they warm and cool at their own rates there).
     let amb = 29.92 * p.atmos.pressure_ratio(h);
-    let mp = amb - amb * (0.62 - 0.6 * thr).max(0.0) * running;
+    let fahr = |k: f64| (k - 273.15) * 1.8 + 32.0;
+    let piston = p.engines.first().and_then(|u| match &u.kind {
+        crate::propulsion::unit::Kind::Piston { eng: e, .. } => Some(e),
+        _ => None,
+    });
+    let (mp, oil_t, cht, egt) = match piston {
+        Some(en) => {
+            let mp = if rpm > 30.0 { en.last.map / 3386.39 } else { amb };
+            // The EGT needle is uncalibrated, as in the aircraft: 900 °F at the
+            // bottom of its travel, 1,800 °F at the top.
+            (mp, fahr(en.oil_t), fahr(en.cht), ((fahr(en.egt) - 900.0) / 900.0).clamp(0.0, 1.0))
+        }
+        None => {
+            let mp = amb - amb * (0.62 - 0.6 * thr).max(0.0) * running;
+            let oil = 120.0 + (55.0 + 25.0 * thr + 90.0 * (1.0 - eng)) * running;
+            let cht = 60.0 + (220.0 + 110.0 * p.power.min(1.2) - 35.0 * (p.ias() / 55.0).min(1.5)) * if p.running { 1.0 } else { 0.0 };
+            (mp, oil, cht, (0.45 + 0.3 * thr) * running)
+        }
+    };
+    // Cold oil is thick: the pressure reads high until it warms.
+    let thick = 1.0 + 0.25 * (1.0 - smooth(60.0, 180.0, oil_t));
     Truth {
         ias_kt: p.ias() * 1.94384,
         alt_ft: h * 3.28084,
@@ -97,12 +118,10 @@ fn truth(p: &Plane) -> Truth {
         hdg: f.dot(e).atan2(f.dot(n)).to_degrees().rem_euclid(360.0),
         rpm,
         mp,
-        oil_t: 120.0 + (55.0 + 25.0 * thr + 90.0 * (1.0 - eng) + if p.spec.id == 0 { 20.0 * (1.0-p.cowl_flaps) } else { 0.0 }) * running,
-        // Cylinder heads answer combustion and cooling airflow faster than the oil.
-        cht: 60.0 + (220.0 + 110.0 * p.power.min(1.2) - 35.0 * (p.ias() / 55.0).min(1.5)
-            + 45.0 * (0.7 - p.mixture).max(0.0) + if p.spec.id == 0 { 60.0 * (1.0-p.cowl_flaps) } else { 0.0 }) * if p.running { 1.0 } else { 0.0 },
-        oil_p: (22.0 + 58.0 * smooth(500.0, 2300.0, rpm)) * eng.sqrt() * running,
-        egt: (0.45 + 0.3 * thr) * running,
+        oil_t,
+        cht,
+        oil_p: (22.0 + 58.0 * smooth(500.0, 2300.0, rpm)) * eng.sqrt() * running * thick,
+        egt,
         // The engine-driven vacuum pump: about 5 in. Hg from a fast idle up.
         suction: if p.sys.fail.vacuum { 0.0 } else { 5.2 * smooth(250.0, 1000.0, rpm).sqrt() * (0.4 + 0.6 * eng) },
     }
@@ -265,10 +284,12 @@ impl Gauges {
 
         // Engine: oil takes minutes, EGT seconds; pressure and revs follow at
         // once (the tach needle quivers a little).
-        self.oil_t = lag(self.oil_t, tr.oil_t, 140.0, dt);
-        self.cht = lag(self.cht, tr.cht, 45.0, dt);
+        // (The temperatures themselves already take their time in the engine;
+        // these are the probes' and capillaries' own lags.)
+        self.oil_t = lag(self.oil_t, tr.oil_t, 3.0, dt);
+        self.cht = lag(self.cht, tr.cht, 3.0, dt);
         self.oil_p = lag(self.oil_p, tr.oil_p, 0.6, dt);
-        self.egt = lag(self.egt, tr.egt, 3.0, dt);
+        self.egt = lag(self.egt, tr.egt, 1.0, dt);
         self.mp = lag(self.mp, tr.mp, 0.25, dt);
         self.rpm = lag(self.rpm, tr.rpm, 0.12, dt);
         // The alternator charges once the revs are up; below that the battery carries the load.
@@ -325,14 +346,24 @@ mod tests {
 
     #[test]
     fn closing_cowl_flaps_heats_cylinder_heads_independently() {
+        use crate::propulsion::unit::{Flight, Levers};
+        // Climbing at 2,500 ft and 65 kt, full power, cowl flaps open, then shut.
         let mut p = level(0.0);
-        p.running = true;
-        let mut g = Gauges::new(&p,3);
+        let fl = Flight { p: 92_500.0, t: 283.2, vb: glam::DVec3::new(0.0, 0.0, -33.0), omega: glam::DVec3::ZERO };
+        let lv = |cowl: f64| Levers { throttle: 1.0, mixture: 1.0, prop: 1.0, ignition: true, fuel: true, cowl, auto_mixture: true, ..Default::default() };
+        for _ in 0..3000 {
+            p.engines[0].step(&lv(1.0), &fl, 1.0, 1.0, 0.1);
+        }
+        let mut g = Gauges::new(&p, 3);
         let before = g.cht;
-        p.cowl_flaps = 0.0;
-        for _ in 0..600 { g.update(0.1,&p,0.0); }
-        assert!(g.cht > before + 25.0);
+        for _ in 0..3000 {
+            p.engines[0].step(&lv(0.0), &fl, 1.0, 1.0, 0.1);
+            g.update(0.1, &p, 0.0);
+        }
+        assert!(g.cht > before + 25.0, "{before} -> {}", g.cht);
         assert!(g.cht != g.oil_t * 1.6 + 30.0);
+        // and the heads are not cooked: under 500 °F
+        assert!(g.cht < 500.0, "{}", g.cht);
     }
 
     #[test]

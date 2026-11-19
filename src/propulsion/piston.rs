@@ -206,7 +206,7 @@ impl Piston {
         let demand = |w: f64, map: f64| ve(d, w, map, t_up, P0 * 1.05) * map / (R_AIR * t_up) * d.displacement * w / (4.0 * PI);
         p.a_max = demand(d.w_rated, 0.97 * p_up) / orifice(p_up, t_up, 0.97);
         let w_idle = 650.0 * TAU / 60.0;
-        p.a_idle = demand(w_idle, 0.33 * P0) / orifice(P0, T0, 0.33);
+        p.a_idle = demand(w_idle, 0.32 * P0) / orifice(P0, T0, 0.32);
         // The efficiency that makes rated power at best power there.
         let map = 0.97 * p_up;
         let m_air = demand(d.w_rated, map);
@@ -321,7 +321,8 @@ impl Piston {
         let w = inp.w.max(1.0);
         let pump = (p_exh - map).max(0.0) * d.displacement / (4.0 * PI);
         let torque = p_ind / w - self.friction(inp.w) - if inp.w > 0.5 { pump } else { 0.0 };
-        let fuel_flow = if firing || (inp.fuel && inp.w > 8.0 && inp.mixture > 0.03) { m_air * far } else { 0.0 };
+        // (A windmilling engine with its mixture in still draws fuel through; a failed one not.)
+        let fuel_flow = if firing || (inp.fuel && inp.w > 8.0 && inp.mixture > 0.03 && inp.health > 0.0) { m_air * far } else { 0.0 };
         // Near either limit it runs rough (and power comes and goes).
         let rough = if firing { 1.0 - smooth(0.6, 0.78, phi) * (1.0 - smooth(1.75, 2.2, phi)) } else { 0.0 };
 

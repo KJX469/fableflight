@@ -262,10 +262,12 @@ pub static SPEC: Spec = Spec {
         prop_d: 1.83,
         blades: 2,
         chord: 0.075,
-        pitch: crate::propulsion::prop::Pitch::Fixed(1.62),
+        pitch: crate::propulsion::prop::Pitch::Fixed(1.85),
         prop_i: 2.6,
-        fric0: 15.0,
-        fric1: 35.0,
+        // Friction and accessories, N m: a motoring FMEP near 0.8 bar turning
+        // over slowly, 1.6 bar at the red line (typical of air-cooled flat fours).
+        fric0: 30.0,
+        fric1: 45.0,
         mounts: &[crate::propulsion::Mount::ahead(PROP_HUB.x as f64, PROP_HUB.y as f64, PROP_HUB.z as f64, 1.0)],
         blade_break_y: PROP_HUB.y + 0.40,
     }),
