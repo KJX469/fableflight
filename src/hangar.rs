@@ -1008,17 +1008,18 @@ pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], 
     match &mut s.engine {
         Engine::Piston(pe) => {
             pe.power = power;
-            // The propeller takes p times the power at r times the speed, so
-            // it gives p / r times the thrust (the same efficiency, not r times it).
-            pe.ct0 *= p / r;
-            pe.cp0 *= p;
-            pe.static_thrust *= p / r;
+            // The engine: displacement and friction in proportion to its power.
+            pe.litres *= p;
             pe.fric0 *= p;
             pe.fric1 *= p;
+            // The propeller: a bigger disc for more power (diameter as the
+            // fourth root, as for real types), and a coarser pitch for a
+            // faster aircraft so that its thrust runs out at a higher speed.
+            pe.prop_d *= p.powf(0.25).clamp(0.8, 1.4);
             pe.prop_i *= p.sqrt();
-            // a coarser pitch for a faster aircraft: thrust runs out at a higher speed
-            pe.j_t *= r;
-            pe.j_p *= r;
+            if let crate::propulsion::prop::Pitch::Fixed(pitch) = &mut pe.pitch {
+                *pitch *= r;
+            }
         }
         Engine::Fan(f) => {
             f.thrust = mil / f.n as f64;

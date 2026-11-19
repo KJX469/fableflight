@@ -1520,6 +1520,18 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     ..crate::aero::Rig::BASE
 };
 
+// PW4056s, numbered left to right: thrust at the nacelles' centres (the fan
+// a few metres behind each inlet lip). Bypass ratio 4.85 and flat-rated to
+// ISA+15 °C (θ0 1.052); static specific fuel consumption 0.36 lb/lbf/h is
+// typical of the PW4000-94 family (an estimate: the exact figure was not
+// found). Ground idle to 95% thrust in about 7 s.
+const MOUNTS: [crate::propulsion::Mount; 4] = [
+    crate::propulsion::Mount::ahead(-ENGINES[1][0] as f64, by(ENGINES[1][1]) as f64, bz(ENGINES[1][2]) as f64 + 3.0, 1.0),
+    crate::propulsion::Mount::ahead(-ENGINES[0][0] as f64, by(ENGINES[0][1]) as f64, bz(ENGINES[0][2]) as f64 + 3.0, 1.0),
+    crate::propulsion::Mount::ahead(ENGINES[0][0] as f64, by(ENGINES[0][1]) as f64, bz(ENGINES[0][2]) as f64 + 3.0, 1.0),
+    crate::propulsion::Mount::ahead(ENGINES[1][0] as f64, by(ENGINES[1][1]) as f64, bz(ENGINES[1][2]) as f64 + 3.0, 1.0),
+];
+
 pub static SPEC: Spec = Spec {
     id: 1,
     name: "Boeing 747-400",
@@ -1663,7 +1675,7 @@ pub static SPEC: Spec = Spec {
     steer_max: 1.0,
     steer_fade: 12.0,
     // Four PW4056s, 252 kN (56,750 lbf) each.
-    engine: Engine::Fan(Fan { n: 4, thrust: 252_000.0, idle: 0.25, idle_thrust: 0.035, n1_rpm: 3600.0, spool_up: 0.6, spool_down: 0.5, reverse: 0.35, reverser_time: 2.0, boost: 1.08, mach_lapse: [0.78, 0.38], nozzle_z: 0.0 }),
+    engine: Engine::Fan(Fan { n: 4, thrust: 252_000.0, idle: 0.25, idle_n2: 0.62, idle_thrust: 0.035, n1_rpm: 3600.0, spool: [7.0, 4.0], reverse: 0.35, reverser_time: 2.0, boost: 1.08, bpr: 4.85, theta_break: 1.052, tsfc: [0.36, 0.0], nozzle_z: 0.0, mounts: &MOUNTS }),
     handling: Handling {
         q_ref: 11_000.0,
         a_max: 1.6,

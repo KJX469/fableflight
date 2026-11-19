@@ -655,6 +655,12 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     ..crate::aero::Rig::BASE
 };
 
+/// The two engines, left then right (see `engine` below).
+const MOUNTS: [crate::propulsion::Mount; 2] = [
+    crate::propulsion::Mount::ahead(-2.2, by(3.7) as f64, bz(24.0) as f64, 1.0),
+    crate::propulsion::Mount::ahead(2.2, by(3.7) as f64, bz(24.0) as f64, 1.0),
+];
+
 pub static SPEC: Spec = Spec {
     id: 9,
     rig: Some(&RIG),
@@ -840,8 +846,17 @@ pub static SPEC: Spec = Spec {
     // taxi brake-energy planning assumes (and idle reverse, which it allows
     // without limit for taxiing: G450 AFM excerpt at
     // https://code450.squarespace.com/brake-energy).
-    // Their nozzles' exits are 24.0 m behind the radome's tip.
-    engine: Engine::Fan(Fan { n: 2, thrust: 75_200.0, idle: 0.24, idle_thrust: 0.035, n1_rpm: 7_000.0, spool_up: 0.7, spool_down: 0.6, reverse: 0.30, reverser_time: 2.0, boost: 1.08, mach_lapse: [0.72, 0.36], nozzle_z: bz(24.0) as f64 }),
+    // Bypass ratio 4.35 (ICAO databank); sea-level static TSFC 0.37 lb/lbf/h
+    // from its take-off fuel flow, 0.789 kg/s at 75.2 kN. Flat rated to about
+    // ISA+15 (θ break 1.052, an estimate: the TCDS gives the rating only).
+    // Two spools; core idle near 62% N2 (an estimate). Ground idle to 95%
+    // thrust in about 7 s, back down in about 4.5 (estimates, which put flight
+    // idle to 90% at some 4-5 s: inside the 8 s CS 25.119 allows a go-around).
+    // The nacelles hang off the rear fuselage 2.2 m either side of the
+    // centreline, their axes about 3.7 m above the ground (from the pod
+    // contact points above, the BR725's 1.27 m fan within them); their
+    // nozzles' exits are 24.0 m behind the radome's tip.
+    engine: Engine::Fan(Fan { n: 2, thrust: 75_200.0, idle: 0.24, idle_n2: 0.62, idle_thrust: 0.035, n1_rpm: 7_000.0, spool: [7.0, 4.5], reverse: 0.30, reverser_time: 2.0, boost: 1.08, bpr: 4.35, theta_break: 1.052, tsfc: [0.37, 0.0], nozzle_z: bz(24.0) as f64, mounts: &MOUNTS }),
     // Estimates: the 747's, quicker (about 25 deg/s of roll at 250 kt; no
     // outboard-aileron lockout), little adverse yaw (the fly-by-wire
     // coordinates the turn), and a sharper wing drop in a stall (its

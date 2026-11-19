@@ -357,6 +357,19 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     ..crate::aero::Rig::BASE
 };
 
+// Olympus 593 Mk 610s: two-spool turbojets, built to cruise at Mach 2
+// (θ0 1.35 at Mach 2, 55,000 ft, so full thrust holds to there). The
+// static fuel consumption, 0.89 lb/lbf/h dry, is what gives the published
+// 1.195 in the Mach 2.04 cruise with the model's lapse (Wikipedia, "Thrust-
+// specific fuel consumption"); 1.39 with reheat is an estimate. Nozzles in
+// pairs under the wings, about 1.6 m apart (estimated from the nacelles).
+const MOUNTS: [crate::propulsion::Mount; 4] = [
+    crate::propulsion::Mount::ahead(-6.23, -1.92, 18.9, 1.0),
+    crate::propulsion::Mount::ahead(-4.63, -1.92, 18.9, 1.0),
+    crate::propulsion::Mount::ahead(4.63, -1.92, 18.9, 1.0),
+    crate::propulsion::Mount::ahead(6.23, -1.92, 18.9, 1.0),
+];
+
 pub static SPEC: Spec = Spec {
     id: 6,
     name: "Concorde",
@@ -518,7 +531,7 @@ pub static SPEC: Spec = Spec {
     // thrust than standing still up to Mach 1, then more and more, until at
     // Mach 2 they make nearly twice what the thin air alone would leave them,
     // which is what cruises it there without reheat (`inlet_mach` stops it there).
-    engine: Engine::Fan(Fan { n: 4, thrust: 140_000.0, idle: 0.6, idle_thrust: 0.05, n1_rpm: 6_500.0, spool_up: 0.8, spool_down: 0.6, reverse: 0.3, reverser_time: 2.0, boost: 1.2093, mach_lapse: [0.28, 0.35], nozzle_z: 18.9 }),
+    engine: Engine::Fan(Fan { n: 4, thrust: 140_000.0, idle: 0.6, idle_n2: 0.68, idle_thrust: 0.05, n1_rpm: 6_500.0, spool: [5.0, 3.0], reverse: 0.3, reverser_time: 2.0, boost: 1.2093, bpr: 0.0, theta_break: 1.35, tsfc: [0.89, 1.39], nozzle_z: 18.9, mounts: &MOUNTS }),
     // Estimates: an airliner's, quicker in roll than the 747 (a short span and powerful elevons) and with no stall break.
     handling: Handling {
         q_ref: 11_000.0,

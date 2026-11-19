@@ -57,6 +57,14 @@ pub struct JetData {
     pub reverse: f64,
     /// the inlet's capture area (m²): ram drag when windmilling
     pub inlet: f64,
+    /// a fixed-geometry or turbo-ramjet inlet's design Mach number (0: no
+    /// limit): past it the inlet chokes and under half the thrust is left a
+    /// tenth of a Mach beyond
+    pub inlet_mach: f64,
+    /// the Mach number by which the dry thrust has all but gone (0: it lapses
+    /// as the family does): a turbojet built to cruise in afterburner, its
+    /// core doing less and less as the bypass bleed takes over
+    pub dry_mach: f64,
 }
 
 impl JetData {
@@ -216,7 +224,7 @@ impl Jet {
 
     fn spool(&mut self, throttle: f64, fuel: bool, starter: bool, health: f64, dt: f64) {
         let d = &self.data;
-        let [i1, i2] = d.idle;
+        let i2 = d.idle[1];
         if !fuel || health <= 0.0 {
             self.running = false;
         } else if !self.running && self.n2 > 0.55 * i2 {
@@ -248,9 +256,11 @@ impl Jet {
     pub fn available(&self, amb: &Ambient) -> (f64, f64) {
         let d = &self.data;
         let (th0, d0, m) = (amb.theta0(), amb.delta0(), amb.mach);
-        let dry = d.thrust * lapse_family(d.bpr, false, th0, d0, m, d.theta_break);
-        let wet = if d.wet > 0.0 { d.wet * lapse_family(d.bpr, true, th0, d0, m, d.theta_break) } else { dry };
-        (dry, wet.max(dry))
+        let inlet = if d.inlet_mach > 0.0 { 1.0 - 0.65 * smooth(d.inlet_mach - 0.05, d.inlet_mach + 0.15, m) } else { 1.0 };
+        let fade = if d.dry_mach > 0.0 { 1.0 - 0.97 * smooth(0.4 * d.dry_mach, d.dry_mach, m) } else { 1.0 };
+        let dry = d.thrust * lapse_family(d.bpr, false, th0, d0, m, d.theta_break) * inlet;
+        let wet = if d.wet > 0.0 { d.wet * lapse_family(d.bpr, true, th0, d0, m, d.theta_break) * inlet } else { dry };
+        (dry * fade, wet.max(dry * fade))
     }
 
     pub fn step(&mut self, inp: &JetIn, dt: f64) -> JetOut {
@@ -316,6 +326,8 @@ mod tests {
             n1_rpm: 3650.0,
             reverse: 0.4,
             inlet: JetData::inlet_for(206_800.0, 5.0),
+            inlet_mach: 0.0,
+            dry_mach: 0.0,
         })
     }
     /// An F404-class low-bypass afterburning turbofan: 11,000 / 17,700 lbf, BPR 0.34.
@@ -334,6 +346,8 @@ mod tests {
             n1_rpm: 13_200.0,
             reverse: 0.0,
             inlet: JetData::inlet_for(48_900.0, 0.34),
+            inlet_mach: 0.0,
+            dry_mach: 0.0,
         })
     }
     fn run(j: &mut Jet, throttle: f64, burner: bool, amb: Ambient, secs: f64) -> JetOut {

@@ -362,6 +362,11 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     ..crate::aero::Rig::BASE
 };
 
+// F404-GE-402s: low-bypass (0.34) afterburning turbofans, 0.81 lb/lbf/h dry
+// and 1.74 in afterburner (GE's figures); θ0 1.08 an estimate. Nozzles about
+// 0.55 m either side of the centreline (estimated).
+const MOUNTS: [crate::propulsion::Mount; 2] = [crate::propulsion::Mount::ahead(-0.55, 0.0, 8.0, 1.0), crate::propulsion::Mount::ahead(0.55, 0.0, 8.0, 1.0)];
+
 pub static SPEC: Spec = Spec {
     id: 2,
     name: "F/A-18C Hornet",
@@ -499,7 +504,7 @@ pub static SPEC: Spec = Spec {
     steer_fade: 15.0,
     // Two F404-GE-402s: 79.2 kN each in afterburner (Space); the dry figure is a
     // little under the book 48.9 kN so it does not supercruise down low.
-    engine: Engine::Fan(Fan { n: 2, thrust: 44_000.0, idle: 0.62, idle_thrust: 0.06, n1_rpm: 13_200.0, spool_up: 1.0, spool_down: 0.8, reverse: 0.0, reverser_time: 1.0, boost: 1.8, mach_lapse: [0.25, 0.45], nozzle_z: 8.0 }),
+    engine: Engine::Fan(Fan { n: 2, thrust: 44_000.0, idle: 0.62, idle_n2: 0.7, idle_thrust: 0.06, n1_rpm: 13_200.0, spool: [4.0, 2.5], reverse: 0.0, reverser_time: 1.0, boost: 1.8, bpr: 0.34, theta_break: 1.08, tsfc: [0.81, 1.74], nozzle_z: 8.0, mounts: &MOUNTS }),
     handling: Handling {
         q_ref: 8_000.0,
         a_max: 3.5,

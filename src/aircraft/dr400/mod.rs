@@ -246,21 +246,27 @@ pub static SPEC: Spec = Spec {
     fbw_g: 0.0,
     steer_max: 0.45,
     steer_fade: 0.0,
-    // 180 hp at 2700 rpm turning a 72 in two-blade fixed-pitch propeller.
+    // Lycoming O-360-A3A: 180 hp at 2,700 rpm, 361 cu in (5.92 l),
+    // carburetted, turning a two-blade fixed-pitch metal propeller of 72 in
+    // (as modelled). Its pitch is set for the cruise as the /180's: about
+    // 2,350 rpm static and 2,700 flat out and level (the pitch is found to
+    // give those, an estimate; the exact Sensenich pitch was not found).
+    // Clockwise seen from the cockpit; no cowl flaps.
     engine: Engine::Piston(Piston {
-        power: 134_000.0,
+        power: 134_226.0,
         w_rated: 2700.0 * std::f64::consts::TAU / 60.0,
+        litres: 5.916,
+        carb: true,
+        boost: crate::propulsion::piston::Boost::None,
+        cowl_flaps: false,
         prop_d: 1.83,
-        // Pitched for the cruise (the 76EM8 of the /180): about 2350 rpm
-        // static, 2700 flat out and level.
-        ct0: 0.109,
-        cp0: 0.072,
-        j_t: 1.25,
-        j_p: 1.97,
+        blades: 2,
+        chord: 0.075,
+        pitch: crate::propulsion::prop::Pitch::Fixed(1.62),
         prop_i: 2.6,
-        static_thrust: 2400.0,
         fric0: 15.0,
         fric1: 35.0,
+        mounts: &[crate::propulsion::Mount::ahead(PROP_HUB.x as f64, PROP_HUB.y as f64, PROP_HUB.z as f64, 1.0)],
         blade_break_y: PROP_HUB.y + 0.40,
     }),
     // The Cessna's, quicker in roll (shorter span, a stick, light ailerons).

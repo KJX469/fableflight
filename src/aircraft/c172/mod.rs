@@ -224,19 +224,28 @@ pub static SPEC: Spec = Spec {
     fbw_g: 0.0,
     steer_max: 0.45,
     steer_fade: 0.0,
-    // 180 hp at 2700 rpm turning a 76 in fixed-pitch propeller.
+    // Lycoming O-360-F1A6: 180 hp at 2,700 rpm, 361 cu in (5.92 l),
+    // carburetted (AVweb, "Cessna 172RG Cutlass RG"; Lycoming O-360 operator's
+    // manual). A two-blade McCauley constant-speed propeller of 76 in; its
+    // pitch stops and the governor's low end are estimates (fine about 13°,
+    // coarse 30° at 75% radius; the governor from 1,800 rpm to the 2,700
+    // red line). The blade chord matches the modelled blades (about 0.137 m
+    // at 75% radius). Turns clockwise seen from the cockpit. Cowl flaps.
     engine: Engine::Piston(Piston {
-        power: 134_000.0,
+        power: 134_226.0,
         w_rated: 2700.0 * std::f64::consts::TAU / 60.0,
+        litres: 5.916,
+        carb: true,
+        boost: crate::propulsion::piston::Boost::None,
+        cowl_flaps: true,
         prop_d: 1.93,
-        ct0: 0.096,
-        cp0: 0.059,
-        j_t: 1.05,
-        j_p: 1.5,
+        blades: 2,
+        chord: 0.071,
+        pitch: crate::propulsion::prop::Pitch::Constant { fine: 13.0, coarse: 30.0, rpm: [1800.0, 2700.0], feather: 0.0 },
         prop_i: 3.0,
-        static_thrust: 2500.0,
         fric0: 15.0,
         fric1: 35.0,
+        mounts: &[crate::propulsion::Mount::ahead(PROP_HUB.x as f64, PROP_HUB.y as f64, PROP_HUB.z as f64, 1.0)],
         blade_break_y: PROP_HUB.y + 0.42,
     }),
     handling: Handling {

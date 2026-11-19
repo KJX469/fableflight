@@ -13,6 +13,7 @@
 pub mod jet;
 pub mod piston;
 pub mod prop;
+pub mod unit;
 
 use glam::DVec3;
 
@@ -79,6 +80,58 @@ pub struct Mount {
 impl Mount {
     pub const fn ahead(x: f64, y: f64, z: f64, spin: f64) -> Mount {
         Mount { at: DVec3::new(x, y, z), axis: DVec3::NEG_Z, spin }
+    }
+}
+
+/// The engines a type flies with, one per mount, from its data.
+pub fn units(spec: &crate::aircraft::Spec) -> Vec<unit::Unit> {
+    use crate::aircraft::Engine;
+    use unit::{Kind, Unit};
+    match &spec.engine {
+        Engine::Piston(pe) => {
+            let eng = piston::Piston::new(piston::PistonData {
+                power: pe.power,
+                w_rated: pe.w_rated,
+                displacement: pe.litres * 1e-3,
+                fric0: pe.fric0,
+                fric1: pe.fric1,
+                rich_far: 0.085,
+                carb: pe.carb,
+                boost: pe.boost,
+                cowl_flaps: pe.cowl_flaps,
+            });
+            let prop = prop::Prop::new(prop::PropData { d: pe.prop_d, blades: pe.blades, chord: pe.chord, pitch: pe.pitch, inertia: pe.prop_i, gear: 1.0 });
+            let mounts: &[Mount] = if pe.mounts.is_empty() { &[Mount::ahead(0.0, 0.0, -2.0, 1.0)] } else { pe.mounts };
+            mounts.iter().map(|m| Unit::new(*m, Kind::Piston { eng: eng.clone(), prop: prop.clone() })).collect()
+        }
+        Engine::Fan(fe) => {
+            let jet = jet::Jet::new(jet::JetData {
+                thrust: fe.thrust,
+                wet: if fe.boost >= 1.2 { fe.thrust * fe.boost } else { 0.0 },
+                bpr: fe.bpr,
+                theta_break: fe.theta_break,
+                tsfc: fe.tsfc[0] * jet::LB_LBF_H,
+                tsfc_wet: fe.tsfc[1] * jet::LB_LBF_H,
+                idle: [fe.idle, fe.idle_n2],
+                idle_thrust: fe.idle_thrust,
+                spool_up: fe.spool[0],
+                spool_down: fe.spool[1],
+                n1_rpm: fe.n1_rpm,
+                reverse: fe.reverse,
+                inlet: jet::JetData::inlet_for(fe.thrust, fe.bpr),
+                inlet_mach: spec.inlet_mach,
+                dry_mach: spec.dry_mach,
+            });
+            (0..fe.n)
+                .map(|i| {
+                    // A type without mounts of its own (or fewer than its
+                    // engines) has them all on the centreline at the nozzles.
+                    let m = fe.mounts.get(i).copied().unwrap_or(Mount::ahead(0.0, 0.0, fe.nozzle_z, 1.0));
+                    Unit::new(m, Kind::Jet(jet.clone()))
+                })
+                .collect()
+        }
+        Engine::Rocket(_) => Vec::new(),
     }
 }
 

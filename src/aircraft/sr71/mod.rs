@@ -324,6 +324,12 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     ..crate::aero::Rig::BASE
 };
 
+// J58s: single-spool afterburning turbojets that bleed air around the core
+// past Mach 2 (a turbo-ramjet), built for Mach 3.2 (θ0 about 2.3 there).
+// Fuel consumption 1.9 lb/lbf/h in afterburner (Wikipedia, "Pratt & Whitney
+// J58"); 0.9 dry is an estimate. On the nacelle centrelines.
+const MOUNTS: [crate::propulsion::Mount; 2] = [crate::propulsion::Mount::ahead(-ENGINE_X as f64, ENGINE_Y as f64, 12.4 - CG, 1.0), crate::propulsion::Mount::ahead(ENGINE_X as f64, ENGINE_Y as f64, 12.4 - CG, 1.0)];
+
 pub static SPEC: Spec = Spec {
     id: 7,
     name: "SR-71A Blackbird",
@@ -489,7 +495,7 @@ pub static SPEC: Spec = Spec {
     // settles near Mach 3.2 to 3.25, under its limit). Without the
     // afterburners there is none of that (`dry_mach`): military power will
     // not keep it supersonic, and at Mach 3 it is next to nothing.
-    engine: Engine::Fan(Fan { n: 2, thrust: 80_070.0, idle: 0.65, idle_thrust: 0.05, n1_rpm: 7_400.0, spool_up: 0.6, spool_down: 0.5, reverse: 0.0, reverser_time: 1.0, boost: 1.4167, mach_lapse: [0.25, 0.6064], nozzle_z: 12.4 - CG }),
+    engine: Engine::Fan(Fan { n: 2, thrust: 80_070.0, idle: 0.65, idle_n2: 0.65, idle_thrust: 0.05, n1_rpm: 7_400.0, spool: [6.0, 3.0], reverse: 0.0, reverser_time: 1.0, boost: 1.4167, bpr: 0.0, theta_break: 2.3, tsfc: [0.9, 1.9], nozzle_z: 12.4 - CG, mounts: &MOUNTS }),
     // Estimates: a big, heavy delta flown through stability augmentation,
     // slow to answer in pitch and roll, with little stick to pull g with.
     handling: Handling {

@@ -304,6 +304,12 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     ..crate::aero::Rig::BASE
 };
 
+// J79-GE-17As: single-spool afterburning turbojets (so N1 is N2), 0.84
+// lb/lbf/h dry and 1.97 in afterburner (GE's published figures); the
+// temperature limit (θ0 1.1) is an estimate. Nozzles about 0.6 m either
+// side of the centreline (estimated).
+const MOUNTS: [crate::propulsion::Mount; 2] = [crate::propulsion::Mount::ahead(-0.6, -0.3, 4.8, 1.0), crate::propulsion::Mount::ahead(0.6, -0.3, 4.8, 1.0)];
+
 pub static SPEC: Spec = Spec {
     id: 3,
     name: "F-4E Phantom II",
@@ -448,7 +454,7 @@ pub static SPEC: Spec = Spec {
     // lapse and the wave drag are set against each other so that it stays just
     // subsonic dry down low, and the ram air takes it past Mach 2 at 40,000 ft
     // in afterburner (by the book 2.23; it takes minutes and most of the fuel).
-    engine: Engine::Fan(Fan { n: 2, thrust: 52_960.0, idle: 0.65, idle_thrust: 0.05, n1_rpm: 7_460.0, spool_up: 0.7, spool_down: 0.6, reverse: 0.0, reverser_time: 1.0, boost: 1.5, mach_lapse: [0.4085, 0.6885], nozzle_z: 4.8 }),
+    engine: Engine::Fan(Fan { n: 2, thrust: 52_960.0, idle: 0.65, idle_n2: 0.65, idle_thrust: 0.05, n1_rpm: 7_460.0, spool: [5.0, 3.0], reverse: 0.0, reverser_time: 1.0, boost: 1.5, bpr: 0.0, theta_break: 1.1, tsfc: [0.84, 1.97], nozzle_z: 4.8, mounts: &MOUNTS }),
     // Heavier on the controls than the Hornet and less forgiving: the stick
     // moves the slab directly, the ailerons drag the nose the wrong way at
     // a high angle of attack, and a stalled wing goes with any yaw.

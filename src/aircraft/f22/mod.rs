@@ -289,6 +289,13 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     ..crate::aero::Rig::BASE
 };
 
+// F119-PW-100s: low-bypass (0.3) afterburning turbofans, built to
+// supercruise, so they hold full dry thrust to a high inlet temperature
+// (θ0 1.2, an estimate). Fuel consumption from the estimates above (0.79
+// and 1.87 lb/lbf/h). Nozzles about 0.6 m either side of the centreline
+// (estimated).
+const MOUNTS: [crate::propulsion::Mount; 2] = [crate::propulsion::Mount::ahead(-0.6, 0.0, 7.3, 1.0), crate::propulsion::Mount::ahead(0.6, 0.0, 7.3, 1.0)];
+
 pub static SPEC: Spec = Spec {
     id: 4,
     name: "F-22A Raptor",
@@ -434,7 +441,7 @@ pub static SPEC: Spec = Spec {
     // other so that at military power it stays near Mach 1.1 down low but
     // supercruises at 40,000 ft (Mach 1.5 here; 1.76 by the book), and the
     // afterburners take it on to its Mach 2.25 limit there, not far past it.
-    engine: Engine::Fan(Fan { n: 2, thrust: 115_700.0, idle: 0.62, idle_thrust: 0.05, n1_rpm: 10_000.0, spool_up: 1.0, spool_down: 0.8, reverse: 0.0, reverser_time: 1.0, boost: 1.346, mach_lapse: [0.1882, 0.3782], nozzle_z: 7.3 }),
+    engine: Engine::Fan(Fan { n: 2, thrust: 115_700.0, idle: 0.62, idle_n2: 0.7, idle_thrust: 0.05, n1_rpm: 10_000.0, spool: [3.5, 2.5], reverse: 0.0, reverser_time: 1.0, boost: 1.346, bpr: 0.3, theta_break: 1.2, tsfc: [0.79, 1.87], nozzle_z: 7.3, mounts: &MOUNTS }),
     // Estimates: the Hornet's, with more authority about every axis and a gentler stall.
     handling: Handling {
         q_ref: 8_000.0,

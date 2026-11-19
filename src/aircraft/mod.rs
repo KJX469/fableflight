@@ -261,54 +261,63 @@ pub struct Tail {
     pub stab_tip: DVec3,
 }
 
-/// A piston engine turning a fixed-pitch propeller.
+/// Piston engines, each turning a propeller (propulsion/piston.rs, prop.rs).
 #[derive(Clone)]
 pub struct Piston {
-    /// rated power (W) at rated revs (rad/s)
+    /// rated power of each (W) at rated revs (rad/s), and its swept volume (litres)
     pub power: f64,
     pub w_rated: f64,
-    /// propeller diameter (m); thrust and power coefficients at rest; the
-    /// advance ratios where thrust and then the power it takes run out
+    pub litres: f64,
+    /// carburetted (it can ice; carb heat), how it is boosted, and whether it has cowl flaps
+    pub carb: bool,
+    pub boost: crate::propulsion::piston::Boost,
+    pub cowl_flaps: bool,
+    /// propeller: diameter (m), blades, chord at 75% radius over the diameter, pitch
     pub prop_d: f64,
-    pub ct0: f64,
-    pub cp0: f64,
-    pub j_t: f64,
-    pub j_p: f64,
+    pub blades: u32,
+    pub chord: f64,
+    pub pitch: crate::propulsion::prop::Pitch,
     /// propeller, crankshaft and flywheel (kg m²)
     pub prop_i: f64,
-    /// about the static thrust at full power (scale for torque and slipstream effects)
-    pub static_thrust: f64,
     /// friction and pumping losses: constant and at rated revs (N m)
     pub fric0: f64,
     pub fric1: f64,
+    /// each engine's propeller hub and which way it turns (seen from behind)
+    pub mounts: &'static [crate::propulsion::Mount],
     /// height of the propeller hub and where a broken blade snaps (body y)
     pub blade_break_y: f32,
 }
 
-/// High-bypass turbofans.
+/// Gas turbines: turbofans or turbojets (propulsion/jet.rs).
 #[derive(Clone)]
 pub struct Fan {
     pub n: usize,
     /// sea-level static thrust of each (N)
     pub thrust: f64,
-    /// fan speed at idle (fraction of N1) and the thrust it gives (fraction)
+    /// fan and core speeds at idle (fractions of 100%), and the thrust it gives (fraction)
     pub idle: f64,
+    pub idle_n2: f64,
     pub idle_thrust: f64,
     /// fan revs at 100% N1
     pub n1_rpm: f64,
-    /// how quickly the fan spools up and down (1/s near the top)
-    pub spool_up: f64,
-    pub spool_down: f64,
+    /// seconds from idle to 95% thrust, and back down
+    pub spool: [f64; 2],
     /// reverse thrust as a fraction of forward, and how long the reversers take to deploy (s)
     pub reverse: f64,
     pub reverser_time: f64,
     /// thrust with the boost key held, as a multiple of full dry thrust (an afterburner)
     pub boost: f64,
-    /// thrust lapse with Mach number m: 1 - a m + b m² (a high-bypass fan loses thrust
-    /// as it speeds up; a low-bypass afterburning engine gains it from the ram air)
-    pub mach_lapse: [f64; 2],
+    /// bypass ratio (0 a turbojet), and the θ0 (inlet total temperature over
+    /// 288.15 K) where it reaches its temperature limit: about 1.05 for an
+    /// airliner flat-rated to a hot day, more for an engine built to fly fast
+    pub bpr: f64,
+    pub theta_break: f64,
+    /// static sea-level specific fuel consumption (lb/lbf/h), dry and with the afterburner
+    pub tsfc: [f64; 2],
     /// station of the nozzle exits (body z), where the afterburners' light comes from
     pub nozzle_z: f64,
+    /// each engine's nozzle exit and thrust line
+    pub mounts: &'static [crate::propulsion::Mount],
 }
 
 /// One stage of a rocket. Stations are body z (the nose is at -z).

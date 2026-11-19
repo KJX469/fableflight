@@ -187,7 +187,12 @@ pub struct Plane {
     pub fuel_selector: FuelSelector,
     pub engine_hours: f64,
     pub propeller: f64,
-    prop_coarse: f64,
+    /// each engine on its own (propulsion/): its lever, state and loads
+    pub engines: Vec<crate::propulsion::unit::Unit>,
+    /// the auto-mixture assist holds the best mixture for the power (on by
+    /// default, as the auto-trim is); carburettor heat (0..1)
+    pub auto_mixture: bool,
+    pub carb_heat: f64,
     pub cowl_flaps: f64,
     auto_start: f64,
     /// the electrical system and the failures (systems.rs)
@@ -244,9 +249,11 @@ pub struct Plane {
     pub aero_st: aero::State,
     pub pitch_trim: f64,
     pub auto_trim: bool,
-    /// the propeller's thrust (N) and torque (N m) last step, for its slipstream and torque reaction
+    /// the propellers' thrust (N) last step, for their slipstream; the force
+    /// and moment (body frame, about the reference CG) all the engines put on it
     last_thrust: f64,
-    last_torque: f64,
+    eng_force: DVec3,
+    eng_moment: DVec3,
     /// the aileron and rudder rigging (see `aero::Input::rigging`)
     rigging: [f64; 2],
     /// the control surfaces as the flight control system sets them (pitch,
@@ -402,7 +409,9 @@ impl Plane {
             fuel_selector: FuelSelector::Center,
             engine_hours: 1834.6,
             propeller: 1.0,
-            prop_coarse: 0.0,
+            engines: crate::propulsion::units(spec),
+            auto_mixture: true,
+            carb_heat: 0.0,
             cowl_flaps: 1.0,
             auto_start: 0.0,
             sys: Default::default(),
@@ -483,7 +492,8 @@ impl Plane {
             pitch_trim: 0.0,
             auto_trim: true,
             last_thrust: 0.0,
-            last_torque: 0.0,
+            eng_force: DVec3::ZERO,
+            eng_moment: DVec3::ZERO,
             rigging: [0.0; 2],
             surf: DVec3::ZERO,
             fcs_i: 0.0,
@@ -515,13 +525,11 @@ impl Plane {
         if p.airframe.is_some() && speed > 20.0 {
             // Trimmed again with the slipstream that power gives over the tail.
             for _ in 0..2 {
-                p.engine_state(speed, rho);
                 p.trim_strips(speed, (rho, sound_speed(alt)));
                 p.throttle = p.throttle_for(speed, alt, 0.0, 0.0, 0.0);
                 p.charge = p.throttle;
                 p.settle_engine(speed, alt);
             }
-            p.engine_state(speed, rho);
         }
         p.rot = DQuat::from_mat3(&DMat3::from_cols(f.cross(u), u, -f)) * DQuat::from_rotation_x(p.trim);
         p
@@ -545,14 +553,11 @@ impl Plane {
         p.throttle = 0.0;
         p.charge = 0.0;
         p.power = 0.0;
-        match &spec.engine {
-            Engine::Piston(_) => p.prop_rate = 65.0,
-            Engine::Fan(fe) => {
-                p.n1 = fe.idle;
-                p.prop_rate = fe.idle * fe.n1_rpm * std::f64::consts::TAU / 60.0;
-            }
-            Engine::Rocket(_) => {}
+        for u in &mut p.engines {
+            u.idle();
         }
+        p.engines_out();
+        (p.last_thrust, p.eng_force, p.eng_moment) = (0.0, DVec3::ZERO, DVec3::ZERO);
         p.trim = 0.08;
         if p.airframe.is_some() {
             // Trim set for the climb-out, as the checklist has it.
@@ -654,6 +659,11 @@ impl Plane {
     pub fn cold_and_dark(&mut self) {
         (self.ignition, self.mixture, self.running, self.starter_on, self.auto_start) = (false, 0.0, false, false, 0.0);
         (self.throttle, self.charge, self.power, self.prop_rate, self.n1, self.fuel_flow) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let t = atmosphere(geo::pos_to_lla(self.pos).2).0;
+        for u in &mut self.engines {
+            u.stop(t);
+        }
+        (self.last_thrust, self.eng_force, self.eng_moment) = (0.0, DVec3::ZERO, DVec3::ZERO);
         self.sys.elec.master = false;
     }
 
@@ -1352,97 +1362,86 @@ impl Plane {
 
     // ---------------------------------------------------------------- engines
 
-    /// The torque the engine's cylinders make (N m, before friction) with the
-    /// throttle `open` (0 at the idle stop .. 1). A normally aspirated engine
-    /// loses power with the air (Gagg-Ferrar); `boost` is the game's
-    /// over-boost, nothing a real 172 has.
-    fn engine_torque(pe: &crate::aircraft::Piston, open: f64, rho: f64, boost: bool, health: f64) -> f64 {
-        let sigma = rho / RHO0;
-        let alt = ((sigma - 0.12) / 0.88).max(0.0);
-        (pe.power / pe.w_rated + Self::friction(pe, pe.w_rated)) * alt * (0.11 + 0.89 * open.clamp(0.0, 1.0)) * health * if boost { 1.35 } else { 1.0 }
-    }
-    /// Friction and pumping losses (N m) at shaft speed `w` (rad/s).
-    fn friction(pe: &crate::aircraft::Piston, w: f64) -> f64 {
-        pe.fric0 + pe.fric1 * (w / pe.w_rated).powi(2)
-    }
-    /// The fixed-pitch propeller turning at `w` rad/s with the air coming at
-    /// it at `v`: its thrust (N) and the torque it takes (N m; negative when
-    /// the air drives it round). `k` is what is left of the blades.
-    /// Ct = Ct0 (1 - (J/Jt)²), Cp = Cp0 (1 - (J/Jp)²), written in n² so a
-    /// stopped propeller needs no special case.
-    pub fn prop_load(pe: &crate::aircraft::Piston, w: f64, v: f64, rho: f64, k: f64) -> (f64, f64) {
-        let n = w / std::f64::consts::TAU;
-        let vd = v.max(0.0) / pe.prop_d;
-        let t = pe.ct0 * rho * pe.prop_d.powi(4) * (n * n - (vd / pe.j_t).powi(2));
-        let q = pe.cp0 * rho * pe.prop_d.powi(5) / std::f64::consts::TAU * (n * n - (vd / pe.j_p).powi(2));
-        // Windmilling, or stopped, it drags no worse than a flat plate the size of its blades.
-        let t = t.max(-0.28 * 0.5 * rho * v * v);
-        (t * k, q * k)
-    }
-    /// The revs (rad/s) an undamaged engine and propeller settle at.
-    pub fn prop_equilibrium(pe: &crate::aircraft::Piston, throttle: f64, v: f64, rho: f64) -> f64 {
-        let (mut lo, mut hi) = (0.0, 2.0 * pe.w_rated);
-        for _ in 0..50 {
-            let w = 0.5 * (lo + hi);
-            if Self::engine_torque(pe, throttle, rho, false, 1.0) - Self::friction(pe, w) > Self::prop_load(pe, w, v, rho, 1.0).1 { lo = w } else { hi = w }
-        }
-        0.5 * (lo + hi)
-    }
-    /// The fan speed (fraction of N1) the throttle asks for.
-    fn n1_target(fe: &crate::aircraft::Fan, throttle: f64) -> f64 {
-        fe.idle + (1.0 - fe.idle) * throttle.clamp(0.0, 1.0)
-    }
-    /// Thrust of all the fans together (N) at fan speed `n1`, true airspeed
-    /// `v`, height `h`: a fraction of the static thrust that grows steeply
-    /// with the fan speed, lapsing with the density and with the Mach number
-    /// (the faster it flies, the less the fan adds to the air it swallows).
-    pub fn fan_thrust(fe: &crate::aircraft::Fan, n1: f64, v: f64, h: f64, atm: &Atmos) -> f64 {
-        let x = ((n1 - fe.idle) / (1.0 - fe.idle)).max(0.0);
-        let frac = if n1 >= fe.idle { fe.idle_thrust + (1.0 - fe.idle_thrust) * x.powf(1.7) } else { fe.idle_thrust * (n1 / fe.idle).powi(2) };
-        let m = v / atm.sound_speed(h);
-        let sigma = atm.density(h) / RHO0;
-        fe.n as f64 * fe.thrust * frac * sigma.powf(0.8) * (1.0 - fe.mach_lapse[0] * m + fe.mach_lapse[1] * m * m).max(0.05)
-    }
-    /// What a turbo-ramjet's inlets pass of its thrust at this Mach number:
-    /// all of it up to the speed they are built for, under half of it a tenth
-    /// of a Mach past that (see `Spec::inlet_mach`; 1 for any other engine).
-    fn inlet(&self, mach: f64) -> f64 {
-        let im = self.spec.inlet_mach;
-        if im > 0.0 { 1.0 - 0.65 * smooth(im - 0.05, im + 0.15, mach) } else { 1.0 }
-    }
-    /// What is left of the thrust without the afterburners at this Mach
-    /// number, for an engine built to cruise in them (see `Spec::dry_mach`; 1
-    /// for any other engine): the ram air that swells its afterburning thrust
-    /// does nothing for its core, which makes a little less the faster it
-    /// goes and next to nothing by `dry_mach`.
-    fn dry_fade(&self, fe: &crate::aircraft::Fan, mach: f64) -> f64 {
-        let dm = self.spec.dry_mach;
-        if dm > 0.0 {
-            (1.0 - 0.18 * mach.min(1.0)) * (1.0 - 0.97 * smooth(0.4 * dm, dm, mach)) / (1.0 - fe.mach_lapse[0] * mach + fe.mach_lapse[1] * mach * mach).max(0.05)
-        } else {
-            1.0
+    /// The levers as the cockpit has them, for every engine.
+    fn levers(&self, burner: bool, starter: bool) -> crate::propulsion::unit::Levers {
+        crate::propulsion::unit::Levers {
+            throttle: self.charge,
+            mixture: self.mixture,
+            prop: self.propeller,
+            burner,
+            reverser: self.reverser,
+            ignition: self.ignition,
+            fuel: self.fuel_selector != FuelSelector::Off && self.fuel > 0.0,
+            starter,
+            carb_heat: self.carb_heat,
+            cowl: self.cowl_flaps,
+            auto_mixture: self.auto_mixture,
         }
     }
-    /// Thrust (N) once the engine has settled at this throttle.
+    /// The air at height `h` and the aircraft's motion through it (body frame).
+    fn flight(vb: DVec3, omega: DVec3, h: f64) -> crate::propulsion::unit::Flight {
+        let (t, p) = atmosphere(h);
+        crate::propulsion::unit::Flight { p, t, vb, omega }
+    }
+    /// Thrust (N) once the engines have settled at this throttle, flying
+    /// straight and level at true airspeed `v` at height `h`.
     pub fn thrust(&self, throttle: f64, v: f64, h: f64) -> f64 {
-        match &self.spec.engine {
-            Engine::Piston(pe) => {
-                let rho = self.atmos.density(h);
-                Self::prop_load(pe, Self::prop_equilibrium(pe, throttle, v, rho), v, rho, 1.0).0
-            }
-            Engine::Fan(fe) => Self::fan_thrust(fe, Self::n1_target(fe, throttle), v, h, &self.atmos) * self.inlet(v / self.atmos.sound_speed(h)) * self.dry_fade(fe, v / self.atmos.sound_speed(h)),
-            Engine::Rocket(_) => 0.0,
-        }
+        let mut lv = self.levers(false, false);
+        (lv.throttle, lv.auto_mixture) = (throttle, true);
+        let fl = Self::flight(DVec3::new(0.0, 0.0, -v), DVec3::ZERO, h);
+        self.engines.iter().map(|u| {
+            let mut u = u.clone();
+            u.settle(&lv, &fl);
+            -u.out.force.z
+        }).sum()
     }
-    /// The engine already running as the throttle has it.
+    /// The propeller (or fan) revs (rpm) the first engine settles at with
+    /// the throttle at `throttle`, flying straight at `v` at height `h`.
+    pub fn settled_rpm(&self, throttle: f64, v: f64, h: f64) -> f64 {
+        let mut lv = self.levers(false, false);
+        (lv.throttle, lv.auto_mixture) = (throttle, true);
+        let fl = Self::flight(DVec3::new(0.0, 0.0, -v), DVec3::ZERO, h);
+        self.engines.first().map_or(0.0, |u| {
+            let mut u = u.clone();
+            u.settle(&lv, &fl);
+            u.rate() * 60.0 / std::f64::consts::TAU
+        })
+    }
+    /// The engines already running as the throttle has them.
     fn settle_engine(&mut self, v: f64, h: f64) {
-        match &self.spec.engine {
-            Engine::Piston(pe) => self.prop_rate = Self::prop_equilibrium(pe, self.throttle, v, self.atmos.density(h)),
-            Engine::Fan(fe) => {
-                self.n1 = Self::n1_target(fe, self.throttle);
-                self.prop_rate = self.n1 * fe.n1_rpm * std::f64::consts::TAU / 60.0;
+        let mut lv = self.levers(false, false);
+        lv.auto_mixture = true;
+        let fl = Self::flight(DVec3::new(0.0, -v * self.alpha.sin(), -v * self.alpha.cos()), DVec3::ZERO, h);
+        for u in &mut self.engines {
+            u.settle(&lv, &fl);
+        }
+        self.engines_out();
+    }
+    /// What the cockpit, the sound and the strips take from the engines as a whole.
+    fn engines_out(&mut self) {
+        use crate::propulsion::unit::Kind;
+        let n = self.engines.len().max(1) as f64;
+        let (mut force, mut moment, mut prop_thrust) = (DVec3::ZERO, DVec3::ZERO, 0.0);
+        let (mut ff, mut power, mut rate, mut n1, mut burner, mut running) = (0.0, 0.0, 0.0, 0.0, 0.0f64, false);
+        for u in &self.engines {
+            force += u.out.force;
+            moment += u.out.moment;
+            ff += u.out.fuel_flow;
+            power += u.out.power / n;
+            rate += u.rate() / n;
+            running |= u.out.running;
+            match &u.kind {
+                Kind::Piston { .. } => prop_thrust += u.out.thrust.max(0.0),
+                Kind::Jet(j) => {
+                    n1 += j.n1 / n;
+                    burner = burner.max(j.burner);
+                }
             }
-            Engine::Rocket(_) => {}
+        }
+        (self.eng_force, self.eng_moment, self.last_thrust) = (force, moment, prop_thrust);
+        (self.fuel_flow, self.power, self.prop_rate, self.running) = (ff, power, rate, running);
+        if self.spec.is_jet() {
+            (self.n1, self.burner) = (n1, burner);
         }
     }
 
@@ -1650,15 +1649,9 @@ impl Plane {
             + self.wave_cd(mach)
             + 0.02 * rag;
         let force = out.force - vh * (q * spec.wing_area * cd);
-        // The propeller: its torque rolls the airframe the other way (it turns
-        // clockwise from the cockpit, so to the left), and at a high angle of
-        // attack the blade going down takes a bigger bite than the one going up
-        // (P-factor: the thrust's centre moves right, yawing the nose left).
-        let mut moment = out.moment;
-        if let Engine::Piston(pe) = &spec.engine {
-            moment += DVec3::Z * self.last_torque;
-            moment += DVec3::Y * (self.last_thrust * 0.25 * pe.prop_d * out.alpha.clamp(-0.4, 0.4));
-        }
+        // (The engines' own forces and moments, the propellers' torque reaction
+        // and P-factor among them, are added with the engines: propulsion/.)
+        let moment = out.moment;
         // The auto-trim assist: while the pilot flies the stick it winds the
         // trim to where the aircraft holds 1 g at this speed hands off, as the
         // other aircraft's auto-trim does.
@@ -1851,7 +1844,7 @@ impl Plane {
             out = af.forces(&inp, &mut st, 0.0);
         }
         let lift = out.force.dot(DVec3::X.cross(vb / v).normalize());
-        (out.moment.x, lift, -out.force.dot(vb / v))
+        (out.moment.x + self.eng_moment.x, lift, -out.force.dot(vb / v))
     }
 
     /// The trim (-1..1) that holds `level` g at true airspeed `v` hands off.
@@ -1880,14 +1873,6 @@ impl Plane {
         (trim, alpha)
     }
 
-    /// The propeller's thrust and torque as it turns now, for the strips.
-    fn engine_state(&mut self, v: f64, rho: f64) {
-        if let Engine::Piston(pe) = &self.spec.engine {
-            let (t, q) = Self::prop_load(pe, self.prop_rate, v, rho, 1.0);
-            (self.last_thrust, self.last_torque) = (t.max(0.0), q);
-        }
-    }
-
     /// Rig the ailerons and rudder (as a factory sets its fixed tabs and fin
     /// offset) so that in the cruise, at cruise power, the propeller's torque,
     /// slipstream and P-factor are balanced and it flies straight hands off.
@@ -1895,19 +1880,27 @@ impl Plane {
     fn rig_for_cruise(&mut self) {
         let Some(af) = self.airframe.take() else { return };
         let spec = self.spec;
-        if let Engine::Piston(pe) = &spec.engine {
+        if let Engine::Piston(_) = &spec.engine {
             let (v, h) = (spec.cruise, 1500.0);
             let rho = density(h);
-            let w = Self::prop_equilibrium(pe, 0.75, v, rho);
-            let (thrust, torque) = Self::prop_load(pe, w, v, rho, 1.0);
-            (self.last_thrust, self.last_torque) = (thrust.max(0.0), torque);
             let alpha = self.alpha_level(v, rho, 0.0);
             let vb = DVec3::new(0.0, -v * alpha.sin(), -v * alpha.cos());
+            // The engines at cruise power: their torque, P-factor and slipstream.
+            let mut lv = self.levers(false, false);
+            (lv.throttle, lv.auto_mixture, lv.prop) = (0.75, true, 0.8);
+            let fl = Self::flight(vb, DVec3::ZERO, h);
+            let (mut thrust, mut em) = (0.0, DVec3::ZERO);
+            for u in &self.engines {
+                let mut u = u.clone();
+                thrust += u.settle(&lv, &fl).max(0.0);
+                em += u.out.moment;
+            }
+            self.last_thrust = thrust;
             let moments = |p: &Self, rig: [f64; 2]| {
                 let mut inp = p.strip_input(&af, vb, (rho, sound_speed(h)), 1.0);
                 (inp.omega, inp.rigging) = (DVec3::ZERO, rig);
                 let mut st = aero::State::default();
-                let m = af.forces(&inp, &mut st, 0.0).moment + DVec3::Z * torque + DVec3::Y * (thrust * 0.25 * pe.prop_d * alpha);
+                let m = af.forces(&inp, &mut st, 0.0).moment + em;
                 (m.z, m.y)
             };
             let mut rig = [0.0; 2];
@@ -1926,7 +1919,7 @@ impl Plane {
                 rig = [rig[0].clamp(-0.3, 0.3), rig[1].clamp(-0.3, 0.3)];
             }
             self.rigging = rig;
-            (self.last_thrust, self.last_torque) = (0.0, 0.0);
+            self.last_thrust = 0.0;
         }
         self.airframe = Some(af);
     }
@@ -2365,78 +2358,70 @@ impl Plane {
         let eng = (self.dmg.engine as f64).powf(0.6);
         // The engine takes a moment to answer the throttle.
         self.charge += (self.throttle - self.charge) * (dt * 4.0).min(1.0);
+        if !self.engines.is_empty() {
+            let jet = spec.is_jet();
+            // Reversers: only with weight on the wheels and the thrust levers
+            // closed; deployed, the engines run up to reverse thrust.
+            let mut reversing = false;
+            if let Engine::Fan(fe) = &spec.engine {
+                let rev_want = c.reverse && self.on_ground && self.throttle < 0.05;
+                let rate = dt / fe.reverser_time;
+                self.reverser = (self.reverser + if rev_want { rate } else { -rate }).clamp(0.0, 1.0);
+                reversing = rev_want && self.reverser > 0.95;
+            }
+            // Starting. A piston engine cranks while the starter is held (or the
+            // automatic start runs); a jet's starter stays engaged until the core
+            // is up to idle. The starter needs power from the bus.
+            if self.auto_start > 0.0 {
+                self.auto_start -= dt;
+                if jet {
+                    self.starter_on = true;
+                }
+            }
+            let cranking = (if jet { self.starter_on } else { c.starter || self.auto_start > 0.0 }) && self.sys.powered();
+            self.cranking = cranking && !jet;
+            let mut lv = self.levers(c.boost && spec.real_boost(), cranking);
+            if reversing {
+                lv.throttle = 0.75;
+            }
+            // The game's own boost (arcade, on a type without an afterburner).
+            let arcade = if c.boost && !spec.real_boost() { if jet { if let Engine::Fan(fe) = &spec.engine { fe.boost } else { 1.0 } } else { 1.35 } } else { 1.0 };
+            let blades = if dm.prop > 0.75 { 1.0 } else if dm.prop > 0.25 { 0.45 } else { 0.0 };
+            let fl = Self::flight(vb, self.omega, h);
+            let fail = self.sys.fail.engine;
+            for (i, u) in self.engines.iter_mut().enumerate() {
+                // A failure takes the first engine (the only one, on a single).
+                u.failed = fail && i == 0;
+                u.step(&lv, &fl, eng, blades, dt);
+                if arcade != 1.0 {
+                    u.out.force *= arcade;
+                    u.out.moment *= arcade;
+                    u.out.thrust *= arcade;
+                }
+            }
+            self.engines_out();
+            if self.auto_start > 0.0 || self.starter_on {
+                let up = self.engines.iter().all(|u| match &u.kind {
+                    crate::propulsion::unit::Kind::Piston { prop, .. } => u.out.running && prop.w > 50.0,
+                    crate::propulsion::unit::Kind::Jet(j) => j.running && j.n1 > 0.95 * j.data.idle[0],
+                });
+                if up {
+                    (self.starter_on, self.auto_start) = (false, 0.0);
+                }
+            }
+            force_b += self.eng_force;
+            wdot += self.eng_moment / spec.inertia;
+        }
         match &spec.engine {
             Engine::Piston(pe) => {
-                let prop_k = if dm.prop > 0.75 { 1.0 } else if dm.prop > 0.25 { 0.45 } else { 0.0 };
-                // The fixed-pitch propeller: the engine's torque against what the
-                // blades take at these revs and this airspeed. Faster through the air,
-                // the blades meet it at a smaller angle and take less, so the revs
-                // rise (and over-rev in a dive); slow, the propeller holds the engine
-                // well below its rated revs and power. Without power it windmills, and
-                // only slowing nearly to the stall stops it.
-                let w = self.prop_rate.max(0.0);
-                let v_ax = (-vb.z).max(0.0);
-                let mut prop = pe.clone();
-                if spec.id == 0 && self.running && self.propeller < 0.999 {
-                    // Coarsening the blades increases their load, governing the selected RPM.
-                    let target = (1800.0 + 900.0 * self.propeller) * std::f64::consts::TAU / 60.0;
-                    self.prop_coarse = (self.prop_coarse + (w - target) * dt * 0.08).clamp(0.0, 2.0);
-                } else { self.prop_coarse = (self.prop_coarse - dt * 2.0).max(0.0); }
-                prop.cp0 *= 1.0 + self.prop_coarse;
-                prop.ct0 *= 1.0 + 0.3 * self.prop_coarse;
-                prop.j_t *= 1.0 + 0.2 * self.prop_coarse;
-                prop.j_p *= 1.0 + 0.2 * self.prop_coarse;
-                let (mut thrust, q_prop) = Self::prop_load(&prop, w, v_ax, rho, prop_k);
-                // It fires with the magnetos on, fuel, a mixture that will burn and the
-                // crankshaft turning (by the starter, or windmilling in the air); the
-                // starter motor's torque falls away as it spins up (it cranks at ~200 rpm).
-                // (The starter needs power from the bus; the magnetos do not.)
-                let cranking = (c.starter || self.auto_start > 0.0) && self.sys.powered();
-                self.cranking = cranking;
-                self.running = self.ignition && self.fuel_selector != FuelSelector::Off && self.fuel > 0.0 && self.mixture > 0.08 && w > 8.0 && eng > 0.0 && !self.sys.fail.engine;
-                let mix = smooth(0.08, 0.45, self.mixture);
-                let q_eng = if self.running { Self::engine_torque(pe, self.charge, rho, c.boost, eng) * mix } else { 0.0 } + if cranking { 120.0 * (1.0 - w / 25.0).max(0.0) } else { 0.0 };
-                if self.auto_start > 0.0 {
-                    self.auto_start = if self.running && w > 50.0 { 0.0 } else { self.auto_start - dt };
-                }
-                let drive = q_eng - q_prop;
-                if prop_k <= 0.0 {
-                    // No blades left: nothing to turn.
-                    self.prop_rate += (0.0 - self.prop_rate) * (dt * 2.0).min(1.0);
-                } else if w > 1.0 || drive > 40.0 {
-                    // Not firing, each cylinder in turn compresses its charge for
-                    // nothing: a drag that matters slowly turning (it stops a shut-down
-                    // engine in a couple of seconds) but not windmilling in a glide.
-                    let comp = if self.running { 0.0 } else { 40.0 * (1.0 - w / 90.0).clamp(0.0, 1.0) };
-                    self.prop_rate = (w + (drive - Self::friction(pe, w) - comp) / pe.prop_i * dt).max(0.0);
-                } else {
-                    // Stopped: the compression holds it until the air pushes harder.
-                    self.prop_rate = 0.0;
-                }
-                self.power = ((q_eng - Self::friction(pe, w)) * w / pe.power).max(0.0);
-                let ff = spec.fuel_flow;
-                self.fuel_flow = if self.running { (ff[0] + (ff[1] - ff[0]) * self.power.min(1.0) + if c.boost { ff[2] - ff[1] } else { 0.0 }) * (0.7 + 0.3 * self.mixture) } else { 0.0 };
-                if dm.prop <= 0.25 {
-                    thrust = 0.0;
-                }
-                force_b += DVec3::NEG_Z * thrust;
-                (self.last_thrust, self.last_torque) = (thrust.max(0.0), q_prop);
-                // The propeller turns clockwise seen from the cockpit: its torque rolls the
-                // aircraft left and its spiralling slipstream (and P-factor, climbing
-                // slowly) yaws it left. The fin and ailerons are rigged for the cruise, so
-                // it is full power at low speed that needs right rudder.
+                let thrust = self.last_thrust;
+                // Without the strips (which carry the slipstream themselves), the
+                // propwash over the fin and rudder adds to their authority taxiing
+                // slowly. Momentum theory: the slipstream's dynamic pressure is the
+                // free stream's plus T/A (A the disc area); only that excess is
+                // added here. A share of it reaches the rudder (the rest passes
+                // below and beside it), and it fades out by 30 m/s.
                 if v > 2.0 && self.airframe.is_none() {
-                    let slow = (1.0 - v / 60.0).max(0.0);
-                    let tk = thrust.max(0.0) / pe.static_thrust;
-                    wdot.y += tk * slow * (0.22 + 0.25 * self.alpha.max(0.0));
-                    wdot.z += tk * slow * 0.12 * if self.on_ground { 0.3 } else { 1.0 };
-                    // Taxiing slowly, the propwash over the fin and rudder adds to their
-                    // authority. Momentum theory: the slipstream's dynamic pressure is
-                    // the free stream's plus T/A (A the disc area); only that excess is
-                    // added here, the free stream's part already being in the rudder
-                    // term above. A share of it reaches the rudder (the rest passes
-                    // below and beside it), and it fades out by 30 m/s, where the
-                    // airflow itself does the work.
                     let disc = std::f64::consts::FRAC_PI_4 * pe.prop_d * pe.prop_d;
                     if self.on_ground && disc > 0.01 {
                         let q_wash = thrust.max(0.0) / disc;
@@ -2451,60 +2436,18 @@ impl Plane {
                         self.dmg.engine = (self.dmg.engine - dt as f32 * 0.06 * spin).max(0.0);
                     }
                 }
+                // Running near the mixture's limits it shakes.
+                for u in &self.engines {
+                    if let crate::propulsion::unit::Kind::Piston { eng: e, .. } = &u.kind {
+                        self.dmg.vibe += (e.last.rough * 0.5) as f32;
+                    }
+                }
                 if self.dmg.engine < 1.0 && self.dmg.engine > 0.0 {
                     self.dmg.oil = (self.dmg.oil + dt as f32 * 0.04 * (1.0 - self.dmg.engine) * (self.prop_rate / 250.0) as f32).min(1.0);
                 }
                 self.dmg.smoke = if self.dmg.engine < 1.0 { (1.0 - self.dmg.engine) * (0.3 + 0.7 * (self.prop_rate / 250.0) as f32) * if self.dmg.engine <= 0.0 { 0.5 } else { 1.0 } } else { 0.0 };
             }
-            Engine::Fan(fe) => {
-                // Reversers: only with weight on the wheels and the thrust levers
-                // closed; deployed, the fans spool up to reverse thrust.
-                let rev_want = c.reverse && self.on_ground && self.throttle < 0.05;
-                let rate = dt / fe.reverser_time;
-                self.reverser = (self.reverser + if rev_want { rate } else { -rate }).clamp(0.0, 1.0);
-                let reversing = rev_want && self.reverser > 0.95;
-                // The fans spool slowly from idle and quicker near the top; a
-                // dead engine windmills in the airflow.
-                // Starting: the starter turns the core up; past light-off, with the fuel
-                // controls at RUN, it lights and runs itself up to idle.
-                let can_run = self.ignition && self.fuel > 0.0 && eng > 0.0 && !self.sys.fail.engine;
-                if !can_run {
-                    self.running = false;
-                } else if !self.running && self.n1 > 0.4 * fe.idle {
-                    self.running = true;
-                }
-                if self.auto_start > 0.0 {
-                    self.auto_start -= dt;
-                    self.starter_on = true;
-                }
-                if self.running && self.n1 > 0.95 * fe.idle {
-                    (self.starter_on, self.auto_start) = (false, 0.0);
-                }
-                let mut target = if reversing { 0.84 } else { Self::n1_target(fe, self.throttle) };
-                target = target.min(fe.idle + (1.0 - fe.idle) * eng);
-                if !self.running {
-                    // Not burning: windmilling in the airflow, or turned by the starter.
-                    target = if self.starter_on && self.sys.powered() { 0.5 * fe.idle } else { (0.02 + v / 900.0).min(fe.idle * 0.8) };
-                }
-                let up = target > self.n1;
-                let kr = if up { fe.spool_up * (0.3 + 0.7 * self.n1) } else { fe.spool_down };
-                self.n1 += (target - self.n1) * (dt * kr).min(1.0);
-                self.prop_rate = self.n1 * fe.n1_rpm * std::f64::consts::TAU / 60.0;
-                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0), h, &self.atmos) * self.inlet(mach) * if c.boost { fe.boost } else { self.dry_fade(fe, mach) };
-                // An afterburner (not an airliner's take-off bump) lights with a
-                // thump a moment after it is asked for and dies away as quickly.
-                let lit = c.boost && fe.boost > 1.2 && self.dmg.engine > 0.0 && self.n1 > fe.idle * 0.9;
-                self.burner += ((if lit { 1.0 } else { 0.0 }) - self.burner) * (dt * if lit { 5.0 } else { 8.0 }).min(1.0);
-                self.power = thrust / (fe.n as f64 * fe.thrust);
-                // The burn follows the thrust made (it lapses with height as the
-                // thrust does): idle to full rated thrust, then the afterburners.
-                let ff = spec.fuel_flow;
-                let dry = (self.power / if c.boost { fe.boost } else { 1.0 }).clamp(0.0, 1.2);
-                // (A turbo-ramjet's afterburners are fed by the air it swallows: their flow lapses with the thrust.)
-                let wet = if spec.inlet_mach > 0.0 { dry.min(1.0) } else { 1.0 };
-                self.fuel_flow = if self.running { ff[0] + (ff[1] - ff[0]) * dry + (ff[2] - ff[1]) * self.burner * wet } else { 0.0 };
-                thrust *= 1.0 - self.reverser * (1.0 + fe.reverse);
-                force_b += DVec3::NEG_Z * thrust;
+            Engine::Fan(_) => {
                 self.dmg.smoke = if self.dmg.engine < 1.0 { (1.0 - self.dmg.engine) * (0.3 + 0.7 * self.n1 as f32) } else { 0.0 };
             }
             Engine::Rocket(_) => {}
@@ -2973,10 +2916,7 @@ impl Plane {
         // kick (it turns clockwise seen from the cockpit, so its angular
         // momentum points forward: pitching the nose down yaws it left, as
         // in a tail-dragger raising its tail).
-        let spin = match &spec.engine {
-            Engine::Piston(pe) => DVec3::NEG_Z * (pe.prop_i * self.prop_rate),
-            _ => DVec3::ZERO,
-        };
+        let spin: DVec3 = self.engines.iter().map(|u| u.spin()).sum();
         let gyro = -self.omega.cross(spec.inertia * self.omega + spin);
         self.omega += (wdot + (torque_b + gyro) / spec.inertia) * dt;
         self.omega = self.omega.clamp_length_max(6.0);
@@ -4716,19 +4656,20 @@ mod tests {
         println!("stall {clean:.0} kt clean, {full:.0} kt full flaps");
         assert!(clean > 46.0 && clean < 54.0 && full > 39.0 && full < 46.0);
 
-        // On the ground: about 2300 rpm flat out, 600-800 at idle, static thrust a
-        // quarter of the weight.
-        let pe = piston();
-        let ws = Plane::prop_equilibrium(pe, 1.0, 0.0, RHO0) * 60.0 / std::f64::consts::TAU;
-        let wi = Plane::prop_equilibrium(pe, 0.0, 0.0, RHO0) * 60.0 / std::f64::consts::TAU;
-        let t0 = Plane::spawn(C172, 0.6, -2.1, 0.0, 0.0, 0.0).thrust(1.0, 0.0, 0.0);
+        // On the ground: the constant-speed propeller on its fine stop lets the
+        // engine reach about 2,600-2,700 rpm flat out; 600-800 at idle; static
+        // thrust about a fifth to a quarter of the weight.
+        let p0 = Plane::spawn(C172, 0.6, -2.1, 0.0, 0.0, 0.0);
+        let ws = p0.settled_rpm(1.0, 0.0, 0.0);
+        let wi = p0.settled_rpm(0.0, 0.0, 0.0);
+        let t0 = p0.thrust(1.0, 0.0, 0.0);
         println!("static {ws:.0} rpm, idle {wi:.0} rpm, thrust {t0:.0} N = {:.2} W", t0 / (s.mass * 9.81));
-        assert!(ws > 2200.0 && ws < 2450.0 && wi > 550.0 && wi < 850.0, "{ws} {wi}");
+        assert!(ws > 2500.0 && ws < 2710.0 && wi > 550.0 && wi < 850.0, "{ws} {wi}");
         assert!(t0 / (s.mass * 9.81) > 0.18 && t0 / (s.mass * 9.81) < 0.28, "{t0}");
-        // Diving at Vne at full throttle the fixed-pitch propeller over-revs.
-        let wd = Plane::prop_equilibrium(pe, 1.0, s.vne, RHO0) * 60.0 / std::f64::consts::TAU;
+        // Diving at Vne at full throttle the governor holds the red line.
+        let wd = p0.settled_rpm(1.0, s.vne, 0.0);
         println!("full throttle at Vne: {wd:.0} rpm");
-        assert!(wd > 2850.0, "{wd}");
+        assert!((wd - 2700.0).abs() < 30.0, "{wd}");
     }
 
     #[test]
@@ -5772,7 +5713,8 @@ mod tests {
         assert!(clean > 145.0 && clean < 170.0 && full > 115.0 && full < 135.0);
 
         // Static thrust a quarter of the weight; the fans take several seconds to spool up.
-        let t0 = Plane::fan_thrust(fe, 1.0, 0.0, 0.0, &Atmos::STD);
+        let t0 = Plane::spawn(s, 0.0, 0.0, 1000.0, 0.0, 100.0).thrust(1.0, 0.0, 0.0);
+        let _ = fe;
         println!("static thrust {:.0} kN = {:.2} W", t0 / 1000.0, t0 / (s.mass * 9.81));
         assert!(t0 / (s.mass * 9.81) > 0.3 && t0 / (s.mass * 9.81) < 0.4);
     }
@@ -5948,7 +5890,7 @@ mod tests {
         assert!(vref_light > 115.0 && vref_light < 125.0, "{vref_light}");
 
         // A third of its maximum weight in static thrust; the ICAO fuel flows (two engines).
-        let t0 = Plane::fan_thrust(fe, 1.0, 0.0, 0.0, &Atmos::STD);
+        let t0 = Plane::spawn(s, 0.6, -2.1, 0.0, 0.0, 0.0).thrust(1.0, 0.0, 0.0);
         println!("static thrust {:.1} kN = {:.3} of MTOW; fuel flows {:?} kg/s", t0 / 1000.0, t0 / (G650_MTOW * 9.81), s.fuel_flow);
         assert!(t0 / (G650_MTOW * 9.81) > 0.33 && t0 / (G650_MTOW * 9.81) < 0.35);
         assert!(s.fuel_flow[0] > 0.15 && s.fuel_flow[0] < 0.20 && s.fuel_flow[1] > 1.5 && s.fuel_flow[1] < 1.65);
