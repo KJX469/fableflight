@@ -22,7 +22,7 @@
 //! laid out in a design frame `DZ` ahead of it (see `DZ`).
 pub mod cabin;
 
-use crate::aircraft::{Engine, Handling, Hole, Hull, Leg, Part, Piston, Sound, Spec, Tail};
+use crate::aircraft::{Engine, Handling, Hole, Hull, Leg, Part, Piston, Sound, Spec, Tail, Tyre};
 use crate::airframe::*;
 use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 use std::f32::consts::{PI, TAU};
@@ -56,9 +56,12 @@ const V_NONE: f64 = 1e9;
 /// The tyres touch the ground here (body y), the gear at rest.
 pub const GROUND_Y: f32 = -1.20;
 
+/// 380x150 tyres on oleo-pneumatic legs, about 1.8 bar (an estimate).
+const TYRE: Tyre = Tyre { pressure: 180.0, ..Tyre::LIGHT };
+
 const fn leg(at: DVec3, r: f32, travel: f64, k: f64, steer: f64, name: &'static str) -> Leg {
     // (Fixed gear: it never folds, so no fold speed or kick.)
-    Leg { at, wheel_r: r as f64, travel, k, c: k * 0.1, nf_max: 110_000.0, steer, brakes: true, side_k: 5000.0, side_mu: 0.9, roll_k: 80.0, roll_mu: 0.025, brake_k: 2400.0, brake_mu: 0.55, fold_vn: 1e9, fold_kick: DVec3::ZERO, name }
+    Leg { at, wheel_r: r as f64, travel, k, c: k * 0.1, nf_max: 110_000.0, steer, brakes: steer == 0.0, mu: 0.9, roll_mu: 0.025, brake_mu: 0.55, fold_vn: 1e9, fold_kick: DVec3::ZERO, name, tyre: TYRE }
 }
 
 pub static SPEC: Spec = Spec {

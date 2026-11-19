@@ -524,13 +524,13 @@ impl Geo {
     }
 }
 
-fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+pub fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     let d = b - a;
     let t = ((p - a).dot(d) / d.length_squared().max(1e-6)).clamp(0.0, 1.0);
     (a + d * t - p).length()
 }
 
-fn in_poly(p: Vec2, rings: &[Vec<Vec2>]) -> bool {
+pub fn in_poly(p: Vec2, rings: &[Vec<Vec2>]) -> bool {
     let mut c = false;
     for r in rings {
         let mut j = r.len() - 1;

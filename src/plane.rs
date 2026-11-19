@@ -232,6 +232,17 @@ pub struct Plane {
     pub snow_marks: Vec<crate::snowtrack::Mark>,
     /// previous ground-contact position of each gear leg, for continuous tyre tracks
     wheel_prev: [Option<DVec3>; MAX_GEAR],
+    /// each gear leg's tyres as they roll: footprint, swivel, skid (gear.rs)
+    pub wheels: [crate::gear::Wheel; MAX_GEAR],
+    /// what each leg's tyres last found under them, and where
+    surf: [Option<(DVec3, crate::gear::Surface)>; MAX_GEAR],
+    /// the weather on the ground under it (set each frame), and the water
+    /// standing on the ground there (mm)
+    pub ground_wx: crate::gear::Cond,
+    pub water: f64,
+    /// tyres sliding or spinning up on the ground, and the spray off a wet
+    /// runway: position, velocity, how much
+    pub smoke: Vec<(DVec3, DVec3, f32)>,
     /// resting or sliding on the airframe itself rather than the wheels
     pub on_hull: bool,
     /// contact points (reused each step)
@@ -366,6 +377,11 @@ impl Plane {
             dirt: Vec::new(),
             snow_marks: Vec::new(),
             wheel_prev: [None; MAX_GEAR],
+            wheels: [crate::gear::Wheel::default(); MAX_GEAR],
+            surf: [None; MAX_GEAR],
+            ground_wx: crate::gear::Cond::default(),
+            water: 0.0,
+            smoke: Vec::new(),
             t: 0.0,
             near_trees: Vec::new(),
             struck: Vec::new(),
@@ -1603,7 +1619,10 @@ impl Plane {
             // angle the rotation adds at the wing tip or tail, ω·arm / V), so a
             // slow aircraft is sluggish and a fast one crisp.
             let a = (q / hd.q_ref).clamp(0.0, hd.a_max);
-            let ad = (a * hd.damp_v / v.max(20.0)).clamp(hd.ad_min, hd.ad_max);
+            // (The damping's floor is air flowing past: rolling slowly on the
+            // ground there is next to none, and the tyres do the work.)
+            let ad_min = if self.on_ground { hd.ad_min * smooth(3.0, 25.0, v) } else { hd.ad_min };
+            let ad = (a * hd.damp_v / v.max(20.0)).clamp(ad_min, hd.ad_max.max(ad_min));
             // Relative to the air, which is itself turning in the eddies.
             let om = self.omega - self.gust_rot;
             // Auto-trim: while the pilot is flying the stick it winds the trim to
@@ -2127,6 +2146,7 @@ impl Plane {
             }
             self.pts = pts;
             let mut touching = [false; MAX_GEAR];
+            let loads = crate::gear::static_loads(spec, mass);
             for (gi, leg) in spec.gear.iter().enumerate() {
                 // Only gear that is down and locked carries the aircraft.
                 if self.gear < 0.999 {
@@ -2138,6 +2158,17 @@ impl Plane {
                 let r = leg.at;
                 let p = self.pos + self.rot * r;
                 if let Some((pen, water, building)) = hit(p, world) {
+                    // What it rolls on (looked up again every couple of metres),
+                    // and that ground's own unevenness.
+                    let surface = match self.surf[gi] {
+                        Some((at, sf)) if (at - p).length_squared() < 4.0 => sf,
+                        _ => {
+                            let sf = world.surface(p);
+                            self.surf[gi] = Some((p, sf));
+                            sf
+                        }
+                    };
+                    let pen = if water || building.is_some() { pen } else { pen + surface.bump(p) };
                     if pen <= 0.0 {
                         continue;
                     }
@@ -2165,23 +2196,36 @@ impl Plane {
                     self.on_ground = true;
                     touching[gi] = true;
                     self.compress[gi] = pen.min(leg.travel);
-                    let nf = (pen * leg.k - vn * leg.c).clamp(0.0, leg.nf_max);
-                    let mut fwd = (self.forward() - upw * self.forward().dot(upw)).normalize_or_zero();
+                    // The ground's slope under the wheel (the tyres push off it, and
+                    // a slope pulls the aircraft down it); a deck is level.
+                    let gn = if building.is_none() { ground_normal(world, p, upw) } else { upw };
+                    let mut fwd = self.forward();
                     if leg.steer != 0.0 {
-                        // The nose wheel steers with the rudder pedals.
-                        fwd = DQuat::from_axis_angle(upw, -self.steer_angle() * leg.steer) * fwd;
+                        // The nose wheel steers with the rudder pedals; a steering
+                        // body bogie turns the other way, only taxiing slowly.
+                        let k = if leg.steer < 0.0 { 1.0 - smooth(5.0, 8.0, self.vel.length()) } else { 1.0 };
+                        fwd = DQuat::from_axis_angle(upw, -self.steer_angle() * leg.steer * k) * fwd;
                     }
-                    let side = fwd.cross(upw);
-                    let (vl, vs) = (pv.dot(fwd), pv.dot(side));
-                    let f_side = (-vs * leg.side_k).clamp(-leg.side_mu * nf, leg.side_mu * nf);
                     let brake = if leg.brakes { self.brake_pressure(c, leg.at.x) } else { 0.0 };
-                    let mu = leg.roll_mu + (leg.brake_mu - leg.roll_mu) * brake;
-                    let drag = leg.roll_k + (leg.brake_k - leg.roll_k) * brake;
-                    let f_long = (-vl * drag).clamp(-mu * nf, mu * nf);
-                    let f = upw * nf + side * f_side + fwd * f_long;
+                    let grip = crate::gear::grip(leg, surface, &self.ground_wx, self.water, pv.length(), self.wheels[gi].skid);
+                    let w0 = loads[gi];
+                    let push = crate::gear::contact(&crate::gear::Contact { leg, w0, pen, v: pv, n: gn, heading: fwd, brake, grip, dt }, &mut self.wheels[gi], &mut self.wheel_spin[gi]);
+                    let f = push.f;
+                    let (vs, nf) = (push.across, push.nf);
                     force_w += f;
                     torque_b += r.cross(self.rot.inverse() * f);
-                    self.wheel_spin[gi] = vl / leg.wheel_r;
+                    if building.is_none() {
+                        // Rubber smoke off a sliding tyre (a touchdown's spin-up, a
+                        // locked wheel); spray off a wet runway behind fast wheels.
+                        if push.slide > 4.0 && surface.paved() && self.water < 0.3 {
+                            let amt = (push.slide / 20.0).min(1.5) * (nf / w0.max(1.0)).min(2.0);
+                            self.smoke.push((p, pv * 0.3 + upw * 0.6, amt as f32));
+                        }
+                        if self.water > 0.5 && surface.paved() && push.along.abs() > 15.0 {
+                            let amt = ((self.water - 0.5) / 3.0).min(1.0) * (push.along.abs() / 60.0).min(1.0);
+                            self.smoke.push((p - push.heading * leg.wheel_r, pv * 0.5 + upw * 1.0, amt as f32));
+                        }
+                    }
                     if pv.length() > 3.0 && building.is_none() {
                         self.dirt.push((p, (pv - upw * vn) * 0.3 + upw * 1.5, 1.0));
                     }
@@ -2215,16 +2259,23 @@ impl Plane {
                 if !touching[gi] {
                     self.compress[gi] *= (1.0 - dt * 12.0).max(0.0);
                     self.wheel_prev[gi] = None;
+                    crate::gear::lift_off(&mut self.wheels[gi]);
                 }
             }
         } else {
             self.compress = [0.0; MAX_GEAR];
             self.wheel_prev = [None; MAX_GEAR];
+            self.wheels.iter_mut().for_each(crate::gear::lift_off);
+        }
+        // Rain puts water down on the runway; it drains and dries.
+        self.water = crate::gear::water_step(self.water, self.ground_wx.rain, dt);
+        if self.smoke.len() > 2048 {
+            self.smoke.clear();
         }
         // Wheels spin down in the air; brakes stop the mains at once.
         for (gi, leg) in spec.gear.iter().enumerate() {
             if !self.on_ground {
-                self.wheel_spin[gi] *= (1.0 - dt * if leg.brakes && leg.steer == 0.0 { 0.25 + 7.75 * self.brake_pressure(c, leg.at.x) } else { 0.25 }).max(0.0);
+                self.wheel_spin[gi] *= (1.0 - dt * if leg.brakes { 0.25 + 7.75 * self.brake_pressure(c, leg.at.x) } else { 0.25 }).max(0.0);
             }
             self.wheel_rot[gi] = (self.wheel_rot[gi] + self.wheel_spin[gi] * dt) % std::f64::consts::TAU;
         }
@@ -2632,6 +2683,22 @@ pub fn stall_amount(stall_a: f64, alpha: f64) -> f64 {
     smooth(stall_a, stall_a + 0.13, alpha.abs())
 }
 
+/// The ground's normal at `p` (planet frame), from its height a metre and a
+/// half either side; `up` where the ground is not loaded there.
+fn ground_normal(world: &World, p: DVec3, up: DVec3) -> DVec3 {
+    let e = up.cross(DVec3::Z).try_normalize().unwrap_or(DVec3::X);
+    let n = e.cross(up);
+    let h = |d: DVec3| {
+        let (la, lo, _) = geo::pos_to_lla(p + d);
+        world.ground(la, lo).map(|g| g.h)
+    };
+    let d = 1.5;
+    match (h(e * d), h(-e * d), h(n * d), h(-n * d)) {
+        (Some(a), Some(b), Some(c), Some(f)) => (up - e * ((a - b) / (2.0 * d)) - n * ((c - f) / (2.0 * d))).normalize(),
+        _ => up,
+    }
+}
+
 fn smooth(a: f64, b: f64, x: f64) -> f64 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -2641,6 +2708,9 @@ fn smooth01(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
+
+#[cfg(test)]
+mod ground_tests;
 
 #[cfg(test)]
 mod tests {

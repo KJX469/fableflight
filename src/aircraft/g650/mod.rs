@@ -587,16 +587,15 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
         nf_max: 2.5e6,
         steer: 0.0,
         brakes: true,
-        side_k: 2.0e5,
-        side_mu: 0.8,
-        roll_k: 3.5e3,
+        mu: 0.8,
         roll_mu: 0.013,
         // carbon brakes
-        brake_k: 1.2e5,
         brake_mu: 0.5,
         fold_vn: 4.5,
         fold_kick: DVec3::new(0.3, 0.0, kick),
         name,
+        // pressures estimated (about 200 psi); anti-skid
+        tyre: Tyre { wheels: 2, pressure: 1400.0, caster: 0.0, oleo: true, antiskid: true },
     }
 }
 
@@ -683,15 +682,13 @@ pub static SPEC: Spec = Spec {
             nf_max: 6.0e5,
             steer: 1.0,
             brakes: false,
-            side_k: 4.5e4,
-            side_mu: 0.8,
-            roll_k: 1.2e3,
+            mu: 0.8,
             roll_mu: 0.015,
-            brake_k: 0.0,
             brake_mu: 0.0,
             fold_vn: 3.8,
             fold_kick: DVec3::new(-0.4, 0.0, 0.0),
             name: "NOSE GEAR",
+            tyre: Tyre { wheels: 2, pressure: 1400.0, caster: 0.0, oleo: true, antiskid: true },
         },
         main_leg(-MAIN_X, "LEFT MAIN GEAR", 0.3),
         main_leg(MAIN_X, "RIGHT MAIN GEAR", -0.3),

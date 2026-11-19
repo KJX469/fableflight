@@ -184,22 +184,49 @@ pub struct Leg {
     pub k: f64,
     pub c: f64,
     pub nf_max: f64,
-    /// how much of the steering angle it follows (1 a nose wheel)
+    /// how much of the steering angle it follows (1 a nose wheel; negative an
+    /// aft bogie that steers the other way to ease tight turns, as the 747's
+    /// body gear, only while taxiing slowly)
     pub steer: f64,
     pub brakes: bool,
-    /// tyre side force per m/s of sideways slip and its friction limit; rolling
-    /// resistance likewise; braking force per m/s and its friction limit
-    pub side_k: f64,
-    pub side_mu: f64,
-    pub roll_k: f64,
+    /// the tyres' peak friction on dry concrete (gear.rs scales it for the
+    /// ground and the weather), and their rolling resistance there (of the load)
+    pub mu: f64,
     pub roll_mu: f64,
-    pub brake_k: f64,
+    /// the brakes' most force at the tyres at full pressure, as a share of the
+    /// leg's load standing still (with more grip than that they cannot lock it)
     pub brake_mu: f64,
     /// sink rate (m/s) that folds it, and how it throws the aircraft about when it does
     pub fold_vn: f64,
     pub fold_kick: DVec3,
     /// what the HUD calls it
     pub name: &'static str,
+    /// its tyres, strut and brakes in more detail (gear.rs)
+    pub tyre: Tyre,
+}
+
+/// A leg's tyres, strut and brakes beyond the basics: what gear.rs needs to
+/// roll, steer, brake and aquaplane it like the real one.
+#[derive(Clone, Copy, Debug)]
+pub struct Tyre {
+    /// wheels sharing the leg's load: 1, a twin 2, a bogie 4
+    pub wheels: u8,
+    /// inflation pressure (kPa): how soon it aquaplanes on standing water
+    /// (9 √psi kt) and how far it sinks into soft ground
+    pub pressure: f64,
+    /// how far the wheel swivels freely (rad): 0 held straight or steered,
+    /// PI a full-castering wheel (a tailwheel's breakout, a castering nose wheel)
+    pub caster: f64,
+    /// an oleo-pneumatic strut (gas spring, oil damping much stiffer on the
+    /// rebound) rather than a sprung steel or rubber leg
+    pub oleo: bool,
+    /// anti-skid: the brakes ease off as a wheel starts to lock
+    pub antiskid: bool,
+}
+
+impl Tyre {
+    /// A light aircraft's: one wheel at about 3 bar on an oleo, no anti-skid.
+    pub const LIGHT: Tyre = Tyre { wheels: 1, pressure: 300.0, caster: 0.0, oleo: true, antiskid: false };
 }
 
 /// How the airframe itself slides along the ground once it is down on it.

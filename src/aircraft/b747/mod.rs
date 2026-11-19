@@ -12,7 +12,7 @@
 //! (about 20% of the mean aerodynamic chord) and 5.0 m above the ground with
 //! the aircraft at rest on its gear. Drawing positions are given as `d`, the
 //! distance back from the nose, and `h`, the height above the ground.
-use crate::aircraft::{Engine, Fan, Handling, Hole, Hull, Leg, Part, Sound, Spec, Tail};
+use crate::aircraft::{Engine, Fan, Handling, Hole, Hull, Leg, Part, Sound, Spec, Tail, Tyre};
 use crate::airframe::*;
 use glam::{DVec3, Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -1446,17 +1446,17 @@ const fn main_leg(x: f64, z: f64, name: &'static str, kick: f64) -> Leg {
         k: 2.6e6,
         c: 4.5e5,
         nf_max: 8.0e6,
-        steer: 0.0,
+        // the body gear steers (up to 13° against the nose wheel's 70°)
+        steer: if z > 1.0 { -0.19 } else { 0.0 },
         brakes: true,
-        side_k: 8.0e5,
-        side_mu: 0.8,
-        roll_k: 1.5e4,
+        mu: 0.8,
         roll_mu: 0.015,
-        brake_k: 4.0e5,
         brake_mu: 0.5,
         fold_vn: 5.0,
         fold_kick: DVec3::new(0.3, 0.0, kick),
         name,
+        // H49x19.0-22 at 200 psi, nose 49x17 at 200 psi (Boeing D6-58326-1 sec. 7.2, option 2); anti-skid
+        tyre: Tyre { wheels: 4, pressure: 1380.0, caster: 0.0, oleo: true, antiskid: true },
     }
 }
 
@@ -1540,15 +1540,13 @@ pub static SPEC: Spec = Spec {
             nf_max: 4.0e6,
             steer: 1.0,
             brakes: false,
-            side_k: 3.0e5,
-            side_mu: 0.8,
-            roll_k: 1.0e4,
+            mu: 0.8,
             roll_mu: 0.015,
-            brake_k: 0.0,
             brake_mu: 0.0,
             fold_vn: 3.8,
             fold_kick: DVec3::new(-0.4, 0.0, 0.0),
             name: "NOSE GEAR",
+            tyre: Tyre { wheels: 2, pressure: 1380.0, caster: 0.0, oleo: true, antiskid: true },
         },
         main_leg(-5.5, 0.22, "LEFT WING GEAR", 0.3),
         main_leg(5.5, 0.22, "RIGHT WING GEAR", -0.3),
