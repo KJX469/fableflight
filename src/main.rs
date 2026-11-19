@@ -54,6 +54,7 @@ mod photonight;
 mod relight;
 mod rain;
 mod storm;
+mod wake;
 mod weather;
 mod weapons;
 mod mvt;
@@ -1180,6 +1181,8 @@ struct Game {
     livewx: livewx::LiveWx,
     /// the ground along the wind line: ridge lift, lee waves and rotors (orographic.rs)
     oro: orographic::Orography,
+    /// other aircraft's wake vortices (wake.rs)
+    wakes: wake::Wakes,
     /// the real clouds on the start screen's globe
     gclouds: globeclouds::GlobeClouds,
     /// the start time has been set by hand (the menu's Time sliders, or
@@ -1433,6 +1436,7 @@ impl Game {
             pit_blocks,
             livewx: livewx::LiveWx::new(),
             oro: orographic::Orography::default(),
+            wakes: wake::Wakes::default(),
             gclouds: globeclouds::GlobeClouds::default(),
             menu_time_set: set_time,
             menu_time_seen: (f64::NAN, f64::NAN),
@@ -4975,6 +4979,32 @@ impl Game {
             self.plane.air = air;
             self.plane.auto_trim = self.auto_trim;
             self.plane.wind = self.wx.at(self.plane.pos, agl, self.time) + self.plane.pos.normalize() * air.draft + air.gust;
+            // The wakes of the other aircraft about: airport traffic, live traffic and other players.
+            if dt > 0.0 {
+                let mut targets = self.live.targets();
+                targets.extend(self.world.air_targets(self.plane.pos));
+                let sources: Vec<wake::Source> = targets
+                    .iter()
+                    .filter(|t| t.pos.distance(self.plane.pos) < 20_000.0)
+                    .map(|t| {
+                        use std::hash::{Hash, Hasher};
+                        let mut hsh = std::collections::hash_map::DefaultHasher::new();
+                        t.key.hash(&mut hsh);
+                        let ty = &airmodels::TYPES[(t.size as usize).min(airmodels::TYPES.len() - 1)];
+                        wake::Source { id: hsh.finish(), pos: t.pos, vel: t.vel, span: ty.span as f64, mass: ty.mass as f64 }
+                    })
+                    .chain(self.mp_players.iter().filter(|r| r.pos.distance(self.plane.pos) < 20_000.0).map(|r| {
+                        // Other players: their own aircraft's span and mass.
+                        let spec = aircraft::nth(r.aircraft as usize);
+                        wake::Source { id: 0x6d70_0000_0000_0000 ^ r.id as u64, pos: r.pos, vel: r.vel, span: spec.b, mass: spec.mass }
+                    }))
+                    .collect();
+                let wx = &self.wx;
+                let ground_h = h - agl;
+                self.wakes.sigma = air.sigma_w;
+                self.wakes.step(dt, self.time, &sources, |p| { let a = p.length() - geo::R - ground_h; wx.steady(p, a.max(2.0)) }, ground_h, self.plane.pos);
+                self.plane.wake = self.wakes.near(self.plane.pos, 150.0 + self.plane.spec.b, self.time);
+            }
             // The rain on the windows: only under (or in) a cloud that rains, the
             // rain deck the slider sets or a storm cell.
             self.wx.step_deck(dt, self.plane.pos, gh);
@@ -5736,7 +5766,7 @@ impl Game {
             plane_prev: [[0.0; 4]; 4],
             plane_box: self.plane_box,
             weather: { let o = self.wx.cloud_off; [o.x as f32, o.y as f32, o.z as f32, if in_menu { 1.0 } else { self.wx.haze }] },
-            storm: { let w = self.wx.steady(cam, 2000.0); let d = if w.length() > 0.1 { w.normalize() } else { east }; v4(d, 0.0) },
+            storm: { let w = self.wx.cloud_drift(cam); let d = if w.length() > 0.1 { w.normalize() } else { east }; v4(d, 0.0) },
             storm_cells: [[0.0; 4]; 2 * weather::MAX_STORMS],
             det: [[0.0; 4]; 16],
             photo_vp: [[0.0; 4]; 4],

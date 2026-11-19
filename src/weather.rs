@@ -91,15 +91,6 @@ pub struct Weather {
     pub blowing: f32,
 }
 
-/// A wind aloft: height above sea level (m), speed (m/s) and the compass
-/// direction it blows from.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Aloft {
-    pub alt: f64,
-    pub speed: f64,
-    pub from: f64,
-}
-
 /// What kind of convective cell: a shower (towering cumulus or a small
 /// cumulonimbus, no anvil, tops 4-7 km, a narrow light-to-moderate rain
 /// shaft, no lightning), an ordinary thunderstorm (anvil, occasional
@@ -160,6 +151,15 @@ pub fn storm_top_share(age: f64) -> f64 {
 fn shower_anvil(base: f64, top: f64, age: f64) -> f32 {
     let top = top.max(base + 2200.0);
     (base + (top - base) / storm_top_share(age)) as f32
+}
+
+/// A wind aloft: height above sea level (m), speed (m/s) and the compass
+/// direction it blows from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aloft {
+    pub alt: f64,
+    pub speed: f64,
+    pub from: f64,
 }
 
 /// What the air around the aircraft is doing beyond the mean wind.
@@ -803,6 +803,15 @@ impl Weather {
         (e * to.sin() + n * to.cos()) * speed
     }
 
+    /// The wind the cloud field (and the storm cells in it) drift with and
+    /// lean their anvils along: twice the surface wind, in its direction. The
+    /// visible sky keeps this simple rule; the aircraft flies in `profile`.
+    pub fn cloud_drift(&self, pos: DVec3) -> DVec3 {
+        let (e, n, _) = geo::enu(pos);
+        let to = (self.wind_from + 180.0).to_radians();
+        (e * to.sin() + n * to.cos()) * (self.wind * 2.0)
+    }
+
     /// How stable the lower air is, 0 (a sunny afternoon: convection mixes
     /// it, the wind is much the same all the way up) to 1 (a clear calm
     /// night: the ground cools the air above it, the wind near the ground
@@ -898,7 +907,7 @@ impl Weather {
     /// and the thermals with the wind in the mixed layer below them.
     pub fn advance(&mut self, dt: f64, cam: DVec3) {
         // The cloud field is sampled at (position + offset), so it moves against the offset.
-        self.cloud_off -= self.steady(cam, 2000.0) * dt * 1.6;
+        self.cloud_off -= self.cloud_drift(cam) * dt * 1.6;
         self.thermal_off -= self.steady(cam, 300.0) * dt;
         // Keep the offset small so it never costs precision (the thermal lattice repeats nowhere, so a jump is harmless).
         if self.thermal_off.length() > 2.0e5 {

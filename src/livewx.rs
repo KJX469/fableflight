@@ -47,14 +47,14 @@ pub struct Target {
     /// nimbostratus rain deck); 0 = none
     pub rain: f32,
     pub haze: f32,
+    /// the winds aloft at the model's pressure levels (empty: none to be had)
+    pub aloft: Vec<crate::weather::Aloft>,
     /// m/s, and where from (None: variable)
     pub wind: f64,
     pub wind_from: Option<f64>,
     pub gusts: f64,
     /// sea-level pressure, hPa (None: not reported)
     pub qnh: Option<f64>,
-    /// the winds aloft at the model's pressure levels (empty: none to be had)
-    pub aloft: Vec<crate::weather::Aloft>,
     /// freezing level (m above sea level) from the surface temperature
     /// (None: not reported)
     pub freezing: Option<f64>,
@@ -104,6 +104,7 @@ impl LiveWx {
     /// the last frame (s; 0 jumps straight to the report, as on the globe).
     pub fn step(&mut self, src: &Arc<Sources>, wx: &mut Weather, at: Option<(f64, f64)>, dt: f64) {
         if !wx.live {
+            wx.aloft.clear();
             self.settled = false;
             if self.owns_rain {
                 self.owns_rain = false;
@@ -112,9 +113,8 @@ impl LiveWx {
                 (wx.radar_cover, wx.deck_goal, wx.deck_tau) = (None, None, 6.0);
                 (self.radar, self.radar_got, self.radar_at) = (None, None, None);
             }
-            // Hand-set weather: the standard atmosphere, the winds aloft made up.
+            // Hand-set weather: the standard atmosphere.
             wx.qnh = 1013.25;
-            wx.aloft.clear();
             wx.freezing = None;
             wx.blowing = 0.0;
             return;
@@ -182,12 +182,6 @@ impl LiveWx {
             (wx.deck_goal, wx.deck_tau) = (None, 6.0);
         }
         self.owns_rain = true;
-        wx.wind += (t.wind - wx.wind) * k;
-        wx.gusts += (t.gusts - wx.gusts) * k;
-        if let Some(q) = t.qnh {
-            wx.qnh += (q - wx.qnh) * k;
-        }
-        wx.blowing = t.blowing;
         // The winds aloft eased in like the rest (a new report must not jolt
         // the aircraft), level by level in components.
         if !t.aloft.is_empty() {
@@ -203,6 +197,12 @@ impl LiveWx {
                 wx.aloft.clone_from(&t.aloft);
             }
         }
+        wx.wind += (t.wind - wx.wind) * k;
+        wx.gusts += (t.gusts - wx.gusts) * k;
+        if let Some(q) = t.qnh {
+            wx.qnh += (q - wx.qnh) * k;
+        }
+        wx.blowing = t.blowing;
         wx.freezing = match (wx.freezing, t.freezing) {
             (Some(a), Some(b)) => Some(a + (b - a) * k),
             (_, b) => b,
@@ -236,7 +236,7 @@ impl LiveWx {
         let age = (now - r.time).clamp(0, RADAR_STALE) as f64;
         let cloud = |lat: f64, lon: f64| {
             let p = geo::lla_to_pos(lat.to_radians(), lon.to_radians(), 0.0);
-            let drift = wx.steady(p, 2000.0) * 1.6 * age;
+            let drift = wx.cloud_drift(p) * 1.6 * age;
             (p.normalize() * 6371.0 + (wx.cloud_off + drift) / 1000.0).normalize() * 6371.0
         };
         // A squall line stands as one (the shaders draw it across the wind
@@ -553,6 +553,7 @@ fn from_metar(m: &serde_json::Value) -> Option<Target> {
     let clouds = if p.showers > 0.0 { clouds.max(0.45) } else { clouds };
     let foggy = ["FG", "BR", "HZ", "FU", "DU", "SA"].iter().any(|w| wx.contains(w));
     Some(Target {
+        aloft: Vec::new(),
         clouds,
         base_m,
         depth_m: depth(clouds, storms),
@@ -565,7 +566,6 @@ fn from_metar(m: &serde_json::Value) -> Option<Target> {
         wind_from,
         gusts: gust.map(|g| ((g - wind) / 8.0).clamp(0.0, 1.0)).unwrap_or(0.1),
         qnh: m["altim"].as_f64().filter(|q| (850.0..1100.0).contains(q)),
-        aloft: Vec::new(),
         freezing: freezing_for(m["temp"].as_f64().filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::snow::freezing_level(t, elev)), elev, p.snow),
         blowing: p.blowing,
         station,
@@ -787,6 +787,7 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
     let clouds = if matches!(code, 80..=82 | 85 | 86) { clouds.max(0.45) } else { clouds };
     let wind = f("wind_speed_10m")?;
     Some(Target {
+        aloft: Vec::new(),
         clouds,
         base_m: base,
         depth_m: depth(clouds, storms),
@@ -799,7 +800,6 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
         wind_from: f("wind_direction_10m"),
         gusts: f("wind_gusts_10m").map(|g| ((g - wind) / 8.0).clamp(0.0, 1.0)).unwrap_or(0.1),
         qnh: f("pressure_msl").filter(|q| (850.0..1100.0).contains(q)),
-        aloft: Vec::new(),
         freezing: freezing_for(f("temperature_2m").filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::snow::freezing_level(t, elev)), elev, snow),
         blowing: 0.0,
         station: "Open-Meteo".into(),

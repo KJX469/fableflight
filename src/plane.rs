@@ -116,6 +116,8 @@ pub struct Plane {
     pub probe_gust: [DVec3; PROBES],
     /// the slow level that gathers the turbulence into bursts
     burst: f64,
+    /// other aircraft's wakes near it (wake.rs), set by the caller each frame
+    pub wake: Vec<crate::wake::Seg>,
     /// the pilot's head swaying on its neck as the airframe is shaken (body frame, m)
     pub head: DVec3,
     /// specific force (what an accelerometer reads: everything but gravity), body frame, m/s²
@@ -315,6 +317,7 @@ impl Plane {
             gusts: crate::gust::GustField::for_chord(pos.x.to_bits() ^ pos.z.to_bits().rotate_left(17), spec.wing_area / spec.b.max(1.0)),
             probes: gust_probes(spec),
             probe_gust: [DVec3::ZERO; PROBES],
+            wake: Vec::new(),
             burst: 0.0,
             head: DVec3::ZERO,
             sf: DVec3::new(0.0, 9.81, 0.0),
@@ -1611,14 +1614,18 @@ impl Plane {
         self.gusts.set(air.sigma_h * m, air.len_h, air.sigma_w * m, air.len_w);
         // The field drifts with the air (the mean wind, not its gusts).
         self.gusts.advance(dt, self.wind, air.sigma_h.max(air.sigma_w));
-        if self.gusts.calm() {
+        if self.gusts.calm() && self.wake.is_empty() {
             self.gust = DVec3::ZERO;
             self.gust_rot = DVec3::ZERO;
             self.probe_gust = [DVec3::ZERO; PROBES];
             return;
         }
+        let calm = self.gusts.calm();
         for i in 0..PROBES {
-            self.probe_gust[i] = self.gusts.at(self.pos + self.rot * self.probes[i], upw);
+            let at = self.pos + self.rot * self.probes[i];
+            // The eddies, and any other aircraft's wake vortices.
+            let g = if calm { DVec3::ZERO } else { self.gusts.at(at, upw) };
+            self.probe_gust[i] = g + crate::wake::induced(&self.wake, at);
         }
         let g = &self.probe_gust;
         // The wing's probes: the CG and the stations along each half.
@@ -3066,6 +3073,10 @@ mod tests {
         }
     }
 
+    fn wake_right_vortex(s: &crate::wake::Seg) -> DVec3 {
+        s.right_vortex()
+    }
+
     fn empty_world() -> World {
         let dir = std::env::temp_dir().join("fablegame-test-cache");
         let src = Arc::new(crate::sources::Sources::new(crate::fetch::Fetcher::new(dir, true), String::new()));
@@ -4457,6 +4468,63 @@ mod tests {
         }
         let roll = |k: &str| rows.iter().find(|r| r.0 == k).unwrap().2;
         assert!(roll("747") < 0.5 * roll("c172"));
+    }
+
+    /// Into a heavy jet's wake, flying along it with one wing under a
+    /// vortex, hands off: it rolls hard, and a small aircraft far harder than
+    /// a big one, from geometry alone. Every built-in aircraft comes through
+    /// it with finite numbers.
+    #[test]
+    fn a_heavy_jets_wake_rolls_a_light_aircraft() {
+        use crate::wake::{Source, Wakes};
+        let w = empty_world();
+        let (lat, lon) = (0.6f64, -2.1f64);
+        let alt = 1500.0;
+        let mut worst = Vec::new();
+        for spec in crate::aircraft::BUILTIN {
+            let v = spec.cruise.clamp(40.0, 110.0);
+            // A wide-body passed this way along heading 0 (north) 40 s ago, 20 m higher.
+            let mut wk = Wakes::default();
+            let p0 = geo::lla_to_pos(lat, lon, alt + 20.0);
+            let (_, n, _) = geo::enu(p0);
+            let mut t = 0.0;
+            let mut sp = p0 - n * 1500.0;
+            while t < 40.0 {
+                let src = Source { id: 1, pos: sp, vel: n * 75.0, span: 64.4, mass: 230_000.0 };
+                wk.step(0.1, t, &[src], |_| DVec3::ZERO, 0.0, p0);
+                sp += n * 7.5;
+                t += 0.1;
+            }
+            // Put the aircraft's left wing tip into the right-hand vortex, heading north.
+            let mut p = Plane::spawn(spec, lat, lon, alt, 0.0, v);
+            let up = p.pos.normalize();
+            let segs = wk.near(p.pos, 400.0, t);
+            let mut best = (f64::MAX, DVec3::ZERO);
+            for s in &segs {
+                // (the vortex line's position, through the pair's middle and its right)
+                let c = wake_right_vortex(s);
+                let d = (c - p.pos) - n * (c - p.pos).dot(n);
+                if d.length() < best.0 {
+                    best = (d.length(), d);
+                }
+            }
+            p.pos += best.1 + p.right() * (0.7 * spec.span as f64);
+            let _ = up;
+            let (mut bank, mut rate) = (0.0f64, 0.0f64);
+            let dt = 1.0 / 180.0;
+            for _ in 0..(4.0 / dt) as usize {
+                p.wake = wk.near(p.pos, 150.0 + spec.b, t);
+                p.step(dt, &Controls::default(), &w);
+                assert!(p.pos.is_finite() && p.omega.is_finite(), "{}", spec.keys[0]);
+                bank = bank.max(p.right().dot(p.pos.normalize()).abs().asin().to_degrees());
+                rate = rate.max(p.omega.z.abs().to_degrees());
+            }
+            println!("{:10} span {:5.1}: bank {bank:5.1} deg, roll rate {rate:5.1} deg/s", spec.keys[0], spec.b);
+            worst.push((spec.keys[0], bank));
+        }
+        let bank = |k: &str| worst.iter().find(|r| r.0 == k).unwrap().1;
+        assert!(bank("c172") > 25.0, "{}", bank("c172"));
+        assert!(bank("747") < 0.5 * bank("c172"));
     }
 
     #[test]
