@@ -2250,7 +2250,19 @@ impl Plane {
         // Rough air rattles the cabin.
         self.dmg.vibe += ((self.air.sigma_w - 0.6).max(0.0) * 0.07 * smooth(10.0, 40.0, v)) as f32;
         self.vel += acc * dt;
-        self.omega += (wdot + torque_b / spec.inertia) * dt;
+        // Euler's equations: a body turning about one axis while spinning
+        // about another precesses. The airframe's own share is inertia
+        // coupling (a fast roll pitches and yaws a long, slender jet whose
+        // mass lies along its fuselage); the propeller's is its gyroscopic
+        // kick (it turns clockwise seen from the cockpit, so its angular
+        // momentum points forward: pitching the nose down yaws it left, as
+        // in a tail-dragger raising its tail).
+        let spin = match &spec.engine {
+            Engine::Piston(pe) => DVec3::NEG_Z * (pe.prop_i * self.prop_rate),
+            _ => DVec3::ZERO,
+        };
+        let gyro = -self.omega.cross(spec.inertia * self.omega + spin);
+        self.omega += (wdot + (torque_b + gyro) / spec.inertia) * dt;
         self.omega = self.omega.clamp_length_max(6.0);
         self.pos += self.vel * dt;
         self.rot = (self.rot * DQuat::from_scaled_axis(self.omega * dt)).normalize();
@@ -2703,6 +2715,26 @@ mod tests {
         let (b6, rb) = depth(B747, 6.0);
         assert!((0.25..0.6).contains(&b6[3]), "747 at 6 m/s: {} m", b6[3]);
         assert!(b6[3] <= 0.25 * rb + 1e-6);
+    }
+
+    #[test]
+    fn a_spinning_propeller_yaws_a_pitching_aircraft() {
+        // Nose pitched down with the propeller turning clockwise (seen from the
+        // cockpit): it precesses the nose to the left, about prop_i·ω_prop·q / I_yaw.
+        let w = empty_world();
+        let yaw_after = |prop_rate: f64| {
+            let mut p = Plane::spawn(C172, 0.6, -2.1, 1500.0, 0.0, 55.0);
+            p.prop_rate = prop_rate;
+            p.omega = DVec3::new(-1.0, 0.0, 0.0);
+            p.step(1.0 / 180.0, &Controls { throttle_set: Some(p.throttle), ..Default::default() }, &w);
+            p.omega.y
+        };
+        let w_prop = 2400.0 * std::f64::consts::TAU / 60.0;
+        let kick = (yaw_after(w_prop) - yaw_after(0.0)) * 180.0;
+        let want = piston().prop_i * w_prop / C172.inertia.y;
+        println!("yaw acceleration from the propeller: {kick:.3} rad/s² (expected {want:.3})");
+        assert!(kick > 0.0, "nose left");
+        assert!((kick / want - 1.0).abs() < 0.1);
     }
 
     #[test]
