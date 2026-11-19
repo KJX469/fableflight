@@ -4946,6 +4946,7 @@ impl Game {
             // Turbulence, thermals and storm drafts ride on top of the gusting wind.
             let air = self.wx.air(self.plane.pos, agl, self.time, water);
             self.plane.air = air;
+            self.plane.wind = self.wx.at(self.plane.pos, agl, self.time) + self.plane.pos.normalize() * air.draft + air.gust;
             // The ground under it: rain (above the freezing level it falls as
             // snow, which lies rather than wets) and lying snow, for the tyres.
             if gh.is_some() && agl < 300.0 {
@@ -4963,7 +4964,6 @@ impl Game {
                     self.plane.water = gear::water_eq(self.plane.ground_wx.rain);
                 }
             }
-            self.plane.wind = self.wx.at(self.plane.pos, agl, self.time) + self.plane.pos.normalize() * air.draft + air.gust;
             // The rain on the windows: only under (or in) a cloud that rains, the
             // rain deck the slider sets or a storm cell.
             self.wx.step_deck(dt, self.plane.pos, gh);
