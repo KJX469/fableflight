@@ -67,6 +67,7 @@ mod weather;
 mod weapons;
 mod mvt;
 mod plane;
+mod propulsion;
 mod render;
 mod single_sample;
 mod stroke_font;
