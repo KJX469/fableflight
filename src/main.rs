@@ -4979,6 +4979,11 @@ impl Game {
             self.plane.air = air;
             self.plane.auto_trim = self.auto_trim;
             self.plane.wind = self.wx.at(self.plane.pos, agl, self.time) + self.plane.pos.normalize() * air.draft + air.gust;
+            // The rain on the windows: only under (or in) a cloud that rains, the
+            // rain deck the slider sets or a storm cell.
+            self.wx.step_deck(dt, self.plane.pos, gh);
+            self.wx.rain = self.wx.rain_at(self.plane.pos, agl, self.time) as f32;
+            self.wx.advance(dt, self.plane.pos);
             // The wakes of the other aircraft about: airport traffic, live traffic and other players.
             if dt > 0.0 {
                 let mut targets = self.live.targets();
@@ -5005,11 +5010,6 @@ impl Game {
                 self.wakes.step(dt, self.time, &sources, |p| { let a = p.length() - geo::R - ground_h; wx.steady(p, a.max(2.0)) }, ground_h, self.plane.pos);
                 self.plane.wake = self.wakes.near(self.plane.pos, 150.0 + self.plane.spec.b, self.time);
             }
-            // The rain on the windows: only under (or in) a cloud that rains, the
-            // rain deck the slider sets or a storm cell.
-            self.wx.step_deck(dt, self.plane.pos, gh);
-            self.wx.rain = self.wx.rain_at(self.plane.pos, agl, self.time) as f32;
-            self.wx.advance(dt, self.plane.pos);
             // (Snow does not wet the glass or streak across it: only the liquid rain share does.)
             let fz = match (self.snow, self.wx.freezing) {
                 (snow::Mode::Always, _) | (_, None) => snow::freezing_guess(self.snow, la.to_degrees(), self.doy),

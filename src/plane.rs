@@ -63,6 +63,36 @@ struct Bury {
     cause: &'static str,
 }
 
+/// Where the gust field is sampled on an airframe (body frame), from its
+/// geometry alone: the CG, the wing's quarter chord at stations along each
+/// half, the nose and the tail. Any aircraft has these.
+fn gust_probes(spec: &Spec) -> [DVec3; PROBES] {
+    let wing = |x: f32| {
+        let s = (spec.wing_sect)(x);
+        (s.le + s.cdir * (0.25 * s.c)).as_dvec3()
+    };
+    let mut out = [DVec3::ZERO; PROBES];
+    // Stations along each half (left, then right), at the middle of equal
+    // bits of span.
+    for k in 0..WING_STATIONS {
+        let at = wing(spec.span * (k as f32 + 0.5) / WING_STATIONS as f32);
+        out[1 + k] = DVec3::new(-at.x, at.y, at.z);
+        out[1 + WING_STATIONS + k] = at;
+    }
+    let nose = spec.contacts.iter().map(|c| c.0[2]).fold(0.0f64, f64::min).min(-1.0);
+    let mut tail = spec.tail.fin_base;
+    if tail.z < 1.0 {
+        tail = DVec3::new(0.0, 0.0, -nose);
+    }
+    out[PROBES - 2] = DVec3::new(0.0, 0.0, nose);
+    out[PROBES - 1] = DVec3::new(0.0, tail.y, tail.z);
+    out
+}
+
+/// Gust probes along each wing half, and in all (the CG, both wings, nose and tail).
+const WING_STATIONS: usize = 4;
+const PROBES: usize = 1 + 2 * WING_STATIONS + 2;
+
 pub struct Impact {
     pub pos: DVec3,
     pub vel: DVec3,
@@ -2951,36 +2981,6 @@ pub fn lift_drag(spec: &Spec, alpha: f64, beta: f64, flap_cl: f64, stall: f64, f
 pub fn stall_amount(stall_a: f64, alpha: f64) -> f64 {
     smooth(stall_a, stall_a + 0.13, alpha.abs())
 }
-
-/// Where the gust field is sampled on an airframe (body frame), from its
-/// geometry alone: the CG, the wing's quarter chord at stations along each
-/// half, the nose and the tail. Any aircraft has these.
-fn gust_probes(spec: &Spec) -> [DVec3; PROBES] {
-    let wing = |x: f32| {
-        let s = (spec.wing_sect)(x);
-        (s.le + s.cdir * (0.25 * s.c)).as_dvec3()
-    };
-    let mut out = [DVec3::ZERO; PROBES];
-    // Stations along each half (left, then right), at the middle of equal
-    // bits of span.
-    for k in 0..WING_STATIONS {
-        let at = wing(spec.span * (k as f32 + 0.5) / WING_STATIONS as f32);
-        out[1 + k] = DVec3::new(-at.x, at.y, at.z);
-        out[1 + WING_STATIONS + k] = at;
-    }
-    let nose = spec.contacts.iter().map(|c| c.0[2]).fold(0.0f64, f64::min).min(-1.0);
-    let mut tail = spec.tail.fin_base;
-    if tail.z < 1.0 {
-        tail = DVec3::new(0.0, 0.0, -nose);
-    }
-    out[PROBES - 2] = DVec3::new(0.0, 0.0, nose);
-    out[PROBES - 1] = DVec3::new(0.0, tail.y, tail.z);
-    out
-}
-
-/// Gust probes along each wing half, and in all (the CG, both wings, nose and tail).
-const WING_STATIONS: usize = 4;
-const PROBES: usize = 1 + 2 * WING_STATIONS + 2;
 
 fn smooth(a: f64, b: f64, x: f64) -> f64 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
