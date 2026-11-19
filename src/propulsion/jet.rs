@@ -255,7 +255,11 @@ impl Jet {
     /// Thrust (N) available in this air, dry and with the burner fully lit.
     pub fn available(&self, amb: &Ambient) -> (f64, f64) {
         let d = &self.data;
-        let (th0, d0, m) = (amb.theta0(), amb.delta0(), amb.mach);
+        // Past Mach 1 the intake's shocks cost total pressure: the standard
+        // recovery of MIL-E-5007D, 1 - 0.075 (M - 1)^1.35 (0.93 at Mach 2).
+        let (th0, m) = (amb.theta0(), amb.mach);
+        let recovery = if m > 1.0 { 1.0 - 0.075 * (m - 1.0).powf(1.35) } else { 1.0 };
+        let d0 = amb.delta0() * recovery;
         let inlet = if d.inlet_mach > 0.0 { 1.0 - 0.65 * smooth(d.inlet_mach - 0.05, d.inlet_mach + 0.15, m) } else { 1.0 };
         let fade = if d.dry_mach > 0.0 { 1.0 - 0.97 * smooth(0.4 * d.dry_mach, d.dry_mach, m) } else { 1.0 };
         let dry = d.thrust * lapse_family(d.bpr, false, th0, d0, m, d.theta_break) * inlet;
