@@ -1,3 +1,4 @@
+mod aero;
 mod airframe;
 mod airfield;
 mod airmodels;
@@ -989,6 +990,8 @@ struct Game {
     hud_cockpit: bool,
     /// arcade mode (settings.rs): the fun features on
     arcade: bool,
+    /// the auto-trim assist (settings.rs)
+    auto_trim: bool,
     goto_open: bool,
     goto_text: String,
     goto_rx: Option<std::sync::mpsc::Receiver<Option<(f64, f64, f64, String)>>>,
@@ -1393,7 +1396,7 @@ impl Game {
             minimap: minimap::Minimap::new(&prefs),
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: if args.cockpit { 1 } else { prefs.cam_mode }, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
             utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
-            frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, arcade: args.arcade || prefs.arcade, goto_open: false, goto_text: String::new(), goto_rx: None,
+            frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, arcade: args.arcade || prefs.arcade, auto_trim: prefs.auto_trim, goto_open: false, goto_text: String::new(), goto_rx: None,
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, pad_held: Vec::new(), pad_note: (String::new(), 0.0), pad_aim: false, ap: autopilot::Autopilot::default(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, snow: args.snow.unwrap_or(prefs.snow), info_open: false, radial: Default::default(), info_page: menu::Page::Flight, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, radial_at: args.flight_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
@@ -2424,7 +2427,7 @@ impl Game {
             "flaps_up" if self.spec.lever.is_some() => self.spec.lever.as_ref()?.notch(p.flap_set).into(),
             "speedbrake" if self.spec.chute.is_some() => if p.chute_spent { "JETTISONED" } else if p.speedbrake > 0.0 { "DEPLOYED" } else { "PACKED" }.into(),
             "flaps_up" => format!("{:.0}°", self.spec.flaps.get(p.flap_set as usize).copied().unwrap_or(0.0)),
-            "trim_down" => format!("{:+.1}°", p.trim.to_degrees()),
+            "trim_down" => format!("{:+.1}°", p.trim_deg()),
             "obs_right" => format!("OBS {:03.0}°", self.radios.obs),
             "gear" => if p.gear_down { t!("down", "sorti") } else { t!("up", "rentré") }.into(),
             "prop_up" => format!("{:.0} RPM", 1800.0 + 900.0 * p.propeller),
@@ -2569,7 +2572,7 @@ impl Game {
         }
         let trim = ax(k(KeyCode::Numpad1), k(KeyCode::Numpad7));
         if trim != 0.0 && self.mode == Mode::Fly && !self.pause_open && !self.crashed {
-            self.plane.trim = (self.plane.trim + trim * 0.035 * dt).clamp(-0.05, 0.24);
+            self.plane.trim_by(trim * dt);
         }
         self.gamepad(dt, &mut c);
         self.joystick(&mut c);
@@ -3514,7 +3517,7 @@ impl Game {
         let adf = self.radios.adf.as_ref().and_then(|s| nav::adf_bearing(s, p.pos, hdg.to_degrees())).filter(|_| p.sys.powered());
         data[1] = [self.radios.nav.as_ref().map(|s| s.freq_khz as f32 / 1000.0).unwrap_or(0.0),
             self.radios.adf.as_ref().map(|s| s.freq_khz as f32).unwrap_or(0.0), adf.unwrap_or(0.0) as f32, if adf.is_some() { 1.0 } else { 0.0 }];
-        data[2] = [self.gauges.cylinder_head_f(), ((p.trim + 0.05) / 0.29) as f32, if p.sys.powered() { 1.0 } else { 0.0 }, p.engine_hours as f32];
+        data[2] = [self.gauges.cylinder_head_f(), p.trim_gauge() as f32, if p.sys.powered() { 1.0 } else { 0.0 }, p.engine_hours as f32];
         let plot = |pos: DVec3| { let v = pos - p.pos; [v.dot(east) as f32 / 18520.0, v.dot(north) as f32 / 18520.0, 1.0, 0.0] };
         if let Some(st) = &self.radios.nav { data[3] = plot(st.pos()); }
         for (dst, (st, _)) in data[4..8].iter_mut().zip(nav::near(lat.to_degrees(), lon.to_degrees(), 18520.0, nav::Kind::Vor).iter().take(4)) { *dst = plot(st.pos()); }
@@ -4770,7 +4773,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, arcade: self.arcade, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, snow: self.snow, last: self.last_start.clone(), multiplayer: self.mp_on, mp_server: self.mp_server.clone(), mp_name: self.mp_name.clone() }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, arcade: self.arcade, auto_trim: self.auto_trim, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, snow: self.snow, last: self.last_start.clone(), multiplayer: self.mp_on, mp_server: self.mp_server.clone(), mp_name: self.mp_name.clone() }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -4970,6 +4973,7 @@ impl Game {
             }
             air.draft += oro.w;
             self.plane.air = air;
+            self.plane.auto_trim = self.auto_trim;
             self.plane.wind = self.wx.at(self.plane.pos, agl, self.time) + self.plane.pos.normalize() * air.draft + air.gust;
             // The rain on the windows: only under (or in) a cloud that rains, the
             // rain deck the slider sets or a storm cell.
