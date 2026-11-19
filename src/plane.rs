@@ -82,6 +82,9 @@ pub struct Plane {
     pub wind: DVec3,
     /// how rough the air is here (set by the caller from the weather each frame)
     pub air: Air,
+    /// the day's atmosphere: sea-level pressure and temperature deviation
+    /// (set by the caller from the weather each frame; standard by default)
+    pub atmos: Atmos,
     /// the turbulent part of the air's motion (planet frame), on top of `wind`
     pub gust: DVec3,
     /// rotational gusts (body frame, rad/s): the air rolling, pitching and yawing across the airframe
@@ -265,6 +268,7 @@ impl Plane {
             vel: f * speed,
             wind: DVec3::ZERO,
             air: Air::default(),
+            atmos: Atmos::STD,
             gust: DVec3::ZERO,
             gust_rot: DVec3::ZERO,
             gust_a: DVec3::ZERO,
@@ -364,7 +368,7 @@ impl Plane {
         }
         // Nose up by the angle of attack that carries the weight at this speed
         // and height, and trimmed there, so it starts out in level flight.
-        let rho = density(alt);
+        let rho = p.atmos.density(alt);
         p.trim = p.alpha_level(speed, rho, 0.0);
         // Power for level flight too, and the propeller (or fans) already
         // turning as that power has them, or it starts out climbing or sinking.
@@ -558,12 +562,12 @@ impl Plane {
     /// aircraft stalls, and its limits are set, at the same indicated speed at any height.
     pub fn ias(&self) -> f64 {
         let (_, _, h) = geo::pos_to_lla(self.pos);
-        self.airspeed().length() * (density(h) / RHO0).sqrt()
+        self.airspeed().length() * (self.atmos.density(h) / RHO0).sqrt()
     }
     /// Mach number.
     pub fn mach(&self) -> f64 {
         let (_, _, h) = geo::pos_to_lla(self.pos);
-        self.airspeed().length() / sound_speed(h)
+        self.airspeed().length() / self.atmos.sound_speed(h)
     }
     /// How far past its speed limits it is (m/s indicated; the Mach limit counted
     /// as the same margin in speed), negative within them.
@@ -585,7 +589,7 @@ impl Plane {
         self.gear_down = gear_down || self.spec.fixed_gear();
         self.gear = if self.gear_down { 1.0 } else { 0.0 };
         let (_, _, h) = geo::pos_to_lla(self.pos);
-        let rho = density(h);
+        let rho = self.atmos.density(h);
         let v = self.airspeed().length();
         let flap_cl = self.spec.flap_cl * self.flaps;
         let a_old = self.trim;
@@ -939,7 +943,7 @@ impl Plane {
         // incidence drops by p s / V, the left one's rises.
         let (_, _, h) = geo::pos_to_lla(self.pos);
         let v = self.airspeed().length().max(20.0);
-        let q = 0.5 * density(h) * v * v;
+        let q = 0.5 * self.atmos.density(h) * v * v;
         let loading = self.mass() * 9.81 / self.spec.wing_area.max(1.0);
         let tip_alpha = (self.omega.z * s / v).clamp(-0.2, 0.2);
         let roll_n = (0.5 * 4.5 * tip_alpha * q / loading).clamp(-3.0, 3.0);
@@ -1144,11 +1148,11 @@ impl Plane {
     /// `v`, height `h`: a fraction of the static thrust that grows steeply
     /// with the fan speed, lapsing with the density and with the Mach number
     /// (the faster it flies, the less the fan adds to the air it swallows).
-    pub fn fan_thrust(fe: &crate::aircraft::Fan, n1: f64, v: f64, h: f64) -> f64 {
+    pub fn fan_thrust(fe: &crate::aircraft::Fan, n1: f64, v: f64, h: f64, atm: &Atmos) -> f64 {
         let x = ((n1 - fe.idle) / (1.0 - fe.idle)).max(0.0);
         let frac = if n1 >= fe.idle { fe.idle_thrust + (1.0 - fe.idle_thrust) * x.powf(1.7) } else { fe.idle_thrust * (n1 / fe.idle).powi(2) };
-        let m = v / sound_speed(h);
-        let sigma = density(h) / RHO0;
+        let m = v / atm.sound_speed(h);
+        let sigma = atm.density(h) / RHO0;
         fe.n as f64 * fe.thrust * frac * sigma.powf(0.8) * (1.0 - fe.mach_lapse[0] * m + fe.mach_lapse[1] * m * m).max(0.05)
     }
     /// What a turbo-ramjet's inlets pass of its thrust at this Mach number:
@@ -1175,17 +1179,17 @@ impl Plane {
     pub fn thrust(&self, throttle: f64, v: f64, h: f64) -> f64 {
         match &self.spec.engine {
             Engine::Piston(pe) => {
-                let rho = density(h);
+                let rho = self.atmos.density(h);
                 Self::prop_load(pe, Self::prop_equilibrium(pe, throttle, v, rho), v, rho, 1.0).0
             }
-            Engine::Fan(fe) => Self::fan_thrust(fe, Self::n1_target(fe, throttle), v, h) * self.inlet(v / sound_speed(h)) * self.dry_fade(fe, v / sound_speed(h)),
+            Engine::Fan(fe) => Self::fan_thrust(fe, Self::n1_target(fe, throttle), v, h, &self.atmos) * self.inlet(v / self.atmos.sound_speed(h)) * self.dry_fade(fe, v / self.atmos.sound_speed(h)),
             Engine::Rocket(_) => 0.0,
         }
     }
     /// The engine already running as the throttle has it.
     fn settle_engine(&mut self, v: f64, h: f64) {
         match &self.spec.engine {
-            Engine::Piston(pe) => self.prop_rate = Self::prop_equilibrium(pe, self.throttle, v, density(h)),
+            Engine::Piston(pe) => self.prop_rate = Self::prop_equilibrium(pe, self.throttle, v, self.atmos.density(h)),
             Engine::Fan(fe) => {
                 self.n1 = Self::n1_target(fe, self.throttle);
                 self.prop_rate = self.n1 * fe.n1_rpm * std::f64::consts::TAU / 60.0;
@@ -1225,9 +1229,9 @@ impl Plane {
     /// Drag (N) in steady flight at true airspeed `v`, height `h`.
     fn drag_level(&self, v: f64, h: f64, flaps: f64, gear: f64) -> f64 {
         let s = self.spec;
-        let qs = 0.5 * density(h) * v * v * s.wing_area;
+        let qs = 0.5 * self.atmos.density(h) * v * v * s.wing_area;
         let cl = self.mass() * 9.81 / qs.max(1.0);
-        qs * (s.cd0 + s.k_ind * cl * cl + s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / sound_speed(h)))
+        qs * (s.cd0 + s.k_ind * cl * cl + s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / self.atmos.sound_speed(h)))
     }
     /// Throttle to hold `v` while coming down at `descent` m/s.
     fn throttle_for(&self, v: f64, h: f64, flaps: f64, gear: f64, descent: f64) -> f64 {
@@ -1444,7 +1448,7 @@ impl Plane {
 
         let (lat, lon, h) = geo::pos_to_lla(self.pos);
         let upw = self.pos.normalize();
-        let rho = density(h);
+        let rho = self.atmos.density(h);
         // Limits are set in indicated airspeed (the dynamic pressure the airframe feels).
         let eas_k = (rho / RHO0).sqrt();
         let ground = world.ground(lat, lon);
@@ -1453,7 +1457,7 @@ impl Plane {
         self.turbulence(dt, v_air, upw);
         let vb = self.rot.inverse() * self.airspeed();
         let v = vb.length();
-        let mach = v / sound_speed(h);
+        let mach = v / self.atmos.sound_speed(h);
         let mut force_b = DVec3::ZERO;
         let mut wdot = DVec3::ZERO;
         let q = 0.5 * rho * v * v;
@@ -1740,7 +1744,7 @@ impl Plane {
                 let kr = if up { fe.spool_up * (0.3 + 0.7 * self.n1) } else { fe.spool_down };
                 self.n1 += (target - self.n1) * (dt * kr).min(1.0);
                 self.prop_rate = self.n1 * fe.n1_rpm * std::f64::consts::TAU / 60.0;
-                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0), h) * self.inlet(mach) * if c.boost { fe.boost } else { self.dry_fade(fe, mach) };
+                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0), h, &self.atmos) * self.inlet(mach) * if c.boost { fe.boost } else { self.dry_fade(fe, mach) };
                 // An afterburner (not an airliner's take-off bump) lights with a
                 // thump a moment after it is asked for and dies away as quickly.
                 let lit = c.boost && fe.boost > 1.2 && self.dmg.engine > 0.0 && self.n1 > fe.idle * 0.9;
@@ -2468,14 +2472,91 @@ pub fn density(h: f64) -> f64 {
 }
 
 /// Static pressure as a fraction of sea level's, in the USSA 1976.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn pressure_ratio(h: f64) -> f64 {
     atmosphere(h).1 / 101_325.0
 }
 
 /// Speed of sound (m/s) at geometric altitude `h` in the USSA 1976.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn sound_speed(h: f64) -> f64 {
     let (t, _) = atmosphere(h);
     (1.4 * 287.05287 * t).sqrt()
+}
+
+/// The air mass of the day: the standard atmosphere moved by the sea-level
+/// pressure (QNH) and warmed or cooled by a temperature deviation that holds
+/// at every height (the "ISA+15" of a performance chart). A hot day or a low
+/// QNH thins the air at a given height: the wing and the engine need more
+/// true airspeed and get less power, as at a high, hot airfield. `STD` is the
+/// standard atmosphere itself, exactly as `density`, `sound_speed` and
+/// `pressure_ratio` give it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Atmos {
+    /// sea-level pressure, hPa
+    pub qnh: f64,
+    /// temperature less the standard atmosphere's at the same height, K
+    pub isa_dev: f64,
+}
+
+impl Default for Atmos {
+    fn default() -> Self {
+        Self::STD
+    }
+}
+
+impl Atmos {
+    pub const STD: Atmos = Atmos { qnh: 1013.25, isa_dev: 0.0 };
+
+    /// A deviation from the temperature `temp_c` (°C) measured at `elev_m` (m).
+    pub fn from_surface(qnh: f64, temp_c: f64, elev_m: f64) -> Self {
+        let (t_std, _) = atmosphere(elev_m);
+        Self { qnh, isa_dev: (temp_c + 273.15 - t_std).clamp(-60.0, 60.0) }
+    }
+
+    /// Temperature (K) and pressure (Pa) at geometric height `h` (m).
+    pub fn at(&self, h: f64) -> (f64, f64) {
+        if *self == Self::STD {
+            return atmosphere(h);
+        }
+        // The pressure is the standard atmosphere's at the pressure altitude,
+        // the height above where its pressure is the QNH (below its own sea
+        // level on a high-pressure day): that is what the QNH means, an
+        // altimeter set to it reads the field's elevation whatever the
+        // temperature. (So an altimeter's own error in hot or cold air,
+        // reading low or high far above the field, is not modelled.)
+        let z0 = 44_330.77 * (1.0 - (self.qnh.clamp(850.0, 1100.0) / 1013.25).powf(0.190_263));
+        let (t_h, _) = atmosphere(h);
+        let (_, p) = atmosphere(z0 + h);
+        ((t_h + self.isa_dev).max(100.0), p)
+    }
+
+    /// Air density (kg/m³) at geometric height `h` (m).
+    pub fn density(&self, h: f64) -> f64 {
+        let (t, p) = self.at(h);
+        p / (287.05287 * t)
+    }
+
+    /// Static pressure as a fraction of the standard sea level's.
+    pub fn pressure_ratio(&self, h: f64) -> f64 {
+        self.at(h).1 / 101_325.0
+    }
+
+    /// Speed of sound (m/s) at geometric height `h`.
+    pub fn sound_speed(&self, h: f64) -> f64 {
+        (1.4 * 287.05287 * self.at(h).0).sqrt()
+    }
+
+    /// Density altitude (m): the standard-atmosphere height with this density.
+    pub fn density_altitude(&self, h: f64) -> f64 {
+        let rho = self.density(h);
+        let (mut lo, mut hi) = (-2_000.0, 30_000.0);
+        for _ in 0..50 {
+            let mid = 0.5 * (lo + hi);
+            if density(mid) > rho { lo = mid } else { hi = mid }
+        }
+        0.5 * (lo + hi)
+    }
 }
 
 /// The intact airframe's lift and drag coefficients (wave drag and the
@@ -2573,6 +2654,50 @@ mod tests {
         let (b6, rb) = depth(B747, 6.0);
         assert!((0.25..0.6).contains(&b6[3]), "747 at 6 m/s: {} m", b6[3]);
         assert!(b6[3] <= 0.25 * rb + 1e-6);
+    }
+
+    #[test]
+    fn the_days_atmosphere_moves_density_and_pressure() {
+        // Standard is standard, exactly.
+        for h in [0.0, 1_500.0, 11_000.0, 30_000.0] {
+            assert_eq!(Atmos::STD.density(h), density(h));
+            assert_eq!(Atmos::STD.sound_speed(h), sound_speed(h));
+        }
+        // The QNH is the pressure at sea level.
+        for q in [980.0, 1013.25, 1040.0] {
+            let a = Atmos { qnh: q, isa_dev: 0.0 };
+            assert!((a.at(0.0).1 / 100.0 - q).abs() < 0.05, "QNH {q}");
+        }
+        // About 27 ft (8.2 m) of height per hPa near sea level.
+        let low = Atmos { qnh: 1003.25, isa_dev: 0.0 };
+        let dh = (Atmos::STD.at(0.0).1 - low.at(0.0).1) / (density(0.0) * 9.80665) / 10.0;
+        assert!((dh - 8.3).abs() < 0.3, "{dh} m per hPa");
+        // A hot day: ISA+20 at sea level is a density altitude of about
+        // 2,400 ft (the 120 ft per °C rule), and the speed of sound is higher.
+        let hot = Atmos { qnh: 1013.25, isa_dev: 20.0 };
+        let da = hot.density_altitude(0.0) * 3.28084;
+        assert!((2_200.0..2_700.0).contains(&da), "density altitude {da:.0} ft");
+        assert!(hot.sound_speed(0.0) > sound_speed(0.0) + 10.0);
+        // The pressure is the QNH's at any temperature; the air is thinner.
+        assert_eq!(hot.at(3_000.0).1, Atmos::STD.at(3_000.0).1);
+        assert!(hot.density(3_000.0) < density(3_000.0));
+        // A high, hot field: Denver (1,655 m) at 35 °C with standard pressure
+        // is about 8,850 ft density altitude (the FAA's formula, dry air).
+        let denver = Atmos::from_surface(1013.25, 35.0, 1_655.0);
+        let da = denver.density_altitude(1_655.0) * 3.28084;
+        assert!((8_650.0..9_050.0).contains(&da), "Denver {da:.0} ft");
+    }
+
+    #[test]
+    fn engines_make_less_on_a_hot_day() {
+        for spec in [C172, B747] {
+            let mut p = Plane::spawn(spec, 0.6, -2.1, 0.0, 0.0, 0.0);
+            let std = p.thrust(1.0, 30.0, 0.0);
+            p.atmos = Atmos { qnh: 1013.25, isa_dev: 30.0 };
+            let hot = p.thrust(1.0, 30.0, 0.0);
+            println!("{}: static thrust {std:.0} N standard, {hot:.0} N at ISA+30", spec.name);
+            assert!(hot < std * 0.97 && hot > std * 0.8);
+        }
     }
 
     #[test]
@@ -4522,7 +4647,7 @@ mod tests {
         assert!(clean > 145.0 && clean < 170.0 && full > 115.0 && full < 135.0);
 
         // Static thrust a quarter of the weight; the fans take several seconds to spool up.
-        let t0 = Plane::fan_thrust(fe, 1.0, 0.0, 0.0);
+        let t0 = Plane::fan_thrust(fe, 1.0, 0.0, 0.0, &Atmos::STD);
         println!("static thrust {:.0} kN = {:.2} W", t0 / 1000.0, t0 / (s.mass * 9.81));
         assert!(t0 / (s.mass * 9.81) > 0.3 && t0 / (s.mass * 9.81) < 0.4);
     }

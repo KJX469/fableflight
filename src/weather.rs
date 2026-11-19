@@ -80,6 +80,9 @@ pub struct Weather {
     /// sea-level pressure (hPa): the QNH an altimeter is set to (standard
     /// unless the real weather says otherwise)
     pub qnh: f64,
+    /// how much warmer (K) than the standard atmosphere the air is, at every
+    /// height (0 unless the real weather or `--isa-dev` says otherwise)
+    pub isa_dev: f64,
 }
 
 /// What kind of convective cell: a shower (towering cumulus or a small
@@ -320,7 +323,12 @@ fn sites(q: DVec3, grid: f64, range: f64, mut f: impl FnMut(DVec3, f64, u32)) {
 impl Weather {
     pub fn new(clouds: f32) -> Self {
         // A light west-south-westerly, as the smoke always drifted before there was a slider for it.
-        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, rain: 0.0, rain_set: None, deck: 0.0, deck_at: None, deck_ground: None, deck_place: None, deck_prev: None, deck_fade: 0.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), placed: Vec::new(), live_cells: Vec::new(), radar_cover: None, deck_goal: None, deck_tau: 6.0, live: false, live_station: String::new(), live_raw: String::new(), real_time: false, showers_only: false, qnh: 1013.25 }
+        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, rain: 0.0, rain_set: None, deck: 0.0, deck_at: None, deck_ground: None, deck_place: None, deck_prev: None, deck_fade: 0.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, open: false, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), placed: Vec::new(), live_cells: Vec::new(), radar_cover: None, deck_goal: None, deck_tau: 6.0, live: false, live_station: String::new(), live_raw: String::new(), real_time: false, showers_only: false, qnh: 1013.25, isa_dev: 0.0 }
+    }
+
+    /// The air mass the aircraft flies in: today's sea-level pressure and temperature.
+    pub fn atmos(&self) -> crate::plane::Atmos {
+        crate::plane::Atmos { qnh: self.qnh, isa_dev: self.isa_dev }
     }
 
     /// The rain deck's mean base and top, metres above sea level: the heavier
