@@ -42,6 +42,18 @@ From the `Rig` (`aero::Rig`):
 | `fuse` | fuselage coefficients (`cm_a`, `cn_b`, `cl_b`, `cy_b`) |
 | `downwash`, `eta_tail` | share of the lifting-line downwash at the tail; tail dynamic pressure ratio |
 | `prop_hub`, `swirl` | the propeller's hub and its slipstream's swirl |
+| `trim_stab`, `taileron` | the trim moves the whole tailplane; tailplane halves move apart for roll |
+| `aileron_chord_m` | elevons' chord in metres along the span (a delta's) |
+| `aileron_in`, `outboard_lock` | inboard (all-speed) ailerons; outboard ones only with flaps out |
+| `aileron_droop` | ailerons droop with full flaps (rad) |
+| `spoiler`, `roll_spoiler` | spoiler panels (span, chord, travel); share of their travel the roll uses |
+| `slat_dcl_max` | extra cl_max with the slats out |
+| `vortex`, `vortex_burst` | leading-edge vortex lift (Polhamus K_v) on strips swept past 50°; burst angle |
+| `cg_from_mac`, `datum` | where the model's origin sits on the MAC, when it is not at the reference CG |
+| `cg_mach` | a CG moved with Mach by fuel transfer: (Mach, fraction of MAC) pairs |
+| `fcs` | the flight control system (below) |
+
+`fuse` also takes `cl_a`, lift from the body (chines, strakes, LEX).
 
 The aileron and rudder rigging that makes the aircraft fly straight hands off
 in the cruise (its fixed tabs and fin offset) is worked out at spawn from
@@ -65,6 +77,47 @@ in the cruise (its fixed tabs and fin offset) is worked out at spawn from
    reference values it prints, and a stall test like
    `a_cessna_172_stalls_where_the_book_says`. Then fly it.
 
+## Flight control system
+
+`aero::Fcs` (start from `Fcs::NONE`) sits between the stick and the surfaces.
+None of it is per aircraft: each field is a law or a gain.
+
+| field | what |
+|---|---|
+| `damp`, `damp_auth`, `damp_q` | pitch, roll and yaw dampers (the yaw one washed out), their authority, and the dynamic pressure above which their gains fall |
+| `gear_q`, `gear_pitch` | roll and pedal authority geared down above this dynamic pressure, as a ratio changer does; how much of that the pitch gets |
+| `yaw_beta` | sideslip fed to the rudder (a lateral accelerometer) |
+| `g_law`, `alpha_max` | fly-by-wire pitch: the stick asks for load factor (up to `Spec::fbw_g`), with an angle-of-attack limit |
+| `speed_hold` | makes the g law speed stable (C*U): let go, it returns to the speed it was trimmed at; trim keys and the auto-trim assist move that speed |
+| `flare_alpha` | below 50 ft with the gear down, the g law hands over to an angle-of-attack command from what it flew at 50 ft, so a steady pull flares |
+| `roll_rate` | fly-by-wire roll: the stick asks for a roll rate |
+| `beta_cmd` | fly-by-wire yaw: sideslip held where the pedals ask |
+
+The fly-by-wire laws invert the strips themselves each step (incremental
+dynamic inversion): from the angular acceleration the command needs and how
+much each surface moves the moment now, they work out the deflection. So a
+new fly-by-wire aircraft needs no gains, only its limits. A surface pushed
+past the deflection that does the most is brought back until it bites again.
+On the ground, or below 40 m/s, the stick moves the surfaces, and the
+elevator the g law was holding fades out over a few seconds.
+
+The autopilot flies a g-law aircraft through the same stick: it asks for the
+load factor that holds the climb or descent it wants.
+
+## Stall
+
+Each strip stalls on its own: separation follows the section's angle past
+its maximum lift, letting go quickly and reattaching slowly. A deflected flap
+or control surface raises the section's stall angle by about two thirds of
+the angle its deflection is worth (DATCOM's plain flap), and the lift it adds
+acts where thin-airfoil theory puts it for its chord (`aero::flap_cm`: 0.17
+of the chord behind the quarter chord for a quarter-chord flap, toward
+mid-chord for a narrow one). Spoilers spoil the lift behind them without
+moving the stall. `Plane::stall_alpha` with a rig is the angle at which the
+first wing strip lets go, found once for each configuration (flaps, slats,
+Mach) and cached; the stall warning and the autopilot's low-speed protection
+use it.
+
 ## Trim
 
 With a rig, the trim is a real elevator trim (`Plane::pitch_trim`, -1 nose down
@@ -73,11 +126,35 @@ assist (Settings, on by default) winds it while the pilot flies the stick, to
 where the aircraft holds 1 g hands off at its speed, as the older model's
 auto-trim does. With it off, trimming is the pilot's job.
 
+## Checking every aircraft
+
+All nine built-in aircraft fly on rigs. The tests that hold them to it:
+
+- `every_aircraft_is_statically_stable_and_damped` (modes.rs): at a cruise
+  point each has a lift slope, pitch and weathercock stability (a fly-by-wire
+  airframe may be slightly relaxed), dihedral effect and damping on all three
+  axes, from the strips' own force and moment differences;
+- `handling_of_*` (modes.rs): short period, phugoid, Dutch roll, roll rate
+  and spiral against MIL-F-8785C Level 1 (class I light aircraft, class III
+  transports, class IV fighters);
+- each aircraft's `performance_is_*`, take-off, approach and landing tests
+  (plane.rs), and the autopilot's tests flying every aircraft (autopilot.rs).
+
 ## Limits
 
 - Strip theory: no spanwise flow, no vortex lattice. The 3-D lift slope and
   induced drag come from each surface's aspect ratio.
 - The downwash is the lifting-line value, lagged by the time the air takes to
   reach the tail; the slipstream is momentum theory with a fixed swirl ratio.
-- Compressibility is only the `Spec`'s wave drag; no Mach effect on the sections yet.
-- A delta's vortex lift and the derived Phantom do not trim yet; they need rigs of their own.
+- Compressibility: the sections' lift slope with Mach, the buffet boundary,
+  the aerodynamic centre moving aft past Mach 1 (more behind a subsonic
+  leading edge), and the `Spec`'s wave drag. No shock-induced separation.
+- A control surface's lift is spread over its strip's chord as 2-D thin
+  airfoil theory has it; on a slender delta's long root chord that puts the
+  elevons' lift further forward than a lifting-surface method would.
+- Estimates still standing (see each rig's comments): most tail areas and
+  sections of the jets, the fuselage coefficients, damper gains, and the
+  fly-by-wire laws' limits. Known gaps: the 747's static margin comes out
+  high (about 36-39%); the Hornet approaches at 12° angle of attack, not the
+  real 8.1°, as its leading-edge extensions' vortex lift is not modelled;
+  the G650 flies its approach at 5.1° (the book's 5.8°).

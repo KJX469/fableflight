@@ -214,6 +214,25 @@ pub struct Plane {
     last_torque: f64,
     /// the aileron and rudder rigging (see `aero::Input::rigging`)
     rigging: [f64; 2],
+    /// the control surfaces as the flight control system sets them (pitch,
+    /// yaw, roll like `stick`): the stick itself without one, and the
+    /// fly-by-wire's integrator and the yaw damper's washout
+    pub surf: DVec3,
+    fcs_i: f64,
+    /// the speed a speed-stable g law (`Fcs::speed_hold`) is trimmed to, m/s
+    fcs_vref: f64,
+    /// the elevator a g law held when it handed back to the stick (on the
+    /// ground, slow), fading out, so the touchdown does not drop the nose
+    fcs_hold: f64,
+    /// the angle of attack it flew at 50 ft, for the flare mode
+    fcs_flare: f64,
+    fcs_yaw: f64,
+    /// how far the fuel transfer has moved the CG (fraction of `Spec::mac`), for a rig that schedules it
+    cg_shift: f64,
+    pumping: bool,
+    /// The strips' stall: the angle of attack the wing lets go at, and the
+    /// flaps, slats and Mach number it was found for.
+    strip_stall: Option<[f64; 4]>,
     /// trees struck during the last step, for the caller to knock down
     pub tree_hits: Vec<TreeRef>,
     /// recent brushes with foliage
@@ -406,14 +425,27 @@ impl Plane {
             origin: 0.0,
             launch: pos,
             auto: false,
-            airframe: spec.rig.map(|r| Box::new(aero::Airframe::build(spec, r))),
+            // Every aeroplane flies on its strips: on its own rig, or one
+            // derived from its `Spec` (see `check_derived_rig`).
+            airframe: if spec.rocket().is_some() { None } else { Some(Box::new(aero::Airframe::build(spec, &spec.rig.copied().unwrap_or_else(|| aero::Rig::derive(spec))))) },
             aero_st: aero::State::default(),
             pitch_trim: 0.0,
             auto_trim: true,
             last_thrust: 0.0,
             last_torque: 0.0,
             rigging: [0.0; 2],
+            surf: DVec3::ZERO,
+            fcs_i: 0.0,
+            fcs_vref: 0.0,
+            fcs_hold: 0.0,
+            fcs_flare: 0.0,
+            fcs_yaw: 0.0,
+            cg_shift: 0.0,
+            pumping: false,
+            strip_stall: None,
         };
+        p.check_derived_rig();
+        p.transfer_fuel(speed / sound_speed(alt), 0.0);
         p.rig_for_cruise();
         if spec.rocket().is_some() {
             p.rocket_air_start(f, u, speed);
@@ -423,7 +455,7 @@ impl Plane {
         // and height, and trimmed there, so it starts out in level flight.
         let rho = density(alt);
         p.trim = p.alpha_level(speed, rho, 0.0);
-        p.trim_strips(speed, rho);
+        p.trim_strips(speed, (rho, sound_speed(alt)));
         // Power for level flight too, and the propeller (or fans) already
         // turning as that power has them, or it starts out climbing or sinking.
         p.throttle = if speed > 20.0 { p.throttle_for(speed, alt, 0.0, 0.0, 0.0) } else { 0.0 };
@@ -433,7 +465,7 @@ impl Plane {
             // Trimmed again with the slipstream that power gives over the tail.
             for _ in 0..2 {
                 p.engine_state(speed, rho);
-                p.trim_strips(speed, rho);
+                p.trim_strips(speed, (rho, sound_speed(alt)));
                 p.throttle = p.throttle_for(speed, alt, 0.0, 0.0, 0.0);
                 p.charge = p.throttle;
                 p.settle_engine(speed, alt);
@@ -471,6 +503,12 @@ impl Plane {
             Engine::Rocket(_) => {}
         }
         p.trim = 0.08;
+        if p.airframe.is_some() {
+            // Trim set for the climb-out, as the checklist has it.
+            let speed = spec.approach.0 * 1.25;
+            p.trim_strips(speed, (density(h), sound_speed(h)));
+            p.trim = 0.08;
+        }
         p.on_ground = true;
         p.hold = true;
         p
@@ -517,7 +555,28 @@ impl Plane {
     pub fn cg(&self) -> f64 {
         let s = self.spec;
         let moment = (self.fuel - 0.5 * s.fuel_kg) * s.fuel_arm + (self.payload - s.payload[0]) * s.payload[2];
-        s.cg[0] + moment / self.mass() / s.mac
+        s.cg[0] + self.cg_shift + moment / self.mass() / s.mac
+    }
+
+    /// The fuel transfer that moves the CG with the Mach number, where the rig
+    /// has one: a flight engineer's (or an automatic) pumping fore and aft,
+    /// about a percent of the chord every 20 seconds, started once the CG is
+    /// half a percent from where it should be and run until it is there, so it
+    /// does not chase every swing of the speed (`dt` 0: there at once).
+    fn transfer_fuel(&mut self, mach: f64, dt: f64) {
+        let Some(want) = self.airframe.as_deref().and_then(|af| af.rig.cg_for(mach)) else { return };
+        let d = want - self.spec.cg[0] - self.cg_shift;
+        if dt <= 0.0 {
+            self.cg_shift += d;
+            return;
+        }
+        if d.abs() > 0.005 {
+            self.pumping = true;
+        }
+        if self.pumping {
+            self.cg_shift += d.clamp(-0.0005 * dt, 0.0005 * dt);
+            self.pumping = d.abs() > 0.0005 * dt;
+        }
     }
 
     /// How far the CG is outside its limits (fraction of MAC; 0 inside, - forward, + aft).
@@ -572,8 +631,35 @@ impl Plane {
     }
 
     pub fn stall_alpha(&self) -> f64 {
+        if let (Some(_), Some(st)) = (&self.airframe, self.strip_stall) {
+            return st[3];
+        }
         let s = self.spec;
         s.stall_alpha - s.stall_flap * self.flaps + s.stall_slat * self.slats
+    }
+
+    /// Find where the strips stall as configured now (flaps, slats, Mach),
+    /// once for each configuration: the angle of attack, wings level and
+    /// the flow settled, at which the first of the wing's sections lets go.
+    fn find_strip_stall(&mut self, af: &aero::Airframe, inp: &aero::Input) {
+        let key = [inp.flaps, inp.slats, inp.mach];
+        if self.strip_stall.is_some_and(|st| (st[0] - key[0]).abs() < 0.01 && (st[1] - key[1]).abs() < 0.01 && (st[2] - key[2]).abs() < 0.02) {
+            return;
+        }
+        let v = inp.vb.length().max(1.0);
+        let stall_at = |a: f64| {
+            let mut i = *inp;
+            i.vb = DVec3::new(0.0, -v * a.sin(), -v * a.cos());
+            (i.omega, i.elevator, i.aileron, i.rudder, i.spoilers) = (DVec3::ZERO, 0.0, 0.0, 0.0, 0.0);
+            let mut st = aero::State::default();
+            af.forces(&i, &mut st, 10.0).stall
+        };
+        let (mut lo, mut hi) = (0.0, 0.8);
+        for _ in 0..14 {
+            let mid = 0.5 * (lo + hi);
+            if stall_at(mid) >= 0.5 { hi = mid } else { lo = mid }
+        }
+        self.strip_stall = Some([key[0], key[1], key[2], 0.5 * (lo + hi)]);
     }
     pub fn flap_deg(&self) -> f64 {
         self.flaps * self.spec.flaps.last().copied().unwrap_or(0.0)
@@ -659,7 +745,7 @@ impl Plane {
         let flap_cl = self.spec.flap_cl * self.flaps;
         let a_old = self.trim;
         self.trim = self.alpha_level(v, rho, flap_cl);
-        self.trim_strips(v, rho);
+        self.trim_strips(v, (rho, sound_speed(h)));
         // Pitch the nose to the new angle of attack and the flight path down the glide.
         let up = self.pos.normalize();
         let fp = (self.airspeed() - up * descent).normalize();
@@ -683,10 +769,14 @@ impl Plane {
     /// The value an animation input has this instant (see airframe::Input).
     fn input(&self, i: Input) -> f32 {
         let s = self.stick.as_vec3();
+        // The surfaces show what the flight control system makes of the stick.
+        let sf = if self.airframe.is_some() { self.surf.as_vec3() } else { s };
         match i {
-            Input::Aileron(side) => -side * s.z,
-            Input::Elevator | Input::Pitch => s.x,
-            Input::Rudder | Input::Yaw => s.y,
+            Input::Aileron(side) => -side * sf.z,
+            Input::Elevator => sf.x,
+            Input::Pitch => s.x,
+            Input::Rudder => sf.y,
+            Input::Yaw => s.y,
             Input::Roll => s.z,
             Input::Flaps => self.flaps as f32,
             Input::FlapLever => self.flap_set as f32 / self.spec.max_notch().max(1) as f32,
@@ -1333,10 +1423,10 @@ impl Plane {
         let qs = 0.5 * density(h) * v * v * s.wing_area;
         if let Some(af) = self.airframe.as_deref() {
             // On the strips: trimmed hands off at this speed, tail load and all.
-            let rho = density(h);
-            let (trim, alpha) = self.trim_for(af, v, rho, 1.0);
+            let air = (density(h), sound_speed(h));
+            let (trim, alpha) = self.trim_for(af, v, air, 1.0);
             let body = qs * (s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / sound_speed(h)));
-            return self.strip_pitch(af, v, rho, alpha, trim).2 + body;
+            return self.strip_pitch(af, v, air, alpha, trim).2 + body;
         }
         let cl = self.mass() * 9.81 / qs.max(1.0);
         qs * (s.cd0 + s.k_ind * cl * cl + s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / sound_speed(h)))
@@ -1356,7 +1446,11 @@ impl Plane {
 
     /// Wind the trim (the trim wheel or keys): `d` of +1 is a second's worth nose up.
     pub fn trim_by(&mut self, d: f64) {
-        if self.airframe.is_some() {
+        if self.airframe.as_deref().is_some_and(|af| af.rig.fcs.g_law && af.rig.fcs.speed_hold > 0.0) {
+            // A speed-stable g law is trimmed to a speed: nose up is slower,
+            // 2% a second.
+            self.fcs_vref = (self.fcs_vref * (1.0 - 0.02 * d)).max(1.0);
+        } else if self.airframe.is_some() {
             // End to end in about eight seconds.
             self.pitch_trim = (self.pitch_trim + d * 0.25).clamp(-1.0, 1.0);
         } else {
@@ -1390,7 +1484,8 @@ impl Plane {
     // ------------------------------------------------- surface-element aerodynamics
 
     /// The strips' inputs as the aircraft is now (damage, controls, trim).
-    fn strip_input(&self, af: &aero::Airframe, vb: DVec3, rho: f64, ge: f64) -> aero::Input {
+    fn strip_input(&self, af: &aero::Airframe, vb: DVec3, air: (f64, f64), ge: f64) -> aero::Input {
+        let rho = air.0;
         let dm = self.dmg;
         let ail = |s: usize| {
             let a = dm.aileron[s] * dm.aileron_frac(dm.wing[s]);
@@ -1402,13 +1497,16 @@ impl Plane {
             vb,
             omega: self.omega - self.gust_rot,
             rho,
+            mach: vb.length() / air.1,
             cg: af.cg_at(self.cg()),
-            elevator: self.stick.x,
+            elevator: self.surf.x,
             trim: self.pitch_trim * if self.pitch_trim > 0.0 { rig.trim[1] } else { rig.trim[0] },
-            aileron: self.stick.z,
-            rudder: self.stick.y,
+            aileron: self.surf.z,
+            rudder: self.surf.y,
             rigging: self.rigging,
             flaps: self.flaps,
+            slats: self.slats,
+            spoilers: self.spoilers,
             ail_ok: [ail(0), ail(1)],
             flap_ok: [dm.flap[0] as f64, dm.flap[1] as f64],
             elev_ok: [dm.elevator[0] as f64, dm.elevator[1] as f64],
@@ -1441,7 +1539,14 @@ impl Plane {
             }
             _ => 1.0,
         };
-        let inp = self.strip_input(&af, vb, rho, ge);
+        let air = (rho, sound_speed(h));
+        self.airframe = Some(af);
+        self.transfer_fuel(mach, dt);
+        let af = self.airframe.take().expect("a rig");
+        let inp = self.strip_input(&af, vb, air, ge);
+        self.fcs(&af, &inp, dt, ground_h.map_or(f64::INFINITY, |gh| h - gh));
+        let inp = self.strip_input(&af, vb, air, ge);
+        self.find_strip_stall(&af, &inp);
         let out = af.forces(&inp, &mut self.aero_st, dt);
         self.alpha = out.alpha;
         self.stalled = out.stall > 0.5 && v > 8.0;
@@ -1474,20 +1579,183 @@ impl Plane {
         // trim to where the aircraft holds 1 g at this speed hands off, as the
         // other aircraft's auto-trim does.
         let el = (dm.elevator[0] * dm.stab[0] + dm.elevator[1] * dm.stab[1]) as f64 * 0.5;
-        if self.auto_trim && el > 0.05 && self.stick.x.abs() > 0.06 && v > 15.0 {
+        if self.auto_trim && !af.rig.fcs.g_law && el > 0.05 && self.stick.x.abs() > 0.06 && v > 15.0 {
             let level = self.up().dot(self.pos.normalize()).max(0.0);
-            let (want, _) = self.trim_for(&af, v, rho, level);
+            let (want, _) = self.trim_for(&af, v, (rho, sound_speed(h)), level);
             self.pitch_trim += (want - self.pitch_trim) * (dt * 0.5).min(1.0);
         }
         self.airframe = Some(af);
         (force, moment / spec.inertia)
     }
 
+    /// The flight control system: from the stick to the surfaces (`surf`).
+    /// Without one the stick moves them, with the dampers the aircraft has
+    /// added. Fly-by-wire inverts the strips themselves: it works out the
+    /// angular acceleration that brings the load factor, roll rate and
+    /// sideslip to what the stick asks for, and the surface deflections that
+    /// give it this instant (incremental dynamic inversion, as the F-35's
+    /// control laws do), so it needs no tuning per aircraft.
+    fn fcs(&mut self, af: &aero::Airframe, inp: &aero::Input, dt: f64, height: f64) {
+        let f = &af.rig.fcs;
+        let om = self.omega;
+        let v = inp.vb.length();
+        // The yaw damper's washout: steady yaw (a turn) passes, changes are damped.
+        self.fcs_yaw += (om.y - self.fcs_yaw) * (dt / 2.5).min(1.0);
+        let yaw_hp = om.y - self.fcs_yaw;
+        let q = 0.5 * inp.rho * v * v;
+        let lim = f.damp_auth;
+        let sched = if f.damp_q > 0.0 && q > f.damp_q { f.damp_q / q } else { 1.0 };
+        let (d_om, d_yaw) = (om * sched, yaw_hp * sched);
+        let mut want = self.stick;
+        if f.gear_q > 0.0 && q > f.gear_q {
+            let k = f.gear_q / q;
+            (want.y, want.z) = (want.y * k, want.z * k);
+            want.x *= 1.0 - f.gear_pitch * (1.0 - k);
+        }
+        want.x += (-f.damp[0] * d_om.x).clamp(-lim, lim);
+        let beta = if v > 1.0 { (inp.vb.x / v).clamp(-1.0, 1.0).asin() } else { 0.0 };
+        want.y += (f.damp[2] * d_yaw + f.yaw_beta * beta).clamp(-lim, lim);
+        want.z += (f.damp[1] * d_om.z).clamp(-lim, lim);
+        let fbw = (f.g_law || f.roll_rate > 0.0 || f.beta_cmd > 0.0) && !self.on_ground && v > 40.0;
+        if !fbw {
+            self.fcs_i = 0.0;
+            // (Below its speed, on the ground: trimmed to where it is.)
+            self.fcs_vref = v;
+            // A g law hands the pitch back gently: the elevator it was
+            // holding (its trim) fades out over a few seconds.
+            self.fcs_hold *= 1.0 - (dt / 3.0).min(1.0);
+            want.x += self.fcs_hold;
+            self.surf = want.clamp(DVec3::splat(-1.0), DVec3::splat(1.0));
+            return;
+        }
+        let spec = self.spec;
+        let upw = self.pos.normalize();
+        let level = self.up().dot(upw);
+        let mg = self.mass() * 9.81;
+        // The moment (and the lift) at a setting of the surfaces, the flow as it
+        // is now; `settled`, once the flow over them has had time to follow
+        // (a surface pushed past its stall shows that it does less there).
+        let at = |s: DVec3, settled: bool| {
+            let mut i = *inp;
+            (i.elevator, i.rudder, i.aileron) = (s.x, s.y, s.z);
+            let mut st = self.aero_st.clone();
+            af.forces(&i, &mut st, if settled { 10.0 } else { 0.0 })
+        };
+        let now = at(self.surf, false);
+        let mut wdot = DVec3::ZERO;
+        let mut active = [false; 3];
+        if f.g_law {
+            // Pitch: the stick asks for load factor, 1 g (wings level) with it let go.
+            let sx = self.stick.x;
+            let mut n_cmd = if sx >= 0.0 { level + sx * (spec.fbw_g - level) } else { level + sx * (level + 0.4 * spec.fbw_g) };
+            if f.speed_hold > 0.0 {
+                // C*U: slower than trimmed, a little less g, so the nose
+                // drops and the speed comes back. The auto-trim assist
+                // retrims to the speed the pilot holds with the stick.
+                if self.auto_trim && sx.abs() > 0.06 {
+                    self.fcs_vref += (v - self.fcs_vref) * (dt * 0.5).min(1.0);
+                }
+                n_cmd += (f.speed_hold * (v - self.fcs_vref) / self.fcs_vref.max(1.0)).clamp(-0.5, 0.5);
+            }
+            let n = now.force.y / mg;
+            self.fcs_i = (self.fcs_i + (n_cmd - n) * dt).clamp(-1.0, 1.0);
+            let mut q_cmd = 9.81 / v * ((n_cmd - level) + 1.5 * (n_cmd - n) + 1.0 * self.fcs_i);
+            if f.flare_alpha > 0.0 {
+                // The flare mode: from 50 ft down to 30 it hands over to an
+                // angle-of-attack command, from where it was at 50 ft.
+                let k = if self.gear > 0.5 { 1.0 - smooth(9.0, 15.24, height) } else { 0.0 };
+                if k <= 0.0 {
+                    self.fcs_flare = self.alpha;
+                }
+                let flare = 9.81 / v * (n - level) + 3.0 * (self.fcs_flare + sx * f.flare_alpha - self.alpha);
+                q_cmd += (flare - q_cmd) * k;
+            }
+            // The angle-of-attack limiter: no more pull than holds it there.
+            q_cmd = q_cmd.min(3.0 * (f.alpha_max - self.alpha)).max(3.0 * (-0.5 * f.alpha_max - self.alpha));
+            wdot.x = 5.0 * (q_cmd - om.x);
+            active[0] = true;
+        }
+        if f.roll_rate > 0.0 {
+            // Roll: the stick asks for a roll rate (right stick, right roll: ω.z negative).
+            wdot.z = 4.0 * (-self.stick.z * f.roll_rate - om.z);
+            active[2] = true;
+        }
+        if f.beta_cmd > 0.0 {
+            // Yaw: sideslip held where the pedals ask (none with them let go), yaw damped.
+            let beta = (inp.vb.x / v).clamp(-1.0, 1.0).asin();
+            let b_cmd = -self.stick.y * f.beta_cmd;
+            wdot.y = -6.0 * (beta - b_cmd) - 3.0 * yaw_hp;
+            active[1] = true;
+        }
+        // How each surface moves the moment (columns: elevator, rudder,
+        // aileron): about its neutral, where its flow is attached (the gain
+        // the computer is built with, scheduled with the flight condition),
+        // and where it is now, the flow settled there.
+        let col = |k: usize| {
+            let mut s = self.surf;
+            s[k] = 0.0;
+            let m0 = at(s, true).moment[k];
+            s[k] = 0.1;
+            let c0 = (at(s, true).moment[k] - m0) / 0.1;
+            let mut s = self.surf;
+            let h = if s[k] > 0.9 { -0.05 } else { 0.05 };
+            let m1 = at(s, true).moment[k];
+            s[k] += h;
+            (c0, (at(s, true).moment[k] - m1) / h)
+        };
+        let need = spec.inertia * wdot + self.omega.cross(spec.inertia * self.omega) - now.moment;
+        let mut target = want;
+        for k in 0..3 {
+            if !active[k] {
+                continue;
+            }
+            // (Each axis on its own surface: the cross terms are small and the loop takes them out.)
+            let (c0, c) = col(k);
+            if c0.abs() < 1e-6 {
+                continue;
+            }
+            let out = self.surf[k].signum();
+            target[k] = if c * c0 > 0.0 {
+                self.surf[k] + need[k] / if c.abs() > 0.3 * c0.abs() { c } else { 0.3 * c0 }
+            } else if (need[k] * c0.signum()) * out > 0.0 {
+                // Past the deflection that does the most (the surface stalling),
+                // more does less: come back in until it bites again.
+                self.surf[k] - 0.2 * out
+            } else {
+                self.surf[k] + need[k] / c0
+            };
+        }
+        // Actuators: a full sweep in about a third of a second.
+        let rate = 3.0 * dt;
+        let step = (target.clamp(DVec3::splat(-1.0), DVec3::splat(1.0)) - self.surf).clamp(DVec3::splat(-rate), DVec3::splat(rate));
+        self.surf += step;
+        if f.g_law {
+            self.fcs_hold = self.surf.x - self.stick.x;
+        }
+    }
+
+    /// An aircraft without a rig of its own flies on one derived from its
+    /// `Spec`. If that cannot trim it (a downloaded aircraft whose data says
+    /// too little), it flies on the whole-aircraft model instead.
+    fn check_derived_rig(&mut self) {
+        if self.spec.rig.is_some() {
+            return;
+        }
+        let Some(af) = self.airframe.take() else { return };
+        let (v, h) = (self.spec.cruise.max(20.0), 1500.0);
+        let (trim, alpha) = self.trim_for(&af, v, (density(h), sound_speed(h)), 1.0);
+        let (m, l, _) = self.strip_pitch(&af, v, (density(h), sound_speed(h)), alpha, trim);
+        let mg = self.mass() * 9.81;
+        if trim.abs() < 0.99 && (l / mg - 1.0).abs() < 0.05 && m.abs() < 0.01 * mg * af.mac {
+            self.airframe = Some(af);
+        }
+    }
+
     /// The pitching moment (N m) hands off, steady, wings level, at true
     /// airspeed `v` and angle of attack `alpha` with the trim at `trim`, and the lift (N).
-    fn strip_pitch(&self, af: &aero::Airframe, v: f64, rho: f64, alpha: f64, trim: f64) -> (f64, f64, f64) {
+    fn strip_pitch(&self, af: &aero::Airframe, v: f64, air: (f64, f64), alpha: f64, trim: f64) -> (f64, f64, f64) {
         let vb = DVec3::new(0.0, -v * alpha.sin(), -v * alpha.cos());
-        let mut inp = self.strip_input(af, vb, rho, 1.0);
+        let mut inp = self.strip_input(af, vb, air, 1.0);
         inp.omega = DVec3::ZERO;
         (inp.elevator, inp.aileron, inp.rudder) = (0.0, 0.0, 0.0);
         inp.trim = trim * if trim > 0.0 { af.rig.trim[1] } else { af.rig.trim[0] };
@@ -1503,23 +1771,23 @@ impl Plane {
     }
 
     /// The trim (-1..1) that holds `level` g at true airspeed `v` hands off.
-    fn trim_for(&self, af: &aero::Airframe, v: f64, rho: f64, level: f64) -> (f64, f64) {
+    fn trim_for(&self, af: &aero::Airframe, v: f64, air: (f64, f64), level: f64) -> (f64, f64) {
         let w = self.mass() * 9.81 * level;
         let mut trim = self.pitch_trim;
         let mut alpha = self.alpha.clamp(-0.1, 0.3);
         for _ in 0..4 {
             // The angle of attack that carries the weight (the tail's share included)...
             for _ in 0..3 {
-                let (_, l0, _) = self.strip_pitch(af, v, rho, alpha, trim);
-                let (_, l1, _) = self.strip_pitch(af, v, rho, alpha + 0.01, trim);
+                let (_, l0, _) = self.strip_pitch(af, v, air, alpha, trim);
+                let (_, l1, _) = self.strip_pitch(af, v, air, alpha + 0.01, trim);
                 let dl = (l1 - l0) / 0.01;
                 if dl.abs() > 1.0 {
                     alpha = (alpha + (w - l0) / dl).clamp(-0.1, 0.3);
                 }
             }
             // ...and the trim that balances it there.
-            let (m0, _, _) = self.strip_pitch(af, v, rho, alpha, trim);
-            let (m1, _, _) = self.strip_pitch(af, v, rho, alpha, trim + 0.05);
+            let (m0, _, _) = self.strip_pitch(af, v, air, alpha, trim);
+            let (m1, _, _) = self.strip_pitch(af, v, air, alpha, trim + 0.05);
             let dm = (m1 - m0) / 0.05;
             if dm.abs() > 1e-6 {
                 trim = (trim - m0 / dm).clamp(-1.0, 1.0);
@@ -1552,7 +1820,7 @@ impl Plane {
             let alpha = self.alpha_level(v, rho, 0.0);
             let vb = DVec3::new(0.0, -v * alpha.sin(), -v * alpha.cos());
             let moments = |p: &Self, rig: [f64; 2]| {
-                let mut inp = p.strip_input(&af, vb, rho, 1.0);
+                let mut inp = p.strip_input(&af, vb, (rho, sound_speed(h)), 1.0);
                 (inp.omega, inp.rigging) = (DVec3::ZERO, rig);
                 let mut st = aero::State::default();
                 let m = af.forces(&inp, &mut st, 0.0).moment + DVec3::Z * torque + DVec3::Y * (thrust * 0.25 * pe.prop_d * alpha);
@@ -1581,11 +1849,20 @@ impl Plane {
 
     /// Trim the strips for level flight at this speed, and pitch the
     /// aircraft to the angle of attack that takes (a spawn or a reconfigure).
-    fn trim_strips(&mut self, v: f64, rho: f64) {
+    fn trim_strips(&mut self, v: f64, air: (f64, f64)) {
         let Some(af) = self.airframe.take() else { return };
         if v > 15.0 {
             self.alpha = self.trim;
-            (self.pitch_trim, self.trim) = self.trim_for(&af, v, rho, 1.0);
+            (self.pitch_trim, self.trim) = self.trim_for(&af, v, air, 1.0);
+            let rig = af.rig;
+            if rig.fcs.g_law {
+                // A g command flight control system has no trim of its own: it
+                // holds the surface there itself (1 g, hands off), from the start.
+                let r = self.pitch_trim * if self.pitch_trim > 0.0 { rig.trim[1] } else { rig.trim[0] };
+                self.surf.x = (r / if r > 0.0 { rig.elevator.travel[0] } else { rig.elevator.travel[1] }).clamp(-1.0, 1.0);
+                self.pitch_trim = 0.0;
+                self.fcs_vref = v;
+            }
         }
         self.airframe = Some(af);
     }
@@ -2133,6 +2410,8 @@ impl Plane {
         // Ground contact.
         let mut force_w = self.rot * force_b - upw * (mass * 9.81);
         let mut torque_b = DVec3::ZERO;
+        // (Turned about the CG, as the strips' moments are: where it sits on the chord, not the origin.)
+        let cg_b = self.airframe.as_deref().map_or(DVec3::ZERO, |af| af.cg_at(self.cg()));
         self.on_ground = false;
         // Nothing is solid for the first moments after a spawn: the terrain
         // under the aircraft is still a coarse guess until its tile arrives.
@@ -2372,7 +2651,7 @@ impl Plane {
                 let f = upw * nf - tang.normalize_or_zero() * (mu * nf).min(tl * hl.drag);
                 force_w += f;
                 let fb_ = self.rot.inverse() * f;
-                torque_b += r.cross(fb_);
+                torque_b += (r - cg_b).cross(fb_);
                 if let Part::Fold(s) = part {
                     let fd = &self.dmg.fold[s];
                     self.fold_tq[s] += (r.as_vec3() - fd.pivot).as_dvec3().cross(fb_).dot(fd.axis.as_dvec3());
@@ -2466,7 +2745,7 @@ impl Plane {
                     let f_long = (-vl * drag).clamp(-mu * nf, mu * nf);
                     let f = upw * nf + side * f_side + fwd * f_long;
                     force_w += f;
-                    torque_b += r.cross(self.rot.inverse() * f);
+                    torque_b += (r - cg_b).cross(self.rot.inverse() * f);
                     self.wheel_spin[gi] = vl / leg.wheel_r;
                     if pv.length() > 3.0 && building.is_none() {
                         self.dirt.push((p, (pv - upw * vn) * 0.3 + upw * 1.5, 1.0));
@@ -4128,7 +4407,9 @@ mod tests {
             let pitch_deg = (p.forward().dot(p.pos.normalize())).asin().to_degrees();
             // Rotate at 50 kt, then hold 9 degrees.
             let pitch = if v * KT > 50.0 { ((9.0 - pitch_deg) * 0.15).clamp(-1.0, 1.0) } else { 0.0 };
-            let c = Controls { throttle: 1.0, pitch, ..Default::default() };
+            // (and the wings held level: the propeller's torque rolls it left at full power)
+            let roll = if p.on_ground { 0.0 } else { (p.right().dot(p.pos.normalize()) * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0) };
+            let c = Controls { throttle: 1.0, pitch, roll, ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             if lifted.is_none() && !p.on_ground && t > 3.0 {
                 lifted = Some(((p.pos - start).length(), v));

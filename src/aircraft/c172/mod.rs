@@ -61,11 +61,15 @@ pub static RIG: Rig = Rig {
     fin: Planform { root: DVec3::new(0.0, 0.27, 3.415), tip: DVec3::new(0.0, 1.80, 4.14), chord: [1.66, 0.64], incidence: [0.0, 0.0] },
     fin_foil: Foil2d::SYMMETRIC,
     rudder: Ctrl { span: [0.0, 1.53], chord: 0.28, travel: [0.2827, 0.2827] },
-    fuse: Fuse { cm_a: 0.35, cn_b: -0.04, cl_b: -0.05, cy_b: -0.2 },
+    fuse: Fuse { cm_a: 0.35, cn_b: -0.08, cl_b: -0.05, cy_b: -0.2, cl_a: 0.0 },
     downwash: 1.0,
     eta_tail: 0.9,
     prop_hub: DVec3::new(0.0, -0.03, -3.30),
     swirl: 0.25,
+    // The model's origin sits 0.6 m behind where the real CG would be on its
+    // wing (at 59% of the root chord): the CG is put on the wing's chord.
+    cg_from_mac: true,
+    ..Rig::BASE
 };
 
 pub static SPEC: Spec = Spec {

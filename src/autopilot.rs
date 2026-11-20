@@ -330,10 +330,22 @@ impl Autopilot {
             self.i_aoa = self.i_aoa.min(s.pitch - (s.vs / s.tas.max(15.0)).atan());
         }
         let e = pitch_want - s.pitch;
-        self.i_pitch = (self.i_pitch + e * 1.5 / q * dt).clamp(-0.6, 0.6);
-        // (A banked aircraft needs more pull for the same pitch.)
-        let turn = (1.0 / s.bank.cos().max(0.5) - 1.0) * 0.6;
-        let pitch = ((e * 4.0 - s.pitch_rate * 1.5) / q + self.i_pitch + turn).clamp(-1.0, 1.0);
+        let g_law = p.airframe.as_deref().is_some_and(|af| af.rig.fcs.g_law) && p.spec.fbw_g > 1.0;
+        let pitch = if g_law {
+            // Through a fly-by-wire that flies the stick as load factor: ask
+            // it for the pull that turns the nose at the rate wanted (and,
+            // banked, for what holds the turn level), whatever the speed.
+            let level = s.pitch.cos() * s.bank.cos();
+            self.i_pitch = (self.i_pitch + e * 0.5 * dt).clamp(-0.3, 0.3);
+            let n = 1.0 / s.bank.cos().max(0.5) + s.tas.max(30.0) / 9.81 * (e * 0.6) + self.i_pitch;
+            let span = if n >= level { p.spec.fbw_g - level } else { level + 0.4 * p.spec.fbw_g };
+            ((n - level) / span.max(0.5)).clamp(-1.0, 1.0)
+        } else {
+            self.i_pitch = (self.i_pitch + e * 1.5 / q * dt).clamp(-0.6, 0.6);
+            // (A banked aircraft needs more pull for the same pitch.)
+            let turn = (1.0 / s.bank.cos().max(0.5) - 1.0) * 0.6;
+            ((e * 4.0 - s.pitch_rate * 1.5) / q + self.i_pitch + turn).clamp(-1.0, 1.0)
+        };
 
         // ---- autothrottle
         let throttle_set = self.at.then(|| {
