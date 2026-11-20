@@ -4152,8 +4152,13 @@ mod tests {
         let w = flat_world();
         let mut fires = 0;
         for seed in 1..=12u64 {
+            // The shove (11 rad/s² for 0.8 s) carries a wingtip to the
+            // runway. At 9 it only just reached tip strike (about 28° of
+            // bank, 0.1° to spare), so a small change anywhere in the
+            // dynamics (here the gyroscopic coupling) stopped it short and
+            // the test was measuring luck, not damage.
             let mut p = rolling(40.0, if seed % 2 == 0 { 2.2 } else { -2.2 }, seed * 7919);
-            let (boom, notes) = run_pushed(&mut p, &w, 12.0, Controls::default(), if seed % 2 == 0 { -9.0 } else { 9.0 });
+            let (boom, notes) = run_pushed(&mut p, &w, 12.0, Controls::default(), if seed % 2 == 0 { -11.0 } else { 11.0 });
             println!("seed {seed}: boom {boom} {}, wings {:?}, folds {:?}, speed {:.1}, wrecked {}: {notes:?}", p.cause, p.dmg.wing, p.dmg.fold.map(|f| f.on), p.vel.length(), p.wrecked());
             fires += boom as usize;
             assert!(p.dmg.wing.iter().any(|&b| b < C172.span) || p.dmg.fold.iter().any(|f| f.on) || !notes.is_empty(), "something breaks");
