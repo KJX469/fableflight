@@ -295,7 +295,8 @@ fn every_aircraft_runs_straight_and_turns_on_the_ground() {
 
 /// A taildragger made from the Cessna's data: its nose leg moved to the tail
 /// as a steerable tailwheel that breaks out to full swivel (as hangar.rs
-/// rigs a downloaded one), and its mains ahead of the centre of gravity.
+/// rigs a downloaded one), and its mains well ahead of the centre of gravity
+/// (wherever the load puts it).
 fn taildragger(caster_nose: bool) -> &'static Spec {
     let base = &crate::aircraft::c172::SPEC;
     let mut s = base.clone();
@@ -310,7 +311,7 @@ fn taildragger(caster_nose: bool) -> &'static Spec {
         legs[0].wheel_r = 0.1;
         legs[0].tyre = Tyre { caster: std::f64::consts::PI, ..legs[0].tyre };
         for l in legs.iter_mut().skip(1) {
-            l.at.z = -0.45;
+            l.at.z = -0.7;
         }
     }
     s.gear = Box::leak(legs.into_boxed_slice());
@@ -330,7 +331,7 @@ fn a_tailwheel_steers_breaks_out_and_locks_again() {
     println!("taildragger sits {pitch:.1}° nose up");
     assert!(pitch > 3.0);
     // Taxi straight with a little rudder: the tailwheel stays locked.
-    assert!(run(&mut p, &w, 8.0, |p| Controls { throttle_set: Some(if ground_speed(p) < 4.0 { 0.35 } else { 0.0 }), yaw: 0.1, ..Default::default() }));
+    assert!(run(&mut p, &w, 8.0, |p| Controls { throttle_set: Some(((4.0 - ground_speed(p)) * 0.2 + 0.35).clamp(0.0, 1.0)), yaw: 0.1, ..Default::default() }));
     assert!(!p.wheels[0].free, "the tailwheel broke out on a gentle turn");
     assert!(ground_speed(&p) > 2.0);
     // A hard brake-and-rudder pivot: it breaks out to swivel.
