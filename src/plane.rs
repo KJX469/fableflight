@@ -235,7 +235,7 @@ pub struct Plane {
     /// each gear leg's tyres as they roll: footprint, swivel, skid (gear.rs)
     pub wheels: [crate::gear::Wheel; MAX_GEAR],
     /// what each leg's tyres last found under them, and where
-    surf: [Option<(DVec3, crate::gear::Surface)>; MAX_GEAR],
+    tyre_ground: [Option<(DVec3, crate::gear::Surface)>; MAX_GEAR],
     /// the weather on the ground under it (set each frame), and the water
     /// standing on the ground there (mm)
     pub ground_wx: crate::gear::Cond,
@@ -378,7 +378,7 @@ impl Plane {
             snow_marks: Vec::new(),
             wheel_prev: [None; MAX_GEAR],
             wheels: [crate::gear::Wheel::default(); MAX_GEAR],
-            surf: [None; MAX_GEAR],
+            tyre_ground: [None; MAX_GEAR],
             ground_wx: crate::gear::Cond::default(),
             water: 0.0,
             smoke: Vec::new(),
@@ -2160,11 +2160,11 @@ impl Plane {
                 if let Some((pen, water, building)) = hit(p, world) {
                     // What it rolls on (looked up again every couple of metres),
                     // and that ground's own unevenness.
-                    let surface = match self.surf[gi] {
+                    let surface = match self.tyre_ground[gi] {
                         Some((at, sf)) if (at - p).length_squared() < 4.0 => sf,
                         _ => {
                             let sf = world.surface(p);
-                            self.surf[gi] = Some((p, sf));
+                            self.tyre_ground[gi] = Some((p, sf));
                             sf
                         }
                     };
