@@ -770,7 +770,7 @@ impl Plane {
     /// including compressibility (isentropic subsonic, Rayleigh pitot supersonic).
     pub fn ias(&self) -> f64 {
         let (_, _, h) = geo::pos_to_lla(self.pos);
-        cas_from(self.airspeed().length(), h)
+        cas_in(self.airspeed().length(), h, &self.atmos)
     }
     /// Mach number.
     pub fn mach(&self) -> f64 {
@@ -802,7 +802,7 @@ impl Plane {
         let flap_cl = self.spec.flap_cl * self.flaps;
         let a_old = self.trim;
         self.trim = self.alpha_level(v, rho, flap_cl);
-        self.trim_strips(v, (rho, sound_speed(h)));
+        self.trim_strips(v, (rho, self.atmos.sound_speed(h)));
         // Pitch the nose to the new angle of attack and the flight path down the glide.
         let up = self.pos.normalize();
         let fp = (self.airspeed() - up * descent).normalize();
@@ -1622,7 +1622,7 @@ impl Plane {
             }
             _ => 1.0,
         };
-        let air = (rho, sound_speed(h));
+        let air = (rho, self.atmos.sound_speed(h));
         self.airframe = Some(af);
         self.transfer_fuel(mach, dt);
         let af = self.airframe.take().expect("a rig");
@@ -1665,7 +1665,7 @@ impl Plane {
         let el = (dm.elevator[0] * dm.stab[0] + dm.elevator[1] * dm.stab[1]) as f64 * 0.5;
         if self.auto_trim && !af.rig.fcs.g_law && el > 0.05 && self.stick.x.abs() > 0.06 && v > 15.0 {
             let level = self.up().dot(self.pos.normalize()).max(0.0);
-            let (want, _) = self.trim_for(&af, v, (rho, sound_speed(h)), level);
+            let (want, _) = self.trim_for(&af, v, (rho, self.atmos.sound_speed(h)), level);
             self.pitch_trim += (want - self.pitch_trim) * (dt * 0.5).min(1.0);
         }
         self.airframe = Some(af);
@@ -2209,7 +2209,7 @@ impl Plane {
         // A braking parachute (`spoilers` is how far it has blossomed): too
         // fast and it tears away; nearly stopped, it is let go before it drags.
         if let (Some(ch), true) = (&spec.chute, self.speedbrake > 0.0) {
-            let ias = cas_from(v_air, h);
+            let ias = cas_in(v_air, h, &self.atmos);
             if ias > ch.v_max * 1.05 {
                 self.drop_chute();
                 self.note("DRAG CHUTE TORN AWAY (OVERSPEED)");
@@ -3002,7 +3002,7 @@ impl Plane {
             }
         }
         let _ = eas_k;
-        let vc = cas_from(v, h);
+        let vc = cas_in(v, h, &self.atmos);
         let excess = self.excess(vc, mach);
         let over = (excess - (spec.flutter_v - spec.vne)).max(0.0) as f32;
         self.dmg.flutter = (self.dmg.flutter + (over * 0.035 - 0.25) * dt as f32).max(0.0);
@@ -3342,17 +3342,24 @@ pub fn sound_speed(h: f64) -> f64 {
 /// Calibrated airspeed (m/s) from true airspeed `v` (m/s) and altitude `h` (m),
 /// via compressible impact pressure (isentropic subsonic, Rayleigh pitot supersonic).
 pub fn cas_from(v: f64, h: f64) -> f64 {
+    cas_in(v, h, &Atmos::STD)
+}
+
+/// Calibrated airspeed (m/s) in the air mass `atm`: the pitot-static impact
+/// pressure is the day's (its static pressure and speed of sound), and the
+/// calibration is to the standard sea level's, as an airspeed indicator is.
+pub fn cas_in(v: f64, h: f64, atm: &Atmos) -> f64 {
     if !v.is_finite() || v <= 0.0 {
         return 0.0;
     }
-    let m = v / sound_speed(h);
+    let m = v / atm.sound_speed(h);
     let qc_p = if m < 1.0 {
         (1.0 + 0.2 * m * m).powf(3.5) - 1.0
     } else {
         // Rayleigh pitot formula for gamma = 1.4: (1.2^3.5 * 6^2.5) = 166.921580093...
         166.921_580_093 * m.powi(7) / (7.0 * m * m - 1.0).powf(2.5) - 1.0
     };
-    let qc_p0 = (qc_p * pressure_ratio(h)).max(0.0);
+    let qc_p0 = (qc_p * atm.pressure_ratio(h)).max(0.0);
     let a0 = sound_speed(0.0);
     // Subsonic calibrated airspeed up to Mach 1 at sea level (1.2^3.5 - 1).
     if qc_p0 <= 0.892_929_158_7 {
@@ -3674,6 +3681,26 @@ mod tests {
         let denver = Atmos::from_surface(1013.25, 35.0, 1_655.0);
         let da = denver.density_altitude(1_655.0) * 3.28084;
         assert!((8_650.0..9_050.0).contains(&da), "Denver {da:.0} ft");
+    }
+
+    #[test]
+    fn the_airspeed_indicator_reads_the_days_air() {
+        // Standard air: the same as the standard formula.
+        assert_eq!(cas_in(60.0, 1_000.0, &Atmos::STD), cas_from(60.0, 1_000.0));
+        // At sea level on a standard day, CAS is the true airspeed.
+        assert!((cas_from(50.0, 0.0) - 50.0).abs() < 0.05);
+        // The same true airspeed in hot or low-pressure air is less indicated
+        // (thinner air, less impact pressure): ISA+30 is about 5% less.
+        let hot = Atmos { qnh: 1013.25, isa_dev: 30.0 };
+        let low = Atmos { qnh: 980.0, isa_dev: 0.0 };
+        let (s, h, l) = (cas_from(60.0, 0.0), cas_in(60.0, 0.0, &hot), cas_in(60.0, 0.0, &low));
+        assert!(h < s * 0.97 && h > s * 0.93, "{s} {h}");
+        assert!(l < s && l > s * 0.97, "{s} {l}");
+        // A plane flying in that air shows it.
+        let mut p = Plane::spawn(C172, 0.6, -2.1, 0.0, 0.0, 60.0);
+        let std_ias = p.ias();
+        p.atmos = hot;
+        assert!(p.ias() < std_ias * 0.97);
     }
 
     #[test]
@@ -5921,7 +5948,7 @@ mod tests {
         assert!(vref_light > 115.0 && vref_light < 125.0, "{vref_light}");
 
         // A third of its maximum weight in static thrust; the ICAO fuel flows (two engines).
-        let t0 = Plane::fan_thrust(fe, 1.0, 0.0, 0.0);
+        let t0 = Plane::fan_thrust(fe, 1.0, 0.0, 0.0, &Atmos::STD);
         println!("static thrust {:.1} kN = {:.3} of MTOW; fuel flows {:?} kg/s", t0 / 1000.0, t0 / (G650_MTOW * 9.81), s.fuel_flow);
         assert!(t0 / (G650_MTOW * 9.81) > 0.33 && t0 / (G650_MTOW * 9.81) < 0.35);
         assert!(s.fuel_flow[0] > 0.15 && s.fuel_flow[0] < 0.20 && s.fuel_flow[1] > 1.5 && s.fuel_flow[1] < 1.65);
