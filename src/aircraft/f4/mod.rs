@@ -254,16 +254,15 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
         nf_max: 1.6e6,
         steer: 0.0,
         brakes: true,
-        side_k: 1.6e5,
-        side_mu: 0.8,
-        roll_k: 2.0e3,
+        mu: 0.8,
         roll_mu: 0.02,
-        brake_k: 5.0e4,
         brake_mu: 0.6,
         // naval gear, kept by the Air Force: built for a 7 m/s arrival
         fold_vn: 7.3,
         fold_kick: DVec3::new(0.3, 0.0, kick),
         name,
+        // pressures estimated (about 250 psi); anti-skid
+        tyre: Tyre { wheels: 1, pressure: 1700.0, caster: 0.0, oleo: true, antiskid: true },
     }
 }
 
@@ -380,15 +379,13 @@ pub static SPEC: Spec = Spec {
             nf_max: 6.0e5,
             steer: 1.0,
             brakes: false,
-            side_k: 6.0e4,
-            side_mu: 0.8,
-            roll_k: 1.0e3,
+            mu: 0.8,
             roll_mu: 0.02,
-            brake_k: 0.0,
             brake_mu: 0.0,
             fold_vn: 6.5,
             fold_kick: DVec3::new(-0.2, 0.0, 0.0),
             name: "NOSE GEAR",
+            tyre: Tyre { wheels: 2, pressure: 1700.0, caster: 0.0, oleo: true, antiskid: true },
         },
         main_leg(-2.72, "LEFT MAIN GEAR", 0.2),
         main_leg(2.72, "RIGHT MAIN GEAR", -0.2),

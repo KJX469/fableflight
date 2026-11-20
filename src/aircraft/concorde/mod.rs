@@ -301,16 +301,15 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
         nf_max: 1.0e7,
         steer: 0.0,
         brakes: true,
-        side_k: 1.0e6,
-        side_mu: 0.8,
-        roll_k: 1.8e4,
+        mu: 0.8,
         roll_mu: 0.015,
         // carbon brakes
-        brake_k: 5.0e5,
         brake_mu: 0.55,
         fold_vn: 4.5,
         fold_kick: DVec3::new(0.3, 0.0, kick),
         name,
+        // Michelin NZG 47x15.75-22 at 232 psi (16 bar); the nose's pressure is an estimate
+        tyre: Tyre { wheels: 4, pressure: 1600.0, caster: 0.0, oleo: true, antiskid: true },
     }
 }
 
@@ -437,15 +436,13 @@ pub static SPEC: Spec = Spec {
             nf_max: 2.5e6,
             steer: 1.0,
             brakes: false,
-            side_k: 2.0e5,
-            side_mu: 0.8,
-            roll_k: 6.0e3,
+            mu: 0.8,
             roll_mu: 0.015,
-            brake_k: 0.0,
             brake_mu: 0.0,
             fold_vn: 3.8,
             fold_kick: DVec3::new(-0.4, 0.0, 0.0),
             name: "NOSE GEAR",
+            tyre: Tyre { wheels: 2, pressure: 1300.0, caster: 0.0, oleo: true, antiskid: true },
         },
         main_leg(-3.86, "LEFT MAIN GEAR", 0.3),
         main_leg(3.86, "RIGHT MAIN GEAR", -0.3),

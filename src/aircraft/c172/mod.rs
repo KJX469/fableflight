@@ -6,6 +6,7 @@ pub mod cabin;
 
 use crate::aero::{Ctrl, Foil2d, Fuse, Planform, Rig};
 use crate::aircraft::{Engine, Handling, Hole, Hull, Leg, Part, Piston, Sound, Spec, Tail};
+use crate::aircraft::Tyre;
 use crate::airframe::*;
 use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -25,8 +26,15 @@ pub fn build() -> Model {
 const KT: f64 = 1.0 / 1.94384;
 const V_NONE: f64 = 1e9;
 
+/// The 172RG's tyres: a 5.00-5 on the nose's oleo strut, 6.00-6 mains on
+/// sprung tubular steel legs. Pressures are estimates (about 50 psi nose,
+/// 42 psi mains; the POH section 8 figures were not to hand).
+const fn tyre(steer: f64) -> Tyre {
+    Tyre { wheels: 1, pressure: if steer != 0.0 { 345.0 } else { 290.0 }, caster: 0.0, oleo: steer != 0.0, antiskid: false }
+}
+
 const fn leg(at: DVec3, r: f32, travel: f64, steer: f64, fold_vn: f64, fold_kick: DVec3, name: &'static str) -> Leg {
-    Leg { at, wheel_r: r as f64, travel, k: 70_000.0, c: 7_000.0, nf_max: 120_000.0, steer, brakes: at.x != 0.0, side_k: 5000.0, side_mu: 0.9, roll_k: 80.0, roll_mu: 0.025, brake_k: 2500.0, brake_mu: 0.55, fold_vn, fold_kick, name }
+    Leg { at, wheel_r: r as f64, travel, k: 70_000.0, c: 7_000.0, nf_max: 120_000.0, steer, brakes: at.x != 0.0, mu: 0.9, roll_mu: 0.025, brake_mu: 0.55, fold_vn, fold_kick, name, tyre: tyre(steer) }
 }
 
 /// The surface-element rig (aero.rs). Geometry is this model's own (the wing

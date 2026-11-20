@@ -1033,7 +1033,7 @@ pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], 
             .iter()
             .map(|l| {
                 let mut l = l.clone();
-                (l.k, l.c, l.nf_max, l.side_k, l.roll_k, l.brake_k) = (l.k * m, l.c * m, l.nf_max * m, l.side_k * m, l.roll_k * m, l.brake_k * m);
+                (l.k, l.c, l.nf_max) = (l.k * m, l.c * m, l.nf_max * m);
                 l
             })
             .collect::<Vec<_>>()
@@ -1122,9 +1122,15 @@ fn own_geometry(s: &mut Spec, base: &Spec, j: &jsbsim::Aircraft, fg: &FgFiles, f
                 let load = mass * 9.81 / n;
                 l.travel = (t.travel * size).max(2.5 * load / l.k).clamp(0.05, 0.8);
                 l.nf_max = (t.nf_max * m).max(l.k * l.travel * 1.5);
-                (l.side_k, l.roll_k, l.brake_k) = (t.side_k * m, t.roll_k * m, t.brake_k * m);
                 l.wheel_r = (t.wheel_r * size).clamp(0.1, 0.7);
-                l.steer = if steer { 1.0 } else { 0.0 };
+                // JSBSim's 360° steering is a castering wheel (a tailwheel, a
+                // free nose wheel): it swivels to trail, the brakes steer it.
+                let caster = c.max_steer.abs() >= 359.0;
+                l.steer = if steer && !caster { 1.0 } else { 0.0 };
+                // A heavier type's tyres run harder (the stand-in's, scaled).
+                l.tyre.pressure = (t.tyre.pressure * m.powf(0.3)).clamp(150.0, 2500.0);
+                // A steerable tailwheel breaks out to swivel freely past its springs.
+                l.tyre.caster = if caster || (steer && at.z > 0.0) { std::f64::consts::PI } else { 0.0 };
                 l.brakes = c.brakes;
                 l.name = if steer && (at.z - fwd).abs() < 0.3 { "Nose" } else if steer { "Tail" } else if at.x < -0.2 { "Left" } else if at.x > 0.2 { "Right" } else { "Centre" };
                 travel.push(l.travel as f32);

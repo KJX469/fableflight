@@ -226,6 +226,8 @@ const LOD_FINE: f32 = 700.0;
 pub struct World {
     /// flat ground everywhere tiles have not loaded, at this height (for tests)
     pub flat: Option<f64>,
+    /// what the flat test world is made of (gear.rs)
+    pub flat_surface: crate::gear::Surface,
     loader: Loader,
     tiles: HashMap<TileId, Slot>,
     builds: HashMap<TileId, BSlot>,
@@ -284,7 +286,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, flat_surface: crate::gear::Surface::Asphalt, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
     }
 
     /// Tiles wanted but not yet asked for (at most 28 are on their way at once).
@@ -1230,6 +1232,56 @@ impl World {
     pub fn ground_zoom(&self, lat: f64, lon: f64) -> Option<u8> {
         let (mx, my) = (geo::lon_to_merc_x(lon).rem_euclid(1.0), geo::lat_to_merc_y(lat));
         (2..=self.max_zoom).rev().find(|z| matches!(self.tiles.get(&TileId::at_merc(mx, my, *z)), Some(Slot::Ready(_))))
+    }
+
+    /// What the ground at `p` (planet frame) is made of, for the tyres
+    /// (gear.rs): the loaded airfield's runways, aprons and taxiways (grass
+    /// between them); before it has loaded, the runways the airport database
+    /// knows; otherwise open ground. The flat test world is one endless runway.
+    pub fn surface(&self, p: DVec3) -> crate::gear::Surface {
+        use crate::airports::{in_poly, seg_dist, Db};
+        use crate::gear::Surface;
+        if self.flat.is_some() {
+            return self.flat_surface;
+        }
+        let paved = |concrete: bool| if concrete { Surface::Concrete } else { Surface::Asphalt };
+        if let Some(f) = self.airfield_near(p, 0.0) {
+            let g = &f.geo;
+            let lp = g.local(p);
+            if let Some(ri) = g.on_runway(lp, 0.0) {
+                let r = &g.runways[ri];
+                return if r.paved { paved(r.concrete) } else { Surface::Turf };
+            }
+            if g.aprons.iter().any(|a| in_poly(lp, a)) {
+                return Surface::Concrete;
+            }
+            if g.taxiways.iter().any(|(line, w)| line.windows(2).any(|s| seg_dist(lp, s[0], s[1]) < w * 0.5)) {
+                return Surface::Asphalt;
+            }
+            return Surface::Turf;
+        }
+        let (la, lo, _) = geo::pos_to_lla(p);
+        let db = Db::get();
+        let up = p.normalize();
+        for (i, _) in db.near(la.to_degrees(), lo.to_degrees(), 6000.0) {
+            for r in &db.apts[i as usize].rwys {
+                let [Some(a), Some(b)] = r.pos else { continue };
+                let a = geo::lla_to_pos(a.0.to_radians(), a.1.to_radians(), 0.0);
+                let b = geo::lla_to_pos(b.0.to_radians(), b.1.to_radians(), 0.0);
+                let flat = |v: DVec3| v - up * v.dot(up);
+                let d = flat(b - a);
+                let len = d.length();
+                if len < 1.0 {
+                    continue;
+                }
+                let v = flat(p - a);
+                let s = v.dot(d) / len;
+                if s > -30.0 && s < len + 30.0 && (v - d * (s / len)).length() < r.width as f64 * 0.5 {
+                    return if r.paved { paved(r.concrete) } else { Surface::Turf };
+                }
+            }
+        }
+        Surface::Rough
     }
 
     /// The nearest airfield that is loaded, within `r` metres.

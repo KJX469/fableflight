@@ -276,16 +276,15 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
         nf_max: 5.0e6,
         steer: 0.0,
         brakes: true,
-        side_k: 4.5e5,
-        side_mu: 0.8,
-        roll_k: 6.0e3,
+        mu: 0.8,
         roll_mu: 0.02,
-        brake_k: 1.5e5,
         // (small wheels and a lot of energy to lose: the brakes are good for a quarter of a g or so, the parachute for the rest)
         brake_mu: 0.3,
         fold_vn: 3.5,
         fold_kick: DVec3::new(0.3, 0.0, kick),
         name,
+        // about 415 psi, nitrogen-filled (boltflight.com, unsourced: an estimate); three tyres a leg
+        tyre: Tyre { wheels: 3, pressure: 2860.0, caster: 0.0, oleo: true, antiskid: true },
     }
 }
 
@@ -406,15 +405,13 @@ pub static SPEC: Spec = Spec {
             nf_max: 2.4e6,
             steer: 1.0,
             brakes: false,
-            side_k: 2.0e5,
-            side_mu: 0.8,
-            roll_k: 3.0e3,
+            mu: 0.8,
             roll_mu: 0.02,
-            brake_k: 0.0,
             brake_mu: 0.0,
             fold_vn: 3.0,
             fold_kick: DVec3::new(-0.2, 0.0, 0.0),
             name: "NOSE GEAR",
+            tyre: Tyre { wheels: 2, pressure: 2860.0, caster: 0.0, oleo: true, antiskid: true },
         },
         main_leg(-2.55, "LEFT MAIN GEAR", 0.2),
         main_leg(2.55, "RIGHT MAIN GEAR", -0.2),

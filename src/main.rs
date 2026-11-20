@@ -39,6 +39,7 @@ mod settings_ui;
 mod systems;
 mod gamemode;
 mod gauges;
+mod gear;
 mod gmaps;
 mod graphics;
 mod tiles3d;
@@ -5209,6 +5210,23 @@ impl Game {
             self.plane.air = air;
             self.plane.auto_trim = self.auto_trim;
             self.plane.wind = self.wx.at(self.plane.pos, agl, self.time) + self.plane.pos.normalize() * air.draft + air.gust;
+            // The ground under it: rain (above the freezing level it falls as
+            // snow, which lies rather than wets) and lying snow, for the tyres.
+            if gh.is_some() && agl < 300.0 {
+                let gp = self.plane.pos - self.plane.pos.normalize() * agl;
+                let fz = match (self.snow, self.wx.freezing) {
+                    (snow::Mode::Always, _) | (_, None) => snow::freezing_guess(self.snow, la.to_degrees(), self.doy),
+                    (_, Some(f)) => f,
+                };
+                let falling = self.wx.rain_at(gp, 0.0, self.time);
+                let lying = if self.snowy_at(gp) { 1.0 } else { 0.0 };
+                let snowing = if self.snow == snow::Mode::Off { 0.0 } else { snow::snow_share(gh.unwrap_or(0.0), fz) };
+                self.plane.ground_wx = gear::Cond { rain: falling * (1.0 - snowing), snow: lying };
+                if self.plane.t < 0.5 {
+                    // (starting out in the rain, the runway is already wet)
+                    self.plane.water = gear::water_eq(self.plane.ground_wx.rain);
+                }
+            }
             // The rain on the windows: only under (or in) a cloud that rains, the
             // rain deck the slider sets or a storm cell.
             self.wx.step_deck(dt, self.plane.pos, gh);
@@ -5339,6 +5357,18 @@ impl Game {
                             let vel = v.as_vec3() * r.range(0.6, 1.2) + r.dir() * (1.0 + speed * 0.15) + up * r.range(0.5, 2.5);
                             let kind = if snowy && (!big || r.f() < 0.7) { crash::MIST } else { crash::DUST };
                             femit.push((p, render::Particle { vel: vel.into(), life: r.range(1.5, 4.0) * if big { 1.5 } else { 1.0 }, size0: r.range(0.3, 0.7), size1: r.range(2.0, 4.0) * if big { 1.6 } else { 1.0 }, kind, drag: 1.4, buoy: 0.15, seed: r.f(), alpha: r.range(0.45, 0.75), ..Default::default() }));
+                        }
+                    }
+                }
+                if !self.plane.smoke.is_empty() {
+                    // Rubber smoke off sliding tyres, spray off a wet runway.
+                    self.anchor_fx(self.plane.pos);
+                    let up = self.plane.pos.normalize().as_vec3();
+                    for (p, v, amt) in self.plane.smoke.drain(..) {
+                        let r = &mut self.rng;
+                        if r.f() < amt * 0.35 {
+                            let vel = v.as_vec3() + r.dir() * 0.8 + up * r.range(0.2, 1.0);
+                            femit.push((p, render::Particle { vel: vel.into(), life: r.range(1.2, 3.0), size0: r.range(0.2, 0.5), size1: r.range(1.5, 3.5), kind: crash::MIST, drag: 1.6, buoy: 0.1, seed: r.f(), alpha: r.range(0.3, 0.6), ..Default::default() }));
                         }
                     }
                 }
