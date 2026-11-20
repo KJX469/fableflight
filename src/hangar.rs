@@ -953,6 +953,8 @@ pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], 
     let span = j.span_ft * FT;
     let m = mass_half / base.mass;
     let mut s = base.clone();
+    // Its own aerodynamics, not the stand-in's rig (the polar and gains fitted below).
+    s.rig = None;
 
     // Mass, balance, fuel.
     s.mass = mass_half;

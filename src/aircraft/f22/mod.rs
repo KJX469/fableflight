@@ -258,6 +258,38 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
     }
 }
 
+/// The surface-element rig (aero.rs). Sources and estimates:
+///
+/// - wing 840 ft² (78 m²) from this model's sections; the fuselage's and
+///   chines' lift and nose-up moment as fuselage coefficients (estimates);
+/// - the twin fins canted 28° and the stabilators, from this model's tail
+///   geometry (about 6.4 m² per fin and 5.5 m² per stabilator: estimates;
+///   no published figures were found); stabilators ±25° and 20° and used
+///   differentially for roll, rudders ±30°, flaperons ±25° (estimates);
+/// - its fly-by-wire: load factor (to `Spec::fbw_g`) and roll rate
+///   commanded, sideslip held, an angle-of-attack limit (`Spec::alpha_trim`;
+///   thrust vectoring, which lets the real one go further, is not modelled).
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.005, cl_max: 1.5, cd0: 0.005, cm0: -0.01 },
+    wing_strips: 12,
+    oswald: 0.75,
+    flap: crate::aero::Ctrl { span: [1.6, 4.3], chord: 0.25, travel: [0.0, 0.6109] },
+    flap_dcl_max: 0.8,
+    aileron_chord: 0.25,
+    aileron_travel: [0.4363, 0.4363],
+    slat_dcl_max: 0.3,
+    htail: crate::aero::Planform { root: DVec3::new(1.75, 0.05, 4.86), tip: DVec3::new(4.42, 0.05, 7.1), chord: [3.0, 1.1], incidence: [0.0, 0.0] },
+    elevator: crate::aero::Ctrl { span: [0.0, 2.7], chord: 1.0, travel: [0.4363, 0.3491] },
+    trim: [0.0524, 0.1396],
+    trim_stab: true,
+    taileron: 0.1396,
+    fin: crate::aero::Planform { root: DVec3::new(1.45, 0.42, 3.7), tip: DVec3::new(2.86, 3.08, 4.5), chord: [3.0, 1.27], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.3, 2.8], chord: 0.30, travel: [0.5236, 0.5236] },
+    fuse: crate::aero::Fuse { cm_a: 0.35, cn_b: -0.10, cl_b: 0.0, cy_b: -0.4, cl_a: 0.2 },
+    fcs: crate::aero::Fcs { g_law: true, alpha_max: 0.45, roll_rate: 3.5, beta_cmd: 0.14, ..crate::aero::Fcs::NONE },
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
     id: 4,
     name: "F-22A Raptor",
@@ -431,6 +463,7 @@ pub static SPEC: Spec = Spec {
         stall_drop: 0.3,
         stall_yaw: 0.5,
     },
+    rig: Some(&RIG),
     cruise: 240.0,
     approach: (75.0, 2),
     cam_dist: 29.0,

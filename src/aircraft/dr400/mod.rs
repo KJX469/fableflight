@@ -61,6 +61,42 @@ const fn leg(at: DVec3, r: f32, travel: f64, k: f64, steer: f64, name: &'static 
     Leg { at, wheel_r: r as f64, travel, k, c: k * 0.1, nf_max: 110_000.0, steer, brakes: true, side_k: 5000.0, side_mu: 0.9, roll_k: 80.0, roll_mu: 0.025, brake_k: 2400.0, brake_mu: 0.55, fold_vn: 1e9, fold_kick: DVec3::ZERO, name }
 }
 
+/// The surface-element rig (aero.rs). Sources and estimates:
+///
+/// - Robin DR 400/180 flight manual (Manuel de Vol), §1: wing 14.2 m² (the
+///   `Spec` keeps the 13.6 m² outside the fuselage), the all-moving tailplane
+///   2.88 m² with an anti-servo tab that the trim wheel sets, rudder 0.63 m²,
+///   ailerons 1.15 m² both, flaps 0/15/60°; §5: stalls 105 / 99 / 95 km/h
+///   (57 / 53 / 51 KIAS) clean / take-off / landing flaps at 1100 kg;
+/// - planforms from this model's `tail()` (the tailplane's chords scaled to
+///   the manual's area); wing section NACA 23013.5 (Jodel/Robin wing, Abbott
+///   & von Doenhoff: α0 -1.2°, cm -0.01);
+/// - control travel is not in the parts of the manual read: the
+///   stabilator's, aileron and rudder travel are estimates for the type;
+/// - fuselage coefficients from Raymer, Aircraft Design, eq. 16.25 and 16.26
+///   (6.96 m long, 1.1 m wide), the low wing's junction as for the C172's.
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.021, cl_max: 1.55, cd0: 0.0065, cm0: -0.01 },
+    wing_strips: 12,
+    oswald: 0.78,
+    flap: crate::aero::Ctrl { span: [FLAP[0] as f64, FLAP[1] as f64], chord: 0.25, travel: [0.0, 1.047] },
+    flap_dcl_max: 1.4,
+    aileron_chord: 0.24,
+    aileron_travel: [0.3142, 0.2094],
+    htail: crate::aero::Planform { root: DVec3::new(0.0, 0.06, 3.84 + DZ64), tip: DVec3::new(1.60, 0.06, 3.87 + DZ64), chord: [1.03, 0.77], incidence: [0.0, 0.0] },
+    // The stabilator (estimated travel: 13° trailing edge up, 4° down); its
+    // trim, the anti-servo tab, holds it where the stick force is nil.
+    elevator: crate::aero::Ctrl { span: [0.0, 1.60], chord: 1.0, travel: [0.2269, 0.0698] },
+    trim: [0.0524, 0.1047],
+    trim_stab: true,
+    fin: crate::aero::Planform { root: DVec3::new(0.0, 0.06, 3.45 + DZ64), tip: DVec3::new(0.0, 1.03, 3.90 + DZ64), chord: [1.19, 0.53], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.0, 0.97], chord: 0.40, travel: [0.4363, 0.4363] },
+    fuse: crate::aero::Fuse { cm_a: 0.17, cn_b: -0.03, cl_b: 0.0, cy_b: -0.25, cl_a: 0.0 },
+    prop_hub: DVec3::new(0.0, -0.05, -2.46),
+    swirl: 0.25,
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
     id: 8,
     name: "Robin DR 400/180",
@@ -235,6 +271,7 @@ pub static SPEC: Spec = Spec {
         stall_yaw: 2.4,
     },
     // About 120 kt in the cruise; a 65 kt final with full flaps.
+    rig: Some(&RIG),
     cruise: 62.0,
     approach: (34.0, 2),
     cam_dist: 13.0,
