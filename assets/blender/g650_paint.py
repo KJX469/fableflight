@@ -1,6 +1,12 @@
 # Paints the Gulfstream G650 and bakes its paint into assets/g650_paint.jpg (plain Python, with Pillow and NumPy):
 #
-#   python assets/blender/g650_paint.py [--bake-only] [<dir of pictures>] [<out.jpg>]
+#   python assets/blender/g650_paint.py [--bake-only] [--plain] [<dir of pictures>] [<out.jpg>]
+#
+# --plain paints the same skin without its scheme (all white, no belly, no
+# cheatline, no fin flash, no registration) into <view>_plain.png and bakes
+# assets/g650_plain.jpg: the base the game paints its other liveries on
+# (g650::LIVERIES, plane.wgsl `livery_g650`). Its pictures are not kept:
+# --plain --bake-only needs a full --plain run first.
 #
 # As Concorde's (concorde_paint.py, whose machinery this is): the paint is four
 # pictures of the aircraft, from straight above, from straight below, from its
@@ -38,8 +44,10 @@ from PIL import Image, ImageDraw, ImageFilter
 HERE = os.path.dirname(os.path.abspath(__file__))
 ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
 BAKE_ONLY = "--bake-only" in sys.argv
+PLAIN = "--plain" in sys.argv
+SUFFIX = "_plain" if PLAIN else ""
 SRC = ARGS[0] if ARGS else os.path.join(HERE, "g650_paint")
-OUT = ARGS[1] if len(ARGS) > 1 else os.path.join(os.path.dirname(HERE), "g650_paint.jpg")
+OUT = ARGS[1] if len(ARGS) > 1 else os.path.join(os.path.dirname(HERE), "g650_plain.jpg" if PLAIN else "g650_paint.jpg")
 
 # The frames (as g650.py): drawing station d (m behind the radome's tip),
 # height h (m above the ground); Blender: y forward, z up, origin at the CG.
@@ -444,7 +452,8 @@ def side_sheet(s):
         k.rrect(Y(d0), Y(d1), Z(h0), Z(h1), 0.06, outline=DOOR_LINE, width=0.02)
     # The registration, aft on each side.
     d, h, ht = REG_AT
-    k.text(REGISTRATION, Y(d), Z(h), ht, NAVY, weight=0.9)
+    if not PLAIN:
+        k.text(REGISTRATION, Y(d), Z(h), ht, NAVY, weight=0.9)
     # Small print: the static ports' red rings, below and ahead of the windshield.
     for d in (1.55, 1.70):
         k.oval(Y(d), Z(2.45), 0.035, 0.035, (180, 40, 36))
@@ -492,6 +501,9 @@ def paint(v, sheets):
     fin_pin = line((ff - FIN_FLASH - 0.25 * (h - 4.0) / 3.0) * (fin_te(h) - fin_le(h)) + 0.08, PIN_WIDTH / 2 + edge) * fin * (h < top_line)
     band = np.maximum(band, flash)
     pin = np.maximum(pin, fin_pin)
+    if PLAIN:
+        under, band, pin = under * 0, band * 0, pin * 0
+        rgb[:] = WHITE
     rgb = mix(rgb, GOLD, pin)
     rgb = mix(rgb, NAVY, band)
     # Windows, doors, the registration: from the side's own sheet.
@@ -499,7 +511,7 @@ def paint(v, sheets):
     rgb = over(rgb, a, (body | nacelle) * skin * (np.abs(v.nz) < 0.85))
     # The registration under the left wing.
     k = view_sheet(v)
-    if v.name == "bottom":
+    if v.name == "bottom" and not PLAIN:
         k.text(REGISTRATION, -WING_REG[0], Y(WING_REG[1]), WING_REG[2], NAVY, weight=0.95)
     rgb = over(rgb, k.array(), wing * skin)
 
@@ -590,7 +602,7 @@ def paint(v, sheets):
     rgb *= (np.clip(v.shade, 0.6, 1.15) ** 0.08)[..., None]
     rgb = np.clip(rgb, 0, 250)
     rgb[~v.ok] = (255, 0, 255)
-    Image.fromarray(rgb.astype(np.uint8)).save(os.path.join(SRC, v.name + ".png"), optimize=True)
+    Image.fromarray(rgb.astype(np.uint8)).save(os.path.join(SRC, v.name + SUFFIX + ".png"), optimize=True)
     print(f"painted {v.name}")
 
 
@@ -618,7 +630,7 @@ def spread(rgb, ok, rounds=128):
 
 def layer(view):
     mask = Image.open(os.path.join(SRC, view + "_mask.png")).convert("L")
-    paint_ = Image.open(os.path.join(SRC, view + ".png")).convert("RGB")
+    paint_ = Image.open(os.path.join(SRC, view + SUFFIX + ".png")).convert("RGB")
     if paint_.size != mask.size:
         paint_ = paint_.resize(mask.size, Image.LANCZOS)
     rgb = np.asarray(paint_)

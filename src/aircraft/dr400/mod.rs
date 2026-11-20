@@ -22,7 +22,7 @@
 //! laid out in a design frame `DZ` ahead of it (see `DZ`).
 pub mod cabin;
 
-use crate::aircraft::{Engine, Handling, Hole, Hull, Leg, Part, Piston, Sound, Spec, Tail, Tyre};
+use crate::aircraft::{Engine, Handling, Hole, Hull, Leg, Livery, Part, Piston, Sound, Spec, Tail, Tyre};
 use crate::airframe::*;
 use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 use std::f32::consts::{PI, TAU};
@@ -42,6 +42,21 @@ pub fn build() -> Model {
     }
     bake_ao(&mut b.pieces, &AoBake { vox: 0.025, reach: 2.4, rays: 28, open: &|_, _| false });
     Model::finish(b.pieces)
+}
+
+/// Paint schemes for the aircraft picker (`aircraft::liveries`), linear RGB:
+/// the cheat line and fin top (`colours[0]`, w 1), the pinstripe under it,
+/// the wing tips and spinner, and the airframe. plane.wgsl `livery_dr400`
+/// paints them. All are made up: "Classic" is a typical Robin white with blue
+/// cheat line and red tips; the others are fictional club and private schemes.
+pub const LIVERIES: &[Livery] = &[
+    scheme("Classic", [0.012, 0.045, 0.20], [0.42, 0.02, 0.015], [0.42, 0.02, 0.015], [0.80, 0.80, 0.78], include_bytes!("../../../assets/aircraft/liveries/dr400_classic.png")),
+    scheme("Sunburst", [0.70, 0.13, 0.01], [0.85, 0.55, 0.03], [0.70, 0.13, 0.01], [0.80, 0.75, 0.60], include_bytes!("../../../assets/aircraft/liveries/dr400_sunburst.png")),
+    scheme("Aéroclub", [0.018, 0.018, 0.022], [0.55, 0.025, 0.02], [0.55, 0.025, 0.02], [0.80, 0.80, 0.78], include_bytes!("../../../assets/aircraft/liveries/dr400_aeroclub.png")),
+    scheme("Racing green", [0.008, 0.09, 0.035], [0.62, 0.44, 0.10], [0.008, 0.09, 0.035], [0.78, 0.76, 0.68], include_bytes!("../../../assets/aircraft/liveries/dr400_green.png")),
+];
+const fn scheme(name: &'static str, line: [f32; 3], pin: [f32; 3], tips: [f32; 3], body: [f32; 3], still: &'static [u8]) -> Livery {
+    Livery { name, colours: [[line[0], line[1], line[2], 1.0], [pin[0], pin[1], pin[2], 0.0], [tips[0], tips[1], tips[2], 0.0], [body[0], body[1], body[2], 0.0]], title: "", paint: None, swatch: [line, pin], still }
 }
 
 /// The model is laid out in a design frame with the wing's root leading edge

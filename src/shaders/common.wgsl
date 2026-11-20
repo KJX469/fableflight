@@ -1725,7 +1725,8 @@ fn cloud_shape_plain(pp: vec3f, h: f32, ow: vec4f, detail: bool, fine: f32) -> f
 // Storm cell quality tier from Globals.detail.w: 1 Low, 2 Medium, 3 High, 4 Ultra
 // (0 falls back to High so zeroed Globals keep full quality).
 fn storm_tier() -> i32 {
-  return select(i32(G.detail.w + 0.5), 3, G.detail.w < 0.5);
+  let w = abs(G.detail.w); // negative for --still shots
+  return select(i32(w + 0.5), 3, w < 0.5);
 }
 // Pure storm-cell density evaluator (zero ordinary cumulus/stratocumulus/nimbo)
 // for the decoupled storm pass (`clouds.wgsl` `fs_storm`): keeps register

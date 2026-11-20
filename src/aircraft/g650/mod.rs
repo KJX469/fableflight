@@ -599,6 +599,21 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
     }
 }
 
+/// Paint schemes for the aircraft picker (`aircraft::liveries`). "Private"
+/// is the baked white jet (assets/g650_paint.jpg). The others are the 747's
+/// two FICTIONAL airlines (`b747::ORIVANTE`, `b747::KESTRALIS`), as a
+/// corporate shuttle in their colours: painted by plane.wgsl `livery_g650`
+/// over the same skin baked without its scheme (assets/g650_plain.jpg,
+/// `python assets/blender/g650_paint.py --plain`), whose panel lines,
+/// windows and doors show through. Colours: as the 747's, the fourth unused.
+pub const LIVERIES: &[Livery] = &[
+    Livery { name: "Private", colours: [[0.0; 4]; 4], title: "", paint: None, swatch: [[0.009, 0.018, 0.055], [0.47, 0.30, 0.085]], still: include_bytes!("../../../assets/aircraft/liveries/g650_private.png") },
+    Livery { name: "Orivante", colours: [b747::ORIVANTE[0], b747::ORIVANTE[1], b747::ORIVANTE[2], [0.0; 4]], title: "ORIVANTE", paint: Some(&PLAIN), swatch: [[0.004, 0.10, 0.11], [0.80, 0.24, 0.10]], still: include_bytes!("../../../assets/aircraft/liveries/g650_orivante.png") },
+    Livery { name: "Kestralis", colours: [b747::KESTRALIS[0], b747::KESTRALIS[1], b747::KESTRALIS[2], [0.0; 4]], title: "KESTRALIS", paint: Some(&PLAIN), swatch: [[0.006, 0.02, 0.10], [0.85, 0.36, 0.02]], still: include_bytes!("../../../assets/aircraft/liveries/g650_kestralis.png") },
+];
+/// The skin baked without its scheme: white all over, no registration.
+static PLAIN: Paint = Paint { jpg: include_bytes!("../../../assets/g650_plain.jpg"), ..PAINT };
+const PAINT: Paint = Paint { jpg: include_bytes!("../../../assets/g650_paint.jpg"), views: 4, span: 31.4, length: 31.8, centre: [(CG_D - 15.2) as f64, (3.9 - CG_H) as f64], relief: 1.0, sheen: 0.0 };
 /// The surface-element rig (aero.rs). Geometry measured off the model
 /// (g650.bin.gz) in the body frame: the T-tail's stabiliser spans 5.45 m a
 /// side at the fin's top, its leading edge swept from 11.1 m behind the CG
@@ -650,7 +665,7 @@ pub static SPEC: Spec = Spec {
     ext: None,
     still: include_bytes!("../../../assets/aircraft/g650.png"),
     // (GUIDE_SPAN, GUIDE_LEN, GUIDE_Y, GUIDE_Z in g650.py)
-    paint: Some(Paint { jpg: include_bytes!("../../../assets/g650_paint.jpg"), views: 4, span: 31.4, length: 31.8, centre: [(CG_D - 15.2) as f64, (3.9 - CG_H) as f64], relief: 1.0, sheen: 0.0 }),
+    paint: Some(PAINT),
     build,
     // Estimates of how its empty mass (about 24 t) divides.
     groups: [("fuselage", 11_500.0), ("tail", 1_300.0), ("left wing", 3_900.0), ("right wing", 3_900.0), ("flight deck", 1_500.0), ("radome", 60.0), ("gear", 1_300.0)],

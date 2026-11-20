@@ -21,6 +21,10 @@ const BAD: Color32 = Color32::from_rgb(255, 128, 96);
 impl crate::Game {
     /// An aircraft's picture (shared by types drawn with the same body).
     pub(crate) fn still(&mut self, ctx: &egui::Context, spec: &Spec) -> egui::TextureHandle {
+        // (In the paint scheme picked for it, for a type that has several.)
+        if let Some(l) = crate::aircraft::liveries(spec).get(self.menu.livery(spec)) {
+            return self.picture(ctx, l.still);
+        }
         self.picture(ctx, spec.still)
     }
 
@@ -345,6 +349,36 @@ impl crate::Game {
         });
         ui.add_space(8.0);
         ui.add(egui::Label::new(RichText::new(tr(spec.blurb)).size(16.0).color(TEXT)).wrap());
+        let liveries = crate::aircraft::liveries(spec);
+        if !liveries.is_empty() {
+            ui.add_space(14.0);
+            ui.label(RichText::new(t!("Livery", "Livrée")).font(menu::caption()).color(DIM));
+            let mut changed = false;
+            let current = self.menu.livery(spec);
+            ui.horizontal_wrapped(|ui| {
+                for (i, l) in liveries.iter().enumerate() {
+                    let selected = current == i;
+                    let button = egui::Button::new(RichText::new(l.name).color(if selected { Color32::WHITE } else { TEXT }))
+                        .fill(if selected { Color32::from_rgb(48, 59, 78) } else { menu::SURFACE })
+                        .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { ACCENT } else { menu::LINE }))
+                        .corner_radius(menu::R_WIDGET);
+                    if ui.add(button).clicked() && !selected {
+                        self.menu.liveries.insert(spec.name, i);
+                        changed = true;
+                    }
+                    // A swatch: the main colour over the trim.
+                    let srgb = |c: [f32; 3]| Color32::from(egui::Rgba::from_rgb(c[0], c[1], c[2]));
+                    let (top, under) = (srgb(l.swatch[0]), srgb(l.swatch[1]));
+                    let swatch = ui.allocate_exact_size(egui::vec2(35.0, 14.0), egui::Sense::hover()).0;
+                    let split = swatch.top() + 10.0;
+                    ui.painter().rect_filled(egui::Rect::from_min_max(swatch.min, egui::pos2(swatch.right(), split)), 2.0, top);
+                    ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(swatch.left(), split), swatch.max), 1.0, under);
+                }
+            });
+            // (Shown on the flown aircraft at once; another type takes it when it is picked.)
+            if changed && std::ptr::eq(spec, self.spec) { self.apply_livery(); }
+            ui.add_space(12.0);
+        }
         ui.add_space(18.0);
         // The numbers, in a row of tiles.
         let cells = numbers(spec);

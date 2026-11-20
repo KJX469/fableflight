@@ -131,6 +131,9 @@ pub struct Menu {
     pub markers: Vec<(u32, f32, f32)>,
     /// which aircraft to fly (index into `aircraft::list()`)
     pub aircraft: usize,
+    /// paint scheme for the Cessna 172RG
+    /// the paint scheme picked for each type (by name; `aircraft::liveries`)
+    pub liveries: std::collections::HashMap<&'static str, usize>,
     /// the aircraft screen's page: the aircraft you have, or more to download
     pub air_tab: crate::hangar_ui::Tab,
     /// the collection entry picked out on its download page, what its search has, and whether it lists the unflyable ones too
@@ -195,7 +198,13 @@ pub enum Start {
 
 impl Menu {
     pub fn new(lat: f64, lon: f64, hour: f64) -> Self {
-        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, set_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
+        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, set_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, liveries: std::collections::HashMap::new(), air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
+    }
+
+    /// The paint scheme picked for a type (an index of `aircraft::liveries`).
+    pub fn livery(&self, spec: &crate::aircraft::Spec) -> usize {
+        let n = crate::aircraft::liveries(spec).len();
+        self.liveries.get(spec.name).copied().unwrap_or_else(|| crate::aircraft::default_livery(spec)).min(n.saturating_sub(1))
     }
 
     pub fn look_at(&mut self, lat: f64, lon: f64, alt: f64) {

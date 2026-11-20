@@ -49,7 +49,12 @@ fn tex_at(uv: vec2f, layer: f32, dx: vec2f, dy: vec2f) -> vec4f {
   if (layer < -0.5) { return vec4f(1.0); }
   return textureSampleGrad(t_paint, s_aniso, fract(uv), i32(layer + 0.5), dx, dy);
 }
-struct Paint { box: vec4f, view: vec4f };
+// PT.a .. PT.d, PT.title: the paint scheme picked in the aircraft picker
+// (aircraft::livery_uniform, each type's LIVERIES): four colours, the style in
+// a.w (all zero when the type has none), and an airline's name, 8 bits a
+// glyph with its length in the top byte (`title_ink`). b.w is the flown
+// type's kind + 1: only that type reads the scheme (`livery_ours`).
+struct Paint { box: vec4f, view: vec4f, a: vec4f, b: vec4f, c: vec4f, d: vec4f, title: vec4u };
 @group(1) @binding(2) var<uniform> PT: Paint;
 
 // Which aircraft is being drawn (aircraft::Spec::id, carried in glow.y): 0 the
@@ -68,8 +73,6 @@ fn burner() -> f32 { return O.tint.y * step(O.glow.x, 0.001); }
 fn dry_power() -> f32 { return O.tint.z * step(O.glow.x, 0.001); }
 
 const WHITE_PAINT = vec3f(0.80, 0.80, 0.78);
-const NAVY = vec3f(0.010, 0.024, 0.075);
-const ACCENT = vec3f(0.34, 0.018, 0.012);
 
 struct VOut {
   @builtin(position) clip: vec4f,
@@ -567,45 +570,84 @@ fn pack(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) -> u32 {
 fn livery(L: vec3f, aa: f32, pt: u32) -> vec3f {
   if (kind() == 1u) { return livery747(L, aa, pt); }
   if (kind() == 8u) { return livery_dr400(L, aa, pt); }
+  // The Cessna: white, and the scheme picked for it (PT.a: main colour, w 1
+  // if painted; PT.b: the pinstripe).
   var c = WHITE_PAINT;
   let ax = abs(L.x);
+  // (Another type flown: the default navy and red.)
+  let ours = livery_ours();
+  let painted = !ours || PT.a.w > 0.5;
+  let prim = select(vec3f(0.010, 0.024, 0.075), PT.a.rgb, ours);
+  let trim = select(vec3f(0.34, 0.018, 0.012), PT.b.rgb, ours);
   let fin = ax < 0.15 && L.y > 0.33 && L.z > 2.8;
-  // Cheat line along the fuselage, sweeping up the tail cone.
-  if (!fin && ax < 0.62 && L.y < 0.62 && L.z > -3.16 && L.z < 4.7) {
-    let zz = max(L.z - 1.0, 0.0);
-    let yc = -0.18 + zz * zz * 0.045;
-    let dy = L.y - yc;
-    let taper = smoothstep(-3.16, -2.85, L.z);
-    let hw = 0.065 * taper;
-    let navy = smoothstep(hw + aa, hw - aa, abs(dy));
-    let red = smoothstep(0.009 * taper + aa, 0.009 * taper - aa, abs(dy - 0.095 * taper));
-    c = mix(c, NAVY, navy);
-    c = mix(c, ACCENT, red);
+  // No scheme: no paint at all, the airframe in bare aluminium (made metallic
+  // in the material switch, `bare_c172`), only the registration painted on.
+  if (!painted) { c = vec3f(0.62, 0.63, 0.65); }
+  if (painted) {
+    // Cheat line along the fuselage, sweeping up the tail cone.
+    if (!fin && ax < 0.62 && L.y < 0.62 && L.z > -3.16 && L.z < 4.7) {
+      let zz = max(L.z - 1.0, 0.0);
+      let yc = -0.18 + zz * zz * 0.045;
+      let dy = L.y - yc;
+      let taper = smoothstep(-3.16, -2.85, L.z);
+      let hw = 0.065 * taper;
+      let band = smoothstep(hw + aa, hw - aa, abs(dy));
+      let pin = smoothstep(0.009 * taper + aa, 0.009 * taper - aa, abs(dy - 0.095 * taper));
+      c = mix(c, prim, band);
+      c = mix(c, trim, pin);
+    }
+    if (fin) {
+      let band = smoothstep(aa, -aa, abs(L.y - 1.09) - 0.07);
+      let pin = smoothstep(aa, -aa, abs(L.y - 1.205) - 0.014);
+      c = mix(c, prim, max(band, smoothstep(1.69 - aa, 1.69 + aa, L.y)));
+      c = mix(c, trim, pin);
+    }
+    // Wing and stabiliser tips, spinner.
+    if (ax > 5.26 && L.y > 0.5) { c = prim; }
+    if (ax > 1.53 && L.z > 3.3 && L.y > -0.1 && L.y < 0.3) { c = prim; }
+    if (L.z < -3.178) { c = prim; }
   }
-  if (fin) {
-    let band = smoothstep(aa, -aa, abs(L.y - 1.09) - 0.07);
-    let pin = smoothstep(aa, -aa, abs(L.y - 1.205) - 0.014);
-    c = mix(c, NAVY, max(band, smoothstep(1.69 - aa, 1.69 + aa, L.y)));
-    c = mix(c, ACCENT, pin);
-  }
-  // Wing and stabiliser tips, spinner.
-  if (ax > 5.26 && L.y > 0.5) { c = NAVY; }
-  if (ax > 1.53 && L.z > 3.3 && L.y > -0.1 && L.y < 0.3) { c = NAVY; }
-  if (L.z < -3.178) { c = NAVY; }
   // Registration on both sides of the tail cone, reading nose-to-tail on the
-  // left and tail-to-nose on the right as painted.
+  // left and tail-to-nose on the right as painted: in the scheme's colour, or
+  // black on a bare aeroplane.
   if (ax > 0.1 && L.z > 1.6 && L.z < 3.0 && L.y > 0.0 && L.y < 0.3) {
     let tx = (2.25 - L.z) * sign(L.x) + 0.44;
     let reg = pack(10u, 4u, 1u, 9u, 6u, 12u);
     let ink = text(vec2f(tx, L.y - 0.045) / 0.09, reg, 6u, 0.13, aa / 0.09 + 0.01);
-    c = mix(c, NAVY, ink);
+    c = mix(c, select(vec3f(0.012, 0.012, 0.014), prim, painted), ink);
   }
   return c;
 }
 
+// The Cessna with no paint scheme: its skin is bare aluminium.
+fn bare_c172() -> bool { return kind() == 0u && livery_ours() && PT.a.w < 0.5; }
+
+// Whether the scheme in PT is this aircraft's: it is the flown type's, and
+// the uniform is shared by everything drawn (multiplayer aircraft, wreckage).
+fn livery_ours() -> bool { return u32(PT.b.w + 0.5) == kind() + 1u; }
+// The style of the scheme picked (PT.a.w; 0 when none was sent, or for
+// another type than the flown one).
+fn livery_style() -> u32 { return select(0u, u32(PT.a.w + 0.5), livery_ours()); }
+// The airline's name (PT.title) centred on c, glyph height h, stroke half
+// width w in glyph units: ink coverage.
+fn title_ink(p: vec2f, c: vec2f, h: f32, w: f32, aa: f32) -> f32 {
+  let n = PT.title.w >> 24u;
+  if (n == 0u) { return 0.0; }
+  let s = h * 0.5;
+  let q = (p - c + vec2f((f32(n) * 1.45 - 0.45) * s * 0.5, s)) / s;
+  if (q.x < -0.6 || q.x > f32(n) * 1.45 || q.y < -0.6 || q.y > 2.6) { return 0.0; }
+  let k = u32(max(floor((q.x + 0.225) / 1.45), 0.0));
+  if (k >= n) { return 0.0; }
+  let g = (PT.title[k / 4u] >> (8u * (k % 4u))) & 255u;
+  if (g == 15u) { return 0.0; }
+  let e = aa / s + 0.02;
+  return 1.0 - smoothstep(w - e, w + e, glyph_d(g, vec2f(q.x - f32(k) * 1.45, q.y)));
+}
+
 // The Robin DR 400: white, a blue cheat line from the spinner to the tail
 // with a red pinstripe under it, the top of the fin blue, red wing tips and
-// spinner (a classic Robin scheme, made up; no registration).
+// spinner (a classic Robin scheme, made up; no registration). The picker's
+// other schemes (dr400::LIVERIES) recolour the same design.
 const ROBIN_BLUE = vec3f(0.012, 0.045, 0.20);
 const ROBIN_RED = vec3f(0.42, 0.02, 0.015);
 // Coverage of the walkway on the top of a wing root (body frame; 0 off it).
@@ -620,7 +662,13 @@ fn walkway_dr400(Lb: vec3f, aa: f32) -> f32 {
 fn livery_dr400(Lb: vec3f, aa: f32, pt: u32) -> vec3f {
   // (In dr400.rs's design frame, 0.55 m ahead of the body frame.)
   let L = Lb - vec3f(0.0, 0.0, 0.55);
-  var c = WHITE_PAINT;
+  // The scheme picked (dr400::LIVERIES): cheat line, pinstripe, tips, airframe.
+  let picked = livery_style() > 0u;
+  let line_c = select(ROBIN_BLUE, PT.a.rgb, picked);
+  let pin_c = select(ROBIN_RED, PT.b.rgb, picked);
+  let tip_c = select(ROBIN_RED, PT.c.rgb, picked);
+  let body_c = select(WHITE_PAINT, PT.d.rgb, picked);
+  var c = body_c;
   let ax = abs(L.x);
   // The black anti-skid walkway on top of each wing root, greyer where worn.
   if (pt == P_WING) {
@@ -638,17 +686,17 @@ fn livery_dr400(Lb: vec3f, aa: f32, pt: u32) -> vec3f {
     let hw = 0.045 * taper;
     let blue = smoothstep(hw + aa, hw - aa, abs(L.y - yc));
     let red = smoothstep(0.010 + aa, 0.010 - aa, abs(L.y - (yc - hw - 0.028)));
-    c = mix(c, ROBIN_BLUE, blue);
-    c = mix(c, ROBIN_RED, red);
+    c = mix(c, line_c, blue);
+    c = mix(c, pin_c, red);
   }
   if (fin) {
     let edge = 0.78 - (L.z - 3.6) * 0.25;
-    c = mix(c, ROBIN_BLUE, smoothstep(edge - aa, edge + aa, L.y));
-    c = mix(c, ROBIN_RED, smoothstep(aa, -aa, abs(L.y - (edge - 0.05)) - 0.012));
+    c = mix(c, line_c, smoothstep(edge - aa, edge + aa, L.y));
+    c = mix(c, pin_c, smoothstep(aa, -aa, abs(L.y - (edge - 0.05)) - 0.012));
   }
-  if (ax > 4.12 && L.y > -0.2) { c = ROBIN_RED; }
-  if (ax > 1.45 && L.z > 3.4 && abs(L.y - 0.06) < 0.15) { c = ROBIN_BLUE; }
-  if (L.z < -2.41) { c = ROBIN_RED; }
+  if (ax > 4.12 && L.y > -0.2) { c = tip_c; }
+  if (ax > 1.45 && L.z > 3.4 && abs(L.y - 0.06) < 0.15) { c = line_c; }
+  if (L.z < -2.41) { c = tip_c; }
   return c;
 }
 
@@ -1647,8 +1695,6 @@ const CONCORDE_CABIN = array<f32, 5>(1.3, -0.75, 1.5, -25.3, -20.85);
 // The G650's flight deck (g650/mod.rs: the nose section's skin, FLOOR_Y, DECK_Z), likewise.
 const G650_TUB = vec4f(1.20, -0.36, -12.75, -9.95);
 const G650_CABIN = array<f32, 5>(1.15, -0.36, 1.55, -12.75, -9.95);
-// The middle of its HUD combiner's glass (g650/deck.rs HUD_C: EYE + (0, 0.005, -0.265)).
-const G650_HUD = vec3f(-0.52, 0.785, -11.615);
 // The nozzle a point belongs to: `nozzle()`, or of two engines a side the nearer one.
 fn nozzle_at(L: vec3f) -> vec3f {
   if (kind() == 6u) { return vec3f(select(CONCORDE_NOZZLE.x, CONCORDE_NOZZLE.y, abs(L.x) > 0.5 * (CONCORDE_NOZZLE.x + CONCORDE_NOZZLE.y)), CONCORDE_NOZZLE.zw); }
@@ -1918,9 +1964,17 @@ fn surface(in: VOut) -> Shaded {
     case 0u, 1u, 15u: {
       if (id == 1u) { albedo = livery(L, px * 1.2, pt); }
       rough = select(0.13 + 0.08 * ns.g, 0.5 + 0.15 * ns.g, id == 15u);
+      if (id == 1u && bare_c172()) {
+        // Bare aluminium, as `case 2u`; the black registration stays paint.
+        metal = smoothstep(0.08, 0.3, luma(albedo));
+        rough = mix(rough, 0.22 + 0.18 * fine.g, metal);
+        albedo *= mix(1.0, 0.9 + 0.12 * ns.r, metal);
+      }
       if (pt == P_HORNET && paint.a > 0.5) {
         // The Hornet's matte tactical greys, as painted; fluid stains (darker and browner) are a little glossier.
         albedo = paint.rgb * 0.85;
+        // (The G650 in an airline's scheme: painted over its plain skin.)
+        if (kind() == 9u && livery_style() > 0u) { albedo = livery_g650(L, albedo, px * 1.2); }
         // (Only the Hornet's: on a camouflage the tans and greens are not stains.)
         rough = 0.48 + 0.14 * ns.g - select(0.0, 0.12, kind() == 2u) * smoothstep(0.02, 0.10, paint.r - paint.b);
         // (A dark paint's panels: the lighter, baked ones flatter, the darker, fresher ones with more of a sheen.)
@@ -1941,7 +1995,7 @@ fn surface(in: VOut) -> Shaded {
         // Chipped paint where things get knocked: leading edges, around fasteners.
         let chip = smoothstep(0.80, 0.83, nz(L * 7.0).b + in.wear * 0.07) * sat(in.wear * 1.5);
         albedo = mix(albedo, vec3f(0.55, 0.56, 0.58), chip);
-        metal = chip;
+        metal = max(metal, chip);
         rough = mix(rough, 0.35, chip);
         // Bugs on the leading edges.
         let bugs = smoothstep(0.86, 0.9, nz(L * 9.0).a) * smoothstep(0.75, 0.97, in.wear) * sat(-in.Nl.z * 2.0) * (1.0 - smoothstep(0.002, 0.008, px));
@@ -2722,8 +2776,6 @@ fn tex_glass(in: VOut) -> vec4f {
   // The Hornet's HUD combiner: the symbology, focused at infinity. (The
   // combiner's top is at 1.045; the canopy passes over it from 1.13 up.)
   if (kind() == 2u && in.L.y > 0.86 && in.L.y < 1.06 && abs(in.L.x) < 0.1 && in.L.z > -5.3 && in.L.z < -5.15) { return hud18(in, px); }
-  // The G650's HUD II combiner (g650/deck.rs HUD_C, HUD_HALF; deck650.wgsl).
-  if (kind() == 9u && abs(in.L.x - G650_HUD.x) < 0.095 && abs(in.L.y - G650_HUD.y) < 0.08 && abs(in.L.z - G650_HUD.z) < 0.03) { return hud650(in, px); }
   let d = window(in.L);
   let cov = 1.0 - smoothstep(-px, px, d);
   if (cov <= 0.0) { discard; }
@@ -3283,54 +3335,218 @@ const B_GREY = vec3f(0.34, 0.36, 0.39);
 const B_NAVY = vec3f(0.012, 0.03, 0.095);
 const B_RED = vec3f(0.42, 0.025, 0.02);
 
-// The 747's paint: white over a grey belly, a navy cheatline with a red
-// pinstripe sweeping up the tail, grey wings, a navy fin with a white emblem.
+// The G650 in one of the 747's fictional airlines' schemes (g650::LIVERIES):
+// painted over the plain white skin (assets/g650_plain.jpg), whose panel
+// lines, rivets and door outlines darken the colour as they did the white.
+// Its frame (g650.py): station d aft of the radome's tip, height h above the
+// ground; the cabin's axis about 2.77 m up, 1.3 m round.
+fn livery_g650(L: vec3f, base: vec3f, aa: f32) -> vec3f {
+  let d = L.z + 14.35;
+  let h = L.y + 2.55;
+  let ax = abs(L.x);
+  // How white the skin is here (1: the plain paint; darker at its lines):
+  // windows, frames and dark parts keep their own colour.
+  let shade = luma(base) / (0.92 * 0.85);
+  let paintable = smoothstep(0.5, 0.75, shade);
+  let body = length(vec2f(L.x, h - 2.77)) < 1.42 && d < 27.5;
+  let fin = ax < 0.35 && h > 4.0 && d > 21.0;
+  let nacelle = abs(ax - 2.2) < 0.75 && abs(h - 3.75) < 0.75 && d > 18.8 && d < 22.7;
+  let style = livery_style();
+  var c = WHITE_PAINT;
+  var a = 0.0;
+  // (The title and registration read nose-first on the left.)
+  let side = vec2f((11.2 - d) * sign(L.x), h);
+  if (style == 1u) {
+    // Orivante: the fin and tail-cone wrap in PT.a behind arcs of PT.b; teal nacelles, titles.
+    let q = vec2f(d - 15.0, h - 0.6);
+    let r = length(q);
+    let arc = sat(smoothstep(aa, -aa, abs(r - 9.4) - 0.24) + smoothstep(aa, -aa, abs(r - 10.05) - 0.08));
+    if (fin) { c = mix(PT.a.rgb, PT.b.rgb, arc); a = 1.0; }
+    else if (nacelle) { c = select(PT.a.rgb, PT.c.rgb, d < 19.1); a = 1.0; }
+    else if (body) {
+      let wrap = smoothstep(aa, -aa, 9.15 - r) * step(19.0, d);
+      let ink = title_ink(side, vec2f(0.0, 3.62), 0.46, 0.3, aa);
+      c = mix(PT.a.rgb, PT.b.rgb, arc * step(19.0, d) * step(r, 10.3));
+      a = max(max(wrap, arc * step(19.0, d) * step(r, 10.3)), ink);
+      c = select(c, PT.a.rgb, ink > 0.0 && wrap < 0.5);
+    }
+  } else {
+    // Kestralis: a PT.a belly rising to fill the tail behind a PT.b pinstripe, a chevron on the fin.
+    if (fin) {
+      // (Scaled 0.8 and centred on the fin between its swept leading edge,
+      // its trailing edge, the tail cone and the T-tail, g650.py `fin_le`, `fin_te`.)
+      let p = (vec2f(d, h) - vec2f(24.65, 5.75)) / 0.8;
+      let e = aa / 0.8;
+      let s1 = min(seg_d(p, vec2f(0.0), vec2f(2.6, 1.3)), seg_d(p, vec2f(0.0), vec2f(2.6, -1.3)));
+      let s2 = min(seg_d(p, vec2f(0.9, 0.0), vec2f(2.9, 0.9)), seg_d(p, vec2f(0.9, 0.0), vec2f(2.9, -0.9)));
+      c = mix(PT.a.rgb, PT.b.rgb, smoothstep(e, -e, s1 - 0.22));
+      c = mix(c, WHITE_PAINT, smoothstep(e, -e, s2 - 0.09));
+      a = 1.0;
+    } else if (nacelle) { c = select(PT.c.rgb, PT.b.rgb, d < 19.1); a = 1.0; }
+    else if (body) {
+      let ye = 2.5 - max(4.0 - d, 0.0) * max(4.0 - d, 0.0) * 0.04 + max(d - 16.5, 0.0) * max(d - 16.5, 0.0) * 0.032;
+      let under = smoothstep(aa, -aa, h - ye);
+      let pin = smoothstep(aa, -aa, abs(h - ye - 0.09) - 0.03) * (1.0 - under);
+      let ink = title_ink(side, vec2f(0.0, 3.62), 0.42, 0.3, aa);
+      c = mix(mix(WHITE_PAINT, PT.a.rgb, under), PT.b.rgb, pin);
+      c = mix(c, PT.a.rgb, ink);
+      a = max(max(under, pin), ink);
+    }
+  }
+  // Colour in place of the white, shaded as the white was.
+  return mix(base, c * 0.85 * min(shade, 1.05) * (0.92 / 0.80), a * paintable);
+}
+
+// The 747's paint, in the scheme picked (b747::LIVERIES, all fictional
+// airlines): style 0 the classic white over a grey belly, a navy cheatline
+// with a red pinstripe sweeping up the tail, grey wings, a navy fin with a
+// white emblem; 1 and 2 the Orivante and Kestralis designs.
 fn livery747(L: vec3f, aa: f32, pt: u32) -> vec3f {
+  let style = livery_style();
+  if (style == 1u) { return orivante747(L, aa, pt); }
+  if (style == 2u) { return kestralis747(L, aa, pt); }
+  // (Classic: the colours sent, or the original ones if none were.)
+  let sent = livery_ours() && dot(PT.d.rgb, vec3f(1.0)) > 0.0;
+  let navy = select(B_NAVY, PT.a.rgb, sent);
+  let red = select(B_RED, PT.b.rgb, sent);
+  let belly = select(B_BELLY, PT.c.rgb, sent);
+  let grey = select(B_GREY, PT.d.rgb, sent);
   let d = L.z + 31.6;
   let ax = abs(L.x);
   let fin = ax < 0.9 && L.y > 3.9 && d > 52.0;
   if (fin) {
-    var c = B_NAVY;
+    var c = navy;
     // The emblem: a white ring with three swept bands inside, a red ring outside it.
-    let q = vec2f(d - 64.2, L.y - 3.6);
+    // (Centred on the fin's area, 2.5 m across its red ring, clear of its
+    // root, swept leading edge and trailing edge.)
+    let q = (vec2f(d, L.y) - vec2f(64.5, 8.3)) / 1.3;
+    let e = aa / 1.3;
     let r = length(q);
-    let ring = smoothstep(aa, -aa, abs(r - 1.68) - 0.09);
-    let red = smoothstep(aa, -aa, abs(r - 1.92) - 0.035);
+    let ring = smoothstep(e, -e, abs(r - 1.68) - 0.09);
+    let rr = smoothstep(e, -e, abs(r - 1.92) - 0.035);
     let band = abs(fract((q.x * 0.55 + q.y) / 0.95 + 0.25) - 0.5) - 0.13;
-    let inner = smoothstep(aa, -aa, band) * smoothstep(1.5 + aa, 1.5 - aa, r);
+    let inner = smoothstep(e, -e, band) * smoothstep(1.5 + e, 1.5 - e, r);
     c = mix(c, WHITE_PAINT, max(ring, inner));
-    c = mix(c, B_RED, red);
+    c = mix(c, red, rr);
     return c;
   }
-  if (ax > 30.5 && (pt == P_TAIL || L.y > 1.6)) { return B_NAVY; }
-  if (pt == P_WING || pt == P_CTRL || pt == P_TAIL) { return B_GREY; }
+  if (ax > 30.5 && (pt == P_TAIL || L.y > 1.6)) { return navy; }
+  if (pt == P_WING || pt == P_CTRL || pt == P_TAIL) { return grey; }
   if (pt == P_NACELLE) { return WHITE_PAINT; }
   // Unpatterned painted parts: the flap track fairings under the wings are
   // wing grey, the gear doors belly grey.
-  if (pt == 0u) { return select(B_GREY, B_BELLY, ax < 6.0); }
+  if (pt == 0u) { return select(grey, belly, ax < 6.0); }
   var c = WHITE_PAINT;
   // Grey belly below a line that rises with the tail's upsweep.
   let yb = -1.15 + max(d - 46.0, 0.0) * 0.17 - max(4.0 - d, 0.0) * 0.12;
-  c = mix(c, B_BELLY, smoothstep(yb + aa, yb - aa, L.y));
+  c = mix(c, belly, smoothstep(yb + aa, yb - aa, L.y));
   // The cheatline under the windows, sweeping up over the tail cone.
   if (d > 1.4 && d < 68.5 && ax > 0.2) {
     let rise = max(d - 50.0, 0.0) * 0.16;
     let taper = smoothstep(1.4, 4.0, d) * (1.0 - smoothstep(64.0, 68.5, d));
     let y0 = 0.17 + rise;
-    let navy = smoothstep(aa, -aa, abs(L.y - y0) - 0.13 * taper);
+    let nv = smoothstep(aa, -aa, abs(L.y - y0) - 0.13 * taper);
     let pin = smoothstep(aa, -aa, abs(L.y - y0 - 0.215 * taper) - 0.022 * taper);
-    c = mix(c, B_NAVY, navy);
-    c = mix(c, B_RED, pin);
+    c = mix(c, navy, nv);
+    c = mix(c, red, pin);
   }
-  // Registration on the rear fuselage, reading nose-first on the left.
-  if (ax > 0.5 && d > 54.5 && d < 60.5 && L.y > 1.3 && L.y < 2.1) {
-    let reg = pack(10u, 7u, 4u, 7u, 12u, 11u);
-    let ink = label_code(vec2f((57.5 - d) * sign(L.x), L.y), vec2f(0.0, 1.7), reg, 6u, 0.5, aa);
-    c = mix(c, B_NAVY, ink);
-  }
+  c = mix(c, navy, reg747(L, aa));
   // The cabin windows.
   c = mix(c, vec3f(0.018, 0.02, 0.025), cabin_windows747(L, aa));
   return c;
+}
+
+// Registration on the rear fuselage, reading nose-first on the left.
+fn reg747(L: vec3f, aa: f32) -> f32 {
+  let d = L.z + 31.6;
+  if (abs(L.x) > 0.5 && d > 54.5 && d < 60.5 && L.y > 1.3 && L.y < 2.1) {
+    let reg = pack(10u, 7u, 4u, 7u, 12u, 11u);
+    return label_code(vec2f((57.5 - d) * sign(L.x), L.y), vec2f(0.0, 1.7), reg, 6u, 0.5, aa);
+  }
+  return 0.0;
+}
+// The airline's name on the forward fuselage, between the main deck's
+// windows and the upper deck's, reading nose-first on the left.
+fn titles747(L: vec3f, aa: f32, h: f32) -> f32 {
+  let d = L.z + 31.6;
+  if (abs(L.x) < 1.5 || d < 12.0 || d > 32.0 || abs(L.y - 2.05) > 1.0) { return 0.0; }
+  return title_ink(vec2f((21.5 - d) * sign(L.x), L.y), vec2f(0.0, 2.05), h, 0.3, aa);
+}
+// The parts every style paints alike: windows on top, wings and tailplane
+// grey (PT.d).
+fn windows747(c: vec3f, L: vec3f, aa: f32) -> vec3f {
+  return mix(c, vec3f(0.018, 0.02, 0.025), cabin_windows747(L, aa));
+}
+
+// Orivante (fictional): white overall; the fin in PT.a with a sweeping arc of
+// PT.b, the fin's colour wrapping down over the tail cone behind a PT.b
+// pinstripe; nacelles in PT.a with polished lips (PT.c); big titles.
+fn orivante747(L: vec3f, aa: f32, pt: u32) -> vec3f {
+  let d = L.z + 31.6;
+  let ax = abs(L.x);
+  let teal = PT.a.rgb;
+  let coral = PT.b.rgb;
+  // Arcs across the fin (and the wrap): circles about a point ahead of and below it.
+  let q = vec2f(d - 46.0, L.y + 6.0);
+  let r = length(q);
+  let arc = smoothstep(aa, -aa, abs(r - 19.2) - 0.55) + smoothstep(aa, -aa, abs(r - 20.6) - 0.18);
+  if (ax < 0.9 && L.y > 3.9 && d > 52.0) { return mix(teal, coral, sat(arc)); }
+  if (ax > 30.5 && (pt == P_TAIL || L.y > 1.6)) { return teal; }
+  if (pt == P_WING || pt == P_CTRL || pt == P_TAIL) { return PT.d.rgb; }
+  if (pt == P_NACELLE) {
+    let e = eng747(L);
+    return select(teal, PT.c.rgb, e.z < 0.55);
+  }
+  if (pt == 0u) { return select(PT.d.rgb, vec3f(0.62, 0.63, 0.64), ax < 6.0); }
+  var c = WHITE_PAINT;
+  // A pale grey belly, barely parted from the white.
+  let yb = -1.6 + max(d - 46.0, 0.0) * 0.17;
+  c = mix(c, vec3f(0.62, 0.63, 0.64), smoothstep(yb + aa, yb - aa, L.y));
+  // The wrap: the fin's colour over the tail cone, its front edge an arc.
+  let wrap = smoothstep(aa, -aa, 18.6 - r) * step(48.0, d);
+  c = mix(c, teal, wrap);
+  c = mix(c, coral, sat(arc) * step(48.0, d) * step(r, 21.0));
+  c = mix(c, teal, titles747(L, aa, 1.25));
+  c = mix(c, select(teal, WHITE_PAINT, wrap > 0.5), reg747(L, aa));
+  return windows747(c, L, aa);
+}
+
+// Kestralis (fictional): a deep PT.a belly that rises in a curve to fill the
+// tail, a PT.b pinstripe along its edge, a chevron of PT.b on the fin,
+// nacelles in PT.c with PT.b lips, PT.b winglets, titles above the windows.
+fn kestralis747(L: vec3f, aa: f32, pt: u32) -> vec3f {
+  let d = L.z + 31.6;
+  let ax = abs(L.x);
+  let blue = PT.a.rgb;
+  let orange = PT.b.rgb;
+  if (ax < 0.9 && L.y > 3.9 && d > 52.0) {
+    // Two chevrons, wings swept back from a point at the front: orange, then white.
+    // (Scaled 0.8 and placed so the whole of it sits on the fin, centred
+    // between its swept leading edge and its trailing edge.)
+    let p = (vec2f(d, L.y) - vec2f(60.5, 8.2)) / 0.8;
+    let e = aa / 0.8;
+    let s1 = min(seg_d(p, vec2f(0.0, 0.0), vec2f(6.5, 3.6)), seg_d(p, vec2f(0.0, 0.0), vec2f(6.5, -3.6)));
+    let s2 = min(seg_d(p, vec2f(2.2, 0.0), vec2f(7.2, 2.6)), seg_d(p, vec2f(2.2, 0.0), vec2f(7.2, -2.6)));
+    var c = mix(blue, orange, smoothstep(e, -e, s1 - 0.55));
+    return mix(c, WHITE_PAINT, smoothstep(e, -e, s2 - 0.22));
+  }
+  if (ax > 30.5 && (pt == P_TAIL || L.y > 1.6)) { return orange; }
+  if (pt == P_WING || pt == P_CTRL || pt == P_TAIL) { return PT.d.rgb; }
+  if (pt == P_NACELLE) {
+    let e = eng747(L);
+    return select(PT.c.rgb, orange, e.z < 0.55);
+  }
+  if (pt == 0u) { return select(PT.d.rgb, blue, ax < 6.0); }
+  var c = WHITE_PAINT;
+  // The belly's edge: under the windows along the cabin, curving down to the
+  // nose and up behind the wing to fill the tail cone.
+  let ye = 0.12 - max(9.0 - d, 0.0) * max(9.0 - d, 0.0) * 0.035 + max(d - 44.0, 0.0) * max(d - 44.0, 0.0) * 0.028;
+  let under = smoothstep(aa, -aa, L.y - ye);
+  c = mix(c, blue, under);
+  c = mix(c, orange, smoothstep(aa, -aa, abs(L.y - ye - 0.2) - 0.07) * (1.0 - under));
+  c = mix(c, blue, titles747(L, aa, 1.15));
+  c = mix(c, select(blue, WHITE_PAINT, under > 0.5), reg747(L, aa));
+  return windows747(c, L, aa);
 }
 
 fn weather747(L: vec3f, N: vec3f, base: vec3f, belly: f32, n: vec4f) -> vec4f {

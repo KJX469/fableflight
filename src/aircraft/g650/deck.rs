@@ -19,8 +19,7 @@
 //!   APU and fire extinguishing in the middle; cabin pressure and
 //!   temperature, bleed air on the right; the test, display switching and
 //!   fire detection panels; the circuit breakers behind the pilots' heads.
-//! - The HUD II's overhead unit and its combiner in front of the captain's
-//!   eye, the Gulfstream yokes on their columns, rudder pedals, the side
+//! - The Gulfstream yokes on their columns, rudder pedals, the side
 //!   consoles with the cursor control devices (and the tiller on the
 //!   captain's), the crew seats, the door to the cabin.
 //!
@@ -40,7 +39,8 @@
 //!   the SMC replacing the display controller and standby instruments, baro
 //!   and altitude preselect on the Guidance Panel, the lever-type park brake,
 //!   the FCS trim panel, the alternate gear handle under DU2, flaps 0/10/20/39,
-//!   Collins HUD II.
+//!   Collins HUD II (left out here: its combiner in front of the captain's
+//!   eye read as out of place, so the deck is built as if without the option).
 //! - Aviation Week, "Honeywell Primus Epic PlaneView II Avionics" (2013): four
 //!   14.1-in landscape LCDs, PFDs outboard, MFDs inboard. Honeywell's DU-1310
 //!   page: 12.3 x 10 x 8 in case.
@@ -82,9 +82,9 @@
 //! panels, the FD, YD, BC, FLCH, VNAV and the second course and baro knobs,
 //! TOGA and the autothrottle and autopilot disconnects, the first officer's
 //! trim switch and toe brakes, the aileron and rudder trim switches, the RAT
-//! handle, the tiller (it turns with the nose wheel but cannot be clicked),
-//! the HUD combiner (fixed down). The status legends the real caps light
-//! (amber OFF, FAULT and the like) are not simulated: those caps stay dark.
+//! handle, the tiller (it turns with the nose wheel but cannot be clicked).
+//! The status legends the real caps light (amber OFF, FAULT and the like) are
+//! not simulated: those caps stay dark.
 //!
 //! The overhead's panel titles, switch names and circuit breaker labels are
 //! read from the photographs (BL7C0735, BL7C0736). Where a name could not be
@@ -104,7 +104,7 @@
 //! deck650.wgsl draws Honeywell PlaneView II formats on them from the
 //! simulated state (PFDs with synthetic vision, map and engine strip, CAS and
 //! the Flight Controls synoptic, standby, MCDU pages, the Guidance Panel's
-//! windows and mode lights) and the HUD II symbology on the combiner; its
+//! windows and mode lights); its
 //! header lists what each shows, the sources and what is simplified. The
 //! autopilot and systems state reaches it through `Globals::cockpit` rows
 //! 8-11 (main.rs `cockpit_globals`).
@@ -169,12 +169,6 @@ pub mod screen {
     /// A mode light's half size.
     pub const GP_LIGHT_HALF: [f32; 2] = [0.0075, 0.0012];
 }
-
-/// The HUD combiner's glass (body frame): its middle, half width, half
-/// height and half thickness; it leans its top 12 degrees toward the pilot
-/// (deck650.wgsl can draw the symbology on it).
-pub const HUD_C: Vec3 = Vec3::new(EYE.x, EYE.y + 0.005, EYE.z - 0.265);
-pub const HUD_HALF: Vec3 = Vec3::new(0.090, 0.070, 0.004);
 
 // ---------------------------------------------------------------- materials
 
@@ -404,7 +398,6 @@ pub fn build(b: &mut Builder) {
     }
     b.fixed("crew seats", G_ENGINE, st);
 
-    hud(b);
     controls(b, &f);
 }
 
@@ -1650,34 +1643,6 @@ fn seat(m: &mut Mesh, sx: f32) {
     m.rbox(&CHROME, at(0.0, 2.98, 0.39), Vec3::new(0.045, 0.007, 0.035), 0.007, Quat::IDENTITY);
 }
 
-// ---------------------------------------------------------------- the HUD
-
-fn hud(b: &mut Builder) {
-    // The overhead unit over the captain's head, its arm, the combiner's frame.
-    let mut m = Mesh::default();
-    let ohu = p(EYE.x - 0.01, 3.20, lin_top(bz(3.20), EYE.x.abs() + 0.10) + CG_H - 0.058);
-    m.rbox(&mt(mat::PLASTIC, 0.05, 0.052, 0.058), ohu, Vec3::new(0.075, 0.040, 0.11), 0.02, Quat::IDENTITY);
-    m.disc(&mt(mat::GLASS, 0.0, 0.0, 0.0), ohu + Vec3::new(0.0, -0.016, -0.111), Vec3::NEG_Z, Vec3::Y, 0.022, 18);
-    let c = HUD_C;
-    let tilt = Quat::from_rotation_x(12f32.to_radians());
-    let (hx, hy) = (HUD_HALF.x, HUD_HALF.y);
-    // The frame round the glass, open at the bottom, and the arm up to the overhead's side.
-    let fr = |u: f32, v: f32| c + tilt * Vec3::new(u, v, 0.0);
-    let rim = [fr(-hx - 0.004, -hy * 0.6), fr(-hx - 0.004, hy + 0.004), fr(hx + 0.004, hy + 0.004), fr(hx + 0.004, -hy * 0.6)];
-    m.tube(&hp::COMBINER_FRAME, &rim, &|_| 0.005, 8, true);
-    let mount = p(-(OH_W[0] + 0.005), 2.74, oh_h(2.74) + 0.03);
-    let top = fr(hx * 0.5, hy + 0.004);
-    let arm = hp::catmull(&[top, top + Vec3::new(0.02, 0.04, 0.01), mount + Vec3::new(-0.01, -0.02, 0.0), mount], 4);
-    m.tube(&hp::COMBINER_FRAME, &arm, &|_| 0.0065, 8, true);
-    m.rbox(&hp::COMBINER_FRAME, mount, Vec3::new(0.012, 0.02, 0.03), 0.006, Quat::IDENTITY);
-    b.fixed("hud combiner frame", G_ENGINE, m);
-    let mut g = Mesh::default();
-    g.rbox(&mt(mat::GLASS, 0.02, 0.05, 0.04), c, Vec3::new(hx, hy, HUD_HALF.z * 0.5), 0.003, tilt);
-    let k = b.fixed("hud combiner", G_ENGINE, g);
-    b.pieces[k].glass = true;
-    b.pieces[k].occluder = false;
-}
-
 // ---------------------------------------------------------------- what moves
 
 fn controls(b: &mut Builder, f: &Face) {
@@ -2050,21 +2015,5 @@ mod tests {
         let n = b.pieces.iter().filter(|p| p.hotspot.is_some()).count();
         println!("{n} mouse targets; screens {ids:?}");
         assert!(n >= 30);
-    }
-
-    /// plane.wgsl finds the HUD combiner (and draws the symbology on it) by
-    /// the box `G650_HUD` +- (0.095, 0.08, 0.03): it must hold the glass.
-    #[test]
-    fn hud_box_matches_the_combiner() {
-        let src = include_str!("../../shaders/plane.wgsl");
-        let line = src.lines().find(|l| l.starts_with("const G650_HUD")).expect("G650_HUD in plane.wgsl");
-        let v: Vec<f32> = line.split(['(', ')', ',']).filter_map(|t| t.trim().parse().ok()).collect();
-        assert_eq!(v.len(), 3, "{line}");
-        assert!((Vec3::new(v[0], v[1], v[2]) - HUD_C).abs().max_element() < 0.002, "{line} vs {HUD_C}");
-        // The tilted glass's corners stay inside the box.
-        let t = 12f32.to_radians();
-        let half_z = HUD_HALF.y * t.sin() + HUD_HALF.z;
-        let half_y = HUD_HALF.y * t.cos() + HUD_HALF.z;
-        assert!(HUD_HALF.x < 0.095 && half_y < 0.08 && half_z < 0.03);
     }
 }

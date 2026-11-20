@@ -124,10 +124,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::dpi::PhysicalPosition;
+use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// The other players on the start screen's globe (multiplayer): a pink
 /// that no city, airport or the chosen spot uses, and that shows on sea and land.
@@ -380,6 +381,8 @@ struct Args {
     approach: bool,
     /// which aircraft to fly (`aircraft::by_key`)
     aircraft: Option<String>,
+    /// the flown type's paint scheme (an index of `aircraft::liveries`)
+    livery: Option<usize>,
     /// start with the HUD hidden (H), for screenshots
     no_hud: bool,
     /// rain 0..1 (wets the windows), and how wet the glass starts (default: settled in that rain)
@@ -401,7 +404,7 @@ struct Args {
     mcp_port: u16,
 }
 
-const CLI_USAGE: &str = "fablegame [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--isa-dev K] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--render-scale 0.5..2] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--fps-log] [--mute] [--lang en|fr|ko] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "fablegame [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--isa-dev K] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--render-scale 0.5..2] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--fps-log] [--mute] [--lang en|fr|ko] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -494,6 +497,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
         runway: None,
         approach: false,
         aircraft: None,
+        livery: None,
         no_hud: false,
         rain: None,
         wet: None,
@@ -602,6 +606,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
                 a.menu.get_or_insert(false);
             }
             "--runway" => a.runway = Some(req(flag, i)?.to_string()),
+            "--livery" => a.livery = Some(req(flag, i)?.parse().map_err(|_| format!("bad --livery"))?),
             "--aircraft" => {
                 let k = req(flag, i)?;
                 if aircraft::by_key(k).is_none() {
@@ -888,6 +893,12 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
                 a.no_hud = true;
                 used = 1;
             }
+            "--still" => {
+                // (read by `still_mode`): --shot pictures cut the aircraft out
+                // on a transparent background, for the aircraft picker
+                a.no_hud = true;
+                used = 1;
+            }
             "--fuel" => a.fuel = Some(req_num(flag, i)?.clamp(0.0, 1.0)),
             "--arcade" => {
                 a.arcade = true;
@@ -975,6 +986,14 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
     }
     a.shots.sort_by(|x, y| x.0.total_cmp(&y.0));
     Ok(a)
+}
+
+/// `--still`: screenshots for the aircraft picker, the aircraft alone on a
+/// transparent background (post.wgsl `finish` keys it out by depth, so fly it
+/// clear of the ground and anything else within 150 m), saved with alpha.
+fn still_mode() -> bool {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::args().any(|a| a == "--still"))
 }
 
 fn url_encode(s: &str) -> String {
@@ -1074,6 +1093,8 @@ struct Game {
     last_cursor: Option<(f64, f64)>,
     /// where the mouse is in the window (pixels), whatever it is doing
     cursor: Option<(f64, f64)>,
+    /// mouse-look captures relative motion and aims the cockpit from screen centre
+    mouse_captured: bool,
     /// the mouse pinned by --cursor (scripted screenshots)
     script_cursor: Option<(f64, f64)>,
     /// scripted mouse events (--click, --wheel)
@@ -1435,12 +1456,22 @@ impl Game {
         if args.ship {
             plane.rocket_return();
         }
+        // (Aircraft-picker stills show it as if parked: gear down, engines
+        // stopped, so its propeller blades are drawn rather than their blur.)
+        if still_mode() {
+            plane.gear_down = true;
+            plane.gear = 1.0;
+            plane.cold_and_dark();
+        }
         if let Some(spec) = &args.damage {
             plane.dmg.apply_spec(spec);
         }
         let mut world = world::World::new(sources::Loader::new(src.clone(), 14), args.max_zoom);
         let mut r = r;
-        r.set_paint(spec.paint.as_ref());
+        let livery = args.livery.filter(|&n| n < aircraft::liveries(spec).len()).unwrap_or(aircraft::default_livery(spec));
+        let lv = aircraft::liveries(spec).get(livery);
+        r.set_paint(lv.and_then(|l| l.paint).or(spec.paint.as_ref()));
+        r.set_livery(aircraft::livery_uniform(spec, lv));
         let Loaded { spec: _, model, piece_mesh, group_mesh, piece_cut, piece_inner, group_pivots, plane_box, lamps } = Loaded::build(spec, &mut r);
         let tm = trees::build_meshes();
         r.set_tree_meshes(&tm.meshes);
@@ -1459,6 +1490,7 @@ impl Game {
         menu.fuel = args.fuel.unwrap_or(menu.fuel);
         menu.cold = args.cold;
         menu.aircraft = aircraft::index_of(spec);
+        menu.liveries.insert(spec.name, livery);
         if let Some((la, lo, al)) = args.menu_view {
             menu.look_at(la, lo, al);
             menu.alt = al;
@@ -1601,6 +1633,7 @@ impl Game {
             mp_mirror: args.mp_mirror,
             live_view: None,
             cursor: args.cursor,
+            mouse_captured: false,
             script_cursor: args.cursor,
             script_clicks: args.clicks.clone(),
             hot_press: None,
@@ -1768,7 +1801,6 @@ impl Game {
             lamps: std::mem::replace(&mut self.lamps, next.lamps),
         };
         self.hangar.push(old);
-        self.r.set_paint(spec.paint.as_ref());
         self.spec = spec;
         self.cancel_cockpit_input();
         self.cockpit_controls = aircraft::cockpit_controls(spec, &self.model.pieces);
@@ -1776,6 +1808,15 @@ impl Game {
         self.weapons.reset(spec, &self.model.pieces);
         self.cam_dist = spec.cam_dist;
         self.menu.aircraft = aircraft::index_of(spec);
+        self.apply_livery();
+    }
+
+    /// Paint the flown type in the scheme picked for it: its paint (a scheme's
+    /// own baked one, else the type's) and the scheme's uniform.
+    pub(crate) fn apply_livery(&mut self) {
+        let lv = aircraft::liveries(self.spec).get(self.menu.livery(self.spec));
+        self.r.set_paint(lv.and_then(|l| l.paint).or(self.spec.paint.as_ref()));
+        self.r.set_livery(aircraft::livery_uniform(self.spec, lv));
     }
 
     /// Menu selection: swap to `spec` without stalling the frame. A model not
@@ -2650,6 +2691,12 @@ impl Game {
     fn hotspot_overlay(&self, ctx: &egui::Context) {
         use egui::{Align2, Color32, FontId};
         let screen = ctx.content_rect();
+        if self.mouse_captured {
+            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("cockpit aim dot")));
+            let c = screen.center();
+            p.circle_filled(c, 2.5, Color32::from_white_alpha(220));
+            p.circle_stroke(c, 6.0, egui::Stroke::new(1.0, Color32::from_black_alpha(180)));
+        }
         let aim = self.pad_aim_at();
         if let Some((on, near)) = aim {
             if near > 0.0 {
@@ -3809,6 +3856,52 @@ impl Game {
         self.hot_keys.clear();
         self.wheel_hold.clear();
         self.wheel_acc = cockpit::WheelSteps::default();
+    }
+
+    /// Keep the pointer at screen centre while mouse-look is active. The ray
+    /// through that point also aims clickable cockpit controls.
+    fn sync_mouse_capture(&mut self) {
+        let want = self.window.has_focus()
+            && self.mode == Mode::Fly
+            && self.cam_mode == 1
+            && !self.crashed
+            && !self.pause_open
+            && !self.info_open
+            && !self.goto_open
+            && !self.show_help
+            && self.binds.capture.is_none()
+            && !self.egui_ctx.text_edit_focused();
+        if want && !self.mouse_captured {
+            if self.window.set_cursor_grab(CursorGrabMode::Locked).is_ok()
+                || self.window.set_cursor_grab(CursorGrabMode::Confined).is_ok()
+            {
+                self.mouse_captured = true;
+                self.window.set_cursor_visible(false);
+            }
+        } else if !want && self.mouse_captured {
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+            self.window.set_cursor_visible(true);
+            self.mouse_captured = false;
+            self.cursor = None;
+            self.last_cursor = None;
+        }
+        if self.mouse_captured {
+            let size = self.window.inner_size();
+            let centre = (size.width as f64 * 0.5, size.height as f64 * 0.5);
+            self.cursor = Some(centre);
+            self.last_cursor = Some(centre);
+            let _ = self.window.set_cursor_position(PhysicalPosition::new(centre.0, centre.1));
+        }
+    }
+
+    fn release_mouse_capture(&mut self) {
+        if self.mouse_captured {
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+            self.window.set_cursor_visible(true);
+            self.mouse_captured = false;
+            self.cursor = None;
+            self.last_cursor = None;
+        }
     }
 
     fn cockpit_hotspots(&self, pose: &[Mat4]) -> Vec<aircraft::Hotspot> {
@@ -5044,6 +5137,7 @@ impl Game {
     }
 
     fn frame(&mut self) {
+        self.sync_mouse_capture();
         self.keep_settings(false);
         self.random_failures();
         if let Some(err) = self.r.take_gpu_error() {
@@ -5843,9 +5937,19 @@ impl Game {
             let sz = self.spec.cam_dist / 16.0;
             let at = self.plane.centre();
             let dist = self.cam_dist * if self.plane.stage > 0 { 0.5 } else { 1.0 };
-            cam = at + d * dist + u * (1.5 * sz) + (self.plane.right() * self.rng.range(-1.0, 1.0) as f64 + u * self.rng.range(-1.0, 1.0) as f64) * (vibe * 0.03);
-            dir = if rocket { (at - cam).normalize() } else { (self.plane.pos + u * (1.2 * sz) + self.plane.forward() * (6.0 * sz) - cam).normalize() };
-            upv = if rocket { u } else { (u + self.plane.up() * 0.25).normalize() };
+            if still_mode() {
+                // Aircraft-picker stills: fixed to the airframe, aimed at its
+                // middle (yaw 0 behind it; pitch in radians, positive above it).
+                let (sy, cy) = self.cam_yaw.sin_cos();
+                let (sp, cp) = self.cam_pitch.sin_cos();
+                cam = at + self.plane.rot * DVec3::new(sy * cp, sp, cy * cp) * self.cam_dist * sz;
+                dir = (at - cam).normalize();
+                upv = self.plane.up();
+            } else {
+                cam = at + d * dist + u * (1.5 * sz) + (self.plane.right() * self.rng.range(-1.0, 1.0) as f64 + u * self.rng.range(-1.0, 1.0) as f64) * (vibe * 0.03);
+                dir = if rocket { (at - cam).normalize() } else { (self.plane.pos + u * (1.2 * sz) + self.plane.forward() * (6.0 * sz) - cam).normalize() };
+                upv = if rocket { u } else { (u + self.plane.up() * 0.25).normalize() };
+            }
             self.cam_pos = cam;
             self.cam_look = self.plane.pos;
         }
@@ -6071,7 +6175,8 @@ impl Game {
             flash: [[0.0; 4]; 2 * storm::MAX_FLASHES],
             rain: [[0.0; 4]; 2],
             quality: [0.0; 4],
-            detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), self.gfx.storm_tier()],
+            // (w: storm tier, negated for aircraft-picker stills, `still_mode`)
+            detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), if still_mode() { -self.gfx.storm_tier() } else { self.gfx.storm_tier() }],
             nimbo: if in_menu { [[0.0; 4]; 4] } else { self.wx.deck_globals() },
             glow_c: glow[0],
             glow_e: glow[1],
@@ -6941,6 +7046,7 @@ impl Game {
             padui::focus_ring(ctx, ACCENT);
         });
         self.egui_state.handle_platform_output(&self.window, out.platform_output);
+        if self.mouse_captured { self.window.set_cursor_visible(false); }
         if let Some((lat, lon, name)) = jump {
             self.menu.look_at(lat, lon, 30_000.0);
             self.menu.pick = Some((lat, lon));
@@ -7005,6 +7111,8 @@ impl Game {
     /// their imagery or 3D tiles are on screen, then the data credits.
     fn credits(&mut self, ctx: &egui::Context) {
         use egui::{Align2, Color32, RichText};
+        // (Aircraft-picker stills show the aircraft alone.)
+        if still_mode() { return; }
         let logo = self.google_shown().then(|| {
             self.gm_logo
                 .get_or_insert_with(|| {
@@ -7857,6 +7965,7 @@ impl Game {
             padui::focus_ring(ctx, menu::ACCENT);
         });
         self.egui_state.handle_platform_output(&self.window, out.platform_output);
+        if self.mouse_captured { self.window.set_cursor_visible(false); }
         // A button or slider left focused on the flight panel would keep the
         // keys from the aircraft, which goes on flying while the panel is open.
         // (Except where the gamepad works the panel.)
@@ -7942,6 +8051,19 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn device_event(&mut self, _el: &ActiveEventLoop, _device_id: winit::event::DeviceId, event: DeviceEvent) {
+        let Some(g) = self.game.as_mut() else { return };
+        if !g.mouse_captured {
+            return;
+        }
+        if let DeviceEvent::MouseMotion { delta } = event {
+            let k = g.look_sens * g.head.zoom;
+            g.cam_yaw += delta.0 * 0.005 * k;
+            g.cam_pitch = (g.cam_pitch + delta.1 * 0.004 * k).clamp(-1.2, 1.4);
+            g.pad_aim = false;
+        }
+    }
+
     fn window_event(&mut self, _el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(g) = self.game.as_mut() else { return };
         let consumed = g.egui_state.on_window_event(&g.window, &event).consumed;
@@ -7982,6 +8104,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                g.release_mouse_capture();
                 g.cancel_cockpit_input();
                 g.keys.clear();
                 (g.pad_y, g.pad_y_combo) = (false, false);
@@ -8102,7 +8225,13 @@ impl ApplicationHandler for App {
                 g.last_cursor = None;
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if g.mode == Mode::Menu {
+                if g.mouse_captured {
+                    let size = g.window.inner_size();
+                    let centre = (size.width as f64 * 0.5, size.height as f64 * 0.5);
+                    g.cursor = Some(centre);
+                    g.last_cursor = Some(centre);
+                    let _ = g.window.set_cursor_position(PhysicalPosition::new(centre.0, centre.1));
+                } else if g.mode == Mode::Menu {
                     if let (Some(_), Some((x, y))) = (g.menu.press, g.last_cursor) {
                         let h = g.window.inner_size().height.max(1) as f64;
                         g.menu.drag(position.x - x, position.y - y, h, 60f64.to_radians());
@@ -8116,7 +8245,7 @@ impl ApplicationHandler for App {
                     if let Some((x, y)) = g.last_cursor {
                         // Zoomed in, the view turns slower under the mouse.
                         let k = g.look_sens * if g.cam_mode == 1 { g.head.zoom } else { 1.0 };
-                        g.cam_yaw -= (position.x - x) * 0.005 * k;
+                        g.cam_yaw += (position.x - x) * 0.005 * k;
                         g.cam_pitch = (g.cam_pitch + (position.y - y) * 0.004 * k).clamp(-1.2, 1.4);
                     }
                 }

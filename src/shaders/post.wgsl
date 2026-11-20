@@ -68,10 +68,22 @@ fn finish(scene: vec3f, in: FsIn) -> vec4f {
   c *= G.time.z;
   // Gentle vignette.
   let q = in.uv - 0.5;
-  c *= 1.0 - dot(q, q) * 0.35;
+  if (G.detail.w > -0.5) { c *= 1.0 - dot(q, q) * 0.35; }
   c = agx(c * AGX_EXPOSURE);
   c += (ign(in.pos.xy + 17.0) - 0.5) / 255.0;
-  return vec4f(c, 1.0);
+  return vec4f(c, still_alpha(uv));
+}
+// Aircraft-picker stills (main.rs `--still`, G.detail.w < 0): opaque where
+// the surface seen lies inside the aircraft's box (in its body frame; it is
+// shot held in the air, so nothing else is near), transparent elsewhere.
+fn still_alpha(uv: vec2f) -> f32 {
+  if (G.detail.w > -0.5) { return 1.0; }
+  let dim = vec2f(textureDimensions(t_depth));
+  let d = textureLoad(t_depth, vec2i(clamp(uv * dim, vec2f(0.0), dim - 1.0)), 0);
+  if (d <= 0.0) { return 0.0; }
+  let b = (G.plane_inv * vec4f(view_ray(uv) / d, 1.0)).xyz - G.plane_box[0].xyz;
+  let h = G.plane_box[1].xyz;
+  return select(0.0, 1.0, all(abs(b) < h));
 }
 // The frame at a window pixel when it was drawn at another resolution
 // (graphics settings): bilinear when upscaling; supersampled frames average
