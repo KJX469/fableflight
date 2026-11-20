@@ -600,8 +600,50 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
     }
 }
 
+/// The surface-element rig (aero.rs). Geometry measured off the model
+/// (g650.bin.gz) in the body frame: the T-tail's stabiliser spans 5.45 m a
+/// side at the fin's top, its leading edge swept from 11.1 m behind the CG
+/// at the root to 14.7 at the tip (an estimated 3.4 m root and 1.3 m tip
+/// chord, about 25.6 m² in all); the fin's leading edge runs from 9.3 m back
+/// at the tail cone to 12.3 m at the stabiliser (about 10 m²). Flaps from
+/// 1.60 to 10.58 m out, about 27% of the chord; ailerons 10.66 to 13.72 m,
+/// a quarter of it; spoilers 1.72 to 10.39 m (the outer three panels also
+/// roll it). Sections, the fuselage's share, the trim's range and the
+/// dampers are estimates, tuned to the stall and handling figures in the
+/// module docs.
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    // a supercritical section: aft-loaded (nose-down cm0), stalling at about
+    // 14.6 degrees clean (NTSB AAR-12/02)
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.025, cl_max: 1.45, cd0: 0.0055, cm0: -0.05 },
+    wing_strips: 12,
+    // k_ind 0.050 at aspect ratio 7.7 with the winglets
+    oswald: 0.83,
+    flap: crate::aero::Ctrl { span: [1.60, 10.58], chord: 0.25, travel: [0.0, 0.6807] },
+    flap_dcl_max: 1.0,
+    aileron_chord: 0.25,
+    aileron_travel: [0.26, 0.26],
+    spoiler: crate::aero::Ctrl { span: [1.72, 10.39], chord: 0.15, travel: [0.0, 0.7854] },
+    roll_spoiler: 0.25,
+    htail: crate::aero::Planform { root: DVec3::new(0.0, 4.9, 11.1), tip: DVec3::new(5.45, 4.95, 14.7), chord: [3.4, 1.3], incidence: [0.0, 0.0] },
+    elevator: crate::aero::Ctrl { span: [0.33, 5.27], chord: 0.35, travel: [0.40, 0.30] },
+    trim: [0.0524, 0.2269],
+    trim_stab: true,
+    fin: crate::aero::Planform { root: DVec3::new(0.0, 1.1, 9.3), tip: DVec3::new(0.0, 4.85, 12.3), chord: [3.4, 2.0], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.0, 3.6], chord: 0.4, travel: [0.45, 0.45] },
+    fuse: crate::aero::Fuse { cm_a: 0.5, cn_b: -0.08, cl_b: 0.0, cy_b: -0.25, cl_a: 0.0 },
+    // Fly-by-wire: the yoke commands load factor up to `fbw_g`, with an
+    // angle-of-attack limit short of the stall (the FSB report's AOA
+    // protection; its value an estimate), speed stable (a C*U law: let go,
+    // it returns to the speed it was trimmed at) with a flare mode (angle of
+    // attack below 50 ft, an assumption), and a yaw damper; the roll geared
+    // down with speed (about 25 deg/s at 250 kt).
+    fcs: crate::aero::Fcs { g_law: true, alpha_max: 0.21, speed_hold: 1.0, flare_alpha: 0.15, damp: [0.0, 0.0, 3.0], damp_auth: 0.3, gear_q: 6000.0, ..crate::aero::Fcs::NONE },
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
     id: 9,
+    rig: Some(&RIG),
     name: "Gulfstream G650",
     keys: &["g650", "gulfstream", "glf6"],
     blurb: "Twin-engine long-range business jet, 36 t. Mach 0.85-0.90 cruise at 41-51,000 ft, MMO 0.925; flaps 10/20/39, about 130 kt approach. / speedbrake, Z reversers, canopy key: airstair door.",
@@ -913,3 +955,4 @@ mod tests {
         assert!(skin_depth(EYE) > 0.3);
     }
 }
+

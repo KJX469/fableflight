@@ -1460,6 +1460,44 @@ const fn main_leg(x: f64, z: f64, name: &'static str, kick: f64) -> Leg {
     }
 }
 
+/// The surface-element rig (aero.rs). Sources and estimates:
+///
+/// - tail planforms from this model's `tail()`, which match Jenkinson, Simpkin
+///   & Rhodes, Civil Jet Aircraft Design (1999), Data A, table 3 (747-400):
+///   horizontal tail 136.6 m², span 22.08 m, taper 0.265, sweep 32°, arm
+///   32.5 m; fin 77.1 m², height 10.16 m, taper 0.33, sweep 45°, arm 30 m;
+///   fuselage 68.63 × 6.5 m;
+/// - the wing's section from the aircraft's own polar (`Spec`), the Krueger
+///   flaps' extra lift from its `stall_slat`;
+/// - controls: trimmable stabiliser, elevators, inboard (all-speed) and
+///   outboard (flaps-out only) ailerons, roll spoilers, a yaw damper, a rudder ratio changer; their
+///   travel is an estimate for the type (elevator 20° up / 15° down,
+///   ailerons 20°, outboard 25° up / 15° down, rudder 30°, spoilers 45°);
+/// - fuselage coefficients from Raymer, Aircraft Design, eq. 16.25 and 16.26.
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.04, cl_max: 1.43, cd0: 0.0055, cm0: -0.03 },
+    wing_strips: 14,
+    oswald: 0.82,
+    flap: crate::aero::Ctrl { span: [IB_FLAP[0] as f64, OB_FLAP[1] as f64], chord: 0.30, travel: [0.0, 0.5236] },
+    flap_dcl_max: 1.2,
+    aileron_chord: 0.20,
+    aileron_travel: [0.4363, 0.2618],
+    outboard_lock: true,
+    aileron_in: crate::aero::Ctrl { span: [IB_AIL[0] as f64, IB_AIL[1] as f64], chord: 0.25, travel: [0.3491, 0.3491] },
+    spoiler: crate::aero::Ctrl { span: [8.0, 24.0], chord: 0.15, travel: [0.0, 0.7854] },
+    roll_spoiler: 1.0,
+    slat_dcl_max: 0.2,
+    htail: crate::aero::Planform { root: DVec3::new(0.0, 2.23, 28.03), tip: DVec3::new(11.085, 3.59, 36.43), chord: [9.86, 2.65], incidence: [0.0, 0.0] },
+    elevator: crate::aero::Ctrl { span: [1.1, 10.9], chord: 0.25, travel: [0.3491, 0.2618] },
+    trim: [0.0524, 0.2269],
+    trim_stab: true,
+    fin: crate::aero::Planform { root: DVec3::new(0.0, 4.2, 26.05), tip: DVec3::new(0.0, 14.36, 36.33), chord: [12.03, 3.70], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.0, 10.16], chord: 0.30, travel: [0.5236, 0.5236] },
+    fuse: crate::aero::Fuse { cm_a: 0.65, cn_b: -0.11, cl_b: 0.0, cy_b: -0.3, cl_a: 0.0 },
+    fcs: crate::aero::Fcs { damp: [0.0, 0.0, 3.0], damp_auth: 0.3, gear_q: 15000.0, ..crate::aero::Fcs::NONE },
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
     id: 1,
     name: "Boeing 747-400",
@@ -1630,6 +1668,7 @@ pub static SPEC: Spec = Spec {
         stall_drop: 0.5,
         stall_yaw: 0.8,
     },
+    rig: Some(&RIG),
     cruise: 128.6,
     approach: (80.0, 6),
     cam_dist: 85.0,

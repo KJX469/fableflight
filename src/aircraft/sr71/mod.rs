@@ -289,6 +289,42 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
     }
 }
 
+/// The surface-element rig (aero.rs). Sources and estimates:
+///
+/// - the wing from this model's own planform (`wing_sect`); the chines'
+///   lift and their nose-up moment as fuselage coefficients, and the wing's
+///   52° leading edge's vortex lift, are estimates;
+/// - the two all-moving fins canted 15° inboard, and the elevons (inboard,
+///   in the flap span, and outboard), from this model's geometry; their
+///   areas and travel are estimates for the type (fins about 6.5 m² each,
+///   ±20°; elevons 20° up / 15° down in pitch, ±6° in roll);
+/// - the CG moved aft with the Mach number by the fuel sequencing, from
+///   about 20% of the chord subsonic to 25% at Mach 3.2 (estimate);
+/// - its stability augmentation in all three axes, as dampers, and sideslip
+///   fed to the rudders, which its marginal fins need at Mach 3; the stick's
+///   authority geared down with the dynamic pressure in all three axes (its
+///   elevons lift as they pitch it: at 400 kt a full push is two g more at
+///   once, before the nose has moved); all estimated gains.
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: 0.0, cl_max: 1.0, cd0: 0.004, cm0: 0.0 },
+    wing_strips: 14,
+    oswald: 0.75,
+    elevons: true,
+    flap: crate::aero::Ctrl { span: [1.8, 5.02], chord: 0.1, travel: [0.0, 0.0] },
+    aileron_chord_m: 1.3,
+    aileron_travel: [0.1047, 0.1047],
+    elevator: crate::aero::Ctrl { span: [0.0, 0.0], chord: 0.0, travel: [0.3491, 0.2618] },
+    trim: [0.0873, 0.1745],
+    fin: crate::aero::Planform { root: DVec3::new(4.12, 0.66, st(-8.9)), tip: DVec3::new(3.40, 3.34, st(-10.3)), chord: [3.2, 1.5], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.0, 3.0], chord: 1.0, travel: [0.3491, 0.3491] },
+    fuse: crate::aero::Fuse { cm_a: 0.1, cn_b: -0.03, cl_b: 0.0, cy_b: -0.3, cl_a: 0.3 },
+    vortex: 2.5,
+    vortex_burst: 0.49,
+    fcs: crate::aero::Fcs { damp: [1.5, 1.0, 3.0], damp_auth: 0.3, gear_q: 8000.0, yaw_beta: 2.0, ..crate::aero::Fcs::NONE },
+    cg_mach: &[(0.0, 0.20), (0.9, 0.20), (2.0, 0.235), (3.2, 0.25)],
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
     id: 7,
     name: "SR-71A Blackbird",
@@ -486,6 +522,7 @@ pub static SPEC: Spec = Spec {
         stall_drop: 0.6,
         stall_yaw: 1.2,
     },
+    rig: Some(&RIG),
     cruise: 200.0,
     approach: (90.0, 0),
     cam_dist: 46.0,
