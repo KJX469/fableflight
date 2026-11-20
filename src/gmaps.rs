@@ -136,7 +136,7 @@ impl Google {
     }
 
     fn with(path: Option<PathBuf>, key: String, enabled: bool, photoreal: bool, usage: Usage) -> Self {
-        let agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).user_agent("fablegame-flightsim/0.1").http_status_as_error(false).build().into();
+        let agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).user_agent(crate::fetch::USER_AGENT).http_status_as_error(false).build().into();
         Self {
             enabled: AtomicBool::new(enabled && !key.is_empty()),
             photoreal: AtomicBool::new(photoreal && !key.is_empty()),
@@ -202,7 +202,8 @@ impl Google {
             let _ = std::fs::create_dir_all(dir);
         }
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, serde_json::to_vec_pretty(&j).unwrap_or_default()).is_ok() {
+        let bytes = serde_json::to_vec_pretty(&j).unwrap_or_default();
+        if write_private_file(&tmp, &bytes).is_ok() {
             let _ = std::fs::rename(&tmp, path);
         }
     }
@@ -356,10 +357,12 @@ impl Google {
         Ok(token)
     }
 
-    /// The satellite tile, from the disk cache under `root` or from Google.
+    /// The satellite tile, from the disk cache under `root` (honouring the
+    /// reply's `Cache-Control: max-age` header) or from Google.
     pub fn tile(&self, root: &std::path::Path, z: u8, x: u32, y: u32) -> Result<Vec<u8>> {
-        let path = root.join(format!("gimg/{z}/{x}/{y}.jpg"));
-        if let Ok(d) = std::fs::read(&path) {
+        let path = root.join(format!("gimg/{z}/{x}/{y}.tile"));
+        let now = now_s();
+        if let Some(d) = read_cache3d(&path, now) {
             if !d.is_empty() {
                 self.usage.lock().session_cached += 1;
                 return Ok(d);
@@ -371,15 +374,11 @@ impl Google {
         let mut retried = false;
         loop {
             let token = self.token()?;
-            let (code, data) = self.call(|| self.agent.get(format!("{API}/v1/2dtiles/{z}/{x}/{y}")).query("session", &token).query("key", self.key()).call())?;
+            let (code, data, age) = self.call_aged(|| self.agent.get(format!("{API}/v1/2dtiles/{z}/{x}/{y}")).query("session", &token).query("key", self.key()).call())?;
             match code {
                 200 if !data.is_empty() => {
-                    if let Some(dir) = path.parent() {
-                        let _ = std::fs::create_dir_all(dir);
-                    }
-                    let tmp = path.with_extension(format!("tmp{:?}", std::thread::current().id()).replace(['(', ')'], ""));
-                    if std::fs::write(&tmp, &data).is_ok() {
-                        let _ = std::fs::rename(&tmp, &path);
+                    if age > 0 {
+                        write_cache3d(&path, now + age, &data);
                     }
                     self.usage.lock().session_tiles += 1;
                     return Ok(data);
@@ -573,6 +572,25 @@ fn prune_cache3d(dir: &std::path::Path, now: u64, max: u64) {
     }
 }
 
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 fn e_len(p: &std::path::Path) -> u64 {
     std::fs::metadata(p).map_or(0, |m| m.len())
 }
@@ -647,5 +665,16 @@ mod tests {
         assert!(g.photoreal());
         g.set_key("");
         assert!(!g.photoreal());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::env::temp_dir().join(format!("fable-gmaps-perm-{}.json", std::process::id()));
+        write_private_file(&p, b"{\"key\":\"secret\"}").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_file(&p);
     }
 }

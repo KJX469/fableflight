@@ -752,6 +752,7 @@ mod tests {
         assert!(r.contains(&("A / B".to_string(), "throttle up / down (hold)")));
         assert!(r.contains(&("Y + Up / Down".to_string(), "trim nose down / up")));
         assert!(r.contains(&("Dpad".to_string(), "quick views")));
+        assert_eq!(does("tail_view", false), Some(Does::Key(KeyCode::F6)));
     }
 
     #[test]

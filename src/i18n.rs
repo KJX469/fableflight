@@ -194,6 +194,8 @@ fn fr(en: &str) -> Option<&'static str> {
         "GAMEPAD · GLOBE" => "MANETTE · GLOBE",
         // keys
         "Space" => "Espace",
+        "ISO (beside Left Shift)" => "< >",
+        "F6 / ISO key" => "F6 / < >",
         "Mouse drag" => "Glisser souris",
         "Click / wheel" => "Clic / molette",
         "Mouse wheel" => "Molette",
@@ -222,6 +224,7 @@ fn fr(en: &str) -> Option<&'static str> {
         "thrust reversers, on the ground (hold)" => "inverseurs de poussée, au sol (maintenir)",
         "set the heading indicator to the compass" => "recaler le conservateur de cap sur le compas",
         "chase / cockpit camera" => "caméra extérieure / cockpit",
+        "toggle fixed rear view" => "activer / quitter la vue arrière fixe",
         "C switches between the chase view and the cockpit; drag the mouse to look around." => "C passe de la vue extérieure au cockpit ; glissez la souris pour regarder autour.",
         "F4 starts or stops the engine; for a start by hand: Ins battery, Page Up mixture, I magnetos, hold O." => "F4 démarre ou coupe le moteur ; pour un démarrage à la main : Inser batterie, Page ↑ mélange, I magnétos, maintenir O.",
         "J shows the radio navigation instruments; the Radio page of the panel (Tab) tunes VORs and ILSs." => "J affiche les instruments de radionavigation ; la page Radios du panneau (Tab) règle VOR et ILS.",

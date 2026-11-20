@@ -2,6 +2,7 @@
 name = "fablegame"
 version = "1.0.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 default-run = "fablegame"
 
@@ -46,7 +47,8 @@ wgpu = { version = "30", features = ["static-dxc"] }
 libloading = "0.8"
 
 [dev-dependencies]
-naga = { version = "=30.0.1", features = ["wgsl-in"] }
+# Keep in step with wgpu's naga version when upgrading wgpu.
+naga = { version = "=30.0.1", features = ["wgsl-in", "msl-out"] }
 
 # full lto and one codegen unit for faster release builds.
 [profile.release]

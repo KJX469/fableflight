@@ -72,7 +72,7 @@ pub mod lamp {
     pub const GEAR_DOWN: f32 = 6.0;
     pub const GEAR_UP: f32 = 7.0;
     pub const ANNUNC: f32 = 8.0;
-    #[allow(dead_code)] // no aircraft has one yet.
+    #[allow(dead_code)] // (no aircraft has one yet; the shaders know the kind)
     pub const FORMATION: f32 = 9.0; // electroluminescent formation light strip (a fighter's)
 }
 

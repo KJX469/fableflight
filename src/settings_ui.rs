@@ -253,7 +253,7 @@ impl Game {
             menu::screen_heading(&mut s, t!("Settings", "Réglages"));
             s.add_space(24.0);
             s.spacing_mut().item_spacing.y = 2.0;
-            // the chosen tab's marker slides to it.
+            // the chosen tab's marker, slid to it from the last one
             let marker = s.painter().add(egui::Shape::Noop);
             let mut on_rect = None;
             for sec in Section::ALL {
@@ -429,10 +429,16 @@ impl Game {
         card(ui, t!("Camera", "Caméra"), |ui| {
             let hint = if in_flight { t!("C switches it in flight", "C la change en vol") } else { t!("the view you start in; C switches it", "la vue au départ ; C la change") };
             row(ui, t!("Camera", "Caméra"), hint, |ui| {
+                let previous = self.cam_mode;
                 menu::segments(ui, |ui| {
                     menu::seg(ui, &mut self.cam_mode, 0, t!("Chase", "Extérieure"));
+                    menu::seg(ui, &mut self.cam_mode, crate::settings::TAIL_VIEW, t!("Fixed rear", "Arrière fixe"));
                     menu::seg(ui, &mut self.cam_mode, 1, "Cockpit");
                 });
+                if self.cam_mode == crate::settings::TAIL_VIEW && previous != self.cam_mode {
+                    self.view_before_tail = previous;
+                    self.cancel_cockpit_input();
+                }
             });
             row(ui, t!("Cockpit field of view", "Champ de vision cockpit"), t!("the mouse wheel zooms for a moment", "la molette zoome un instant"), |ui| {
                 ui.add(egui::Slider::new(&mut self.cockpit_fov, 35.0..=85.0).custom_formatter(|v, _| format!("{v:.0}° vertical")));
@@ -944,12 +950,12 @@ impl Game {
                     }
                 });
                 ui.horizontal(|ui| {
-                    // 0 until the axis moves.
+                    // (0 until the axis has moved since the game started)
                     if let Some(v) = self.binds.axis(a).or_else(|| self.binds.axes.contains_key(&a).then_some(0.0)) {
                         let f = if a.centred() { (v as f32 + 1.0) * 0.5 } else { v as f32 };
                         ui.add(egui::ProgressBar::new(f).desired_width(64.0).desired_height(6.0));
                     }
-                    // the dead zone.
+                    // The dead zone: round the centre, or at the idle end of a throttle or brake.
                     if let Some(b) = self.binds.axes.get_mut(&a) {
                         ui.spacing_mut().slider_width = 70.0;
                         ui.add(egui::Slider::new(&mut b.dead, 0.0..=0.3).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
@@ -996,7 +1002,12 @@ impl Game {
             for a in ACTIONS.iter().filter(|a| a.keyboard) {
                 grid_label(ui, a.label(), cw);
                 let moved = self.binds.keys.contains_key(a.id);
-                binding_cell(ui, self.binds.key_of(a).map(bind::key_name), moved);
+                let keys = if a.id == "tail_view" && !moved && self.binds.map_key(winit::keyboard::KeyCode::IntlBackslash) == Some(a.key) {
+                    Some(i18n::tr("F6 / ISO key").to_string())
+                } else {
+                    self.binds.key_of(a).map(bind::key_name)
+                };
+                binding_cell(ui, keys, moved);
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!busy, egui::Button::new(t!("Change", "Changer"))).clicked() {
                         self.binds.start_capture(Capture::Key(a.id));
@@ -1014,12 +1025,14 @@ impl Game {
     }
 }
 
-/// the grid every bindings table shares, so their columns line up.
+/// The grid every bindings table shares (action · binding · buttons · extras),
+/// so the three cards line up column for column.
 fn bind_grid(ui: &mut Ui, id: &str, body: impl FnOnce(&mut Ui)) {
     egui::Grid::new(id).num_columns(4).spacing([16.0, 6.0]).min_row_height(30.0).show(ui, body);
 }
 
-/// what an action is bound to, as a key cap.
+/// What an action is bound to, in a fixed-width column: a key cap, or a
+/// dim dash when nothing is bound. `moved`: changed from the default.
 fn binding_cell(ui: &mut Ui, what: Option<String>, moved: bool) {
     ui.allocate_ui_with_layout(vec2(180.0, 26.0), Layout::left_to_right(Align::Center), |ui| {
         ui.set_min_width(180.0);

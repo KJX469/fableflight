@@ -423,7 +423,7 @@ pub struct Stand {
     pub dir: Vec2,
     /// largest aircraft that fits: 0 light single, 1 business jet, 2 regional, 3 narrow-body, 4 wide-body
     pub size: u8,
-    /// read by the stand layout probe in the tests.
+    /// (read by the stand-layout probe in the tests)
     #[cfg_attr(not(test), allow(dead_code))]
     pub gate: String,
     /// taxi graph node it is reached from

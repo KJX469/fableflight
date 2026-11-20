@@ -297,6 +297,11 @@ impl World {
     /// Height of the ground (or water surface) at a lat/lon: the top of the
     /// photorealistic 3D mesh inside its zone (buildings included), our own
     /// terrain everywhere else.
+    /// Whether a sphere (camera-relative centre, radius) is in this frame's view.
+    pub fn in_view(&self, rel: DVec3, r: f64) -> bool {
+        self.frustum.as_ref().map(|f| f.sphere(rel, r)).unwrap_or(true)
+    }
+
     pub fn ground(&self, lat: f64, lon: f64) -> Option<Ground> {
         let g = self.terrain_ground(lat, lon);
         if let Some(mut h) = self.photo.as_deref().and_then(|p| p.ground(lat, lon, g.as_ref().map(|g| g.h))) {
@@ -308,6 +313,38 @@ impl World {
             return Some(Ground { h, water });
         }
         g
+    }
+
+    /// Outward unit surface normal of the ground at `(lat, lon)` (radians),
+    /// estimated from nearby height samples; falls back to local up on flat
+    /// ground, water, or sudden vertical cliffs.
+    pub fn ground_normal(&self, lat: f64, lon: f64) -> DVec3 {
+        let p0 = geo::lla_to_pos(lat, lon, 0.0);
+        let (east, north, up) = geo::enu(p0);
+        let Some(g0) = self.ground(lat, lon) else { return up };
+        if g0.water {
+            return up;
+        }
+        let eps = 1.0;
+        let dlat = eps / geo::R;
+        let dlon = eps / (geo::R * lat.cos().max(0.05));
+        let slope = |a: Option<Ground>, b: Option<Ground>| -> f64 {
+            let fwd = a.map(|g| g.h - g0.h).filter(|d| d.abs() <= 3.0);
+            let bwd = b.map(|g| g0.h - g.h).filter(|d| d.abs() <= 3.0);
+            match (fwd, bwd) {
+                (Some(f), Some(b)) => 0.5 * (f + b) / eps,
+                (Some(f), None) => f / eps,
+                (None, Some(b)) => b / eps,
+                (None, None) => 0.0,
+            }
+            .clamp(-2.0, 2.0)
+        };
+        let dh_de = slope(self.ground(lat, lon + dlon), self.ground(lat, lon - dlon));
+        let dh_dn = slope(self.ground(lat + dlat, lon), self.ground(lat - dlat, lon));
+        if dh_de == 0.0 && dh_dn == 0.0 {
+            return up;
+        }
+        (up - east * dh_de - north * dh_dn).normalize()
     }
 
     /// Obstruction lights on the 3D tiles' tall buildings, if they are on.
@@ -518,7 +555,21 @@ impl World {
                 return Some(Ground { h, water: w });
             }
         }
-        self.flat.map(|h| Ground { h, water: false })
+        let mut h = self.flat?;
+        if !self.craters.is_empty() {
+            let p = geo::lla_to_pos(lat, lon, h);
+            for (c, r) in &self.craters {
+                let v = p - *c;
+                if v.length_squared() < (*r as f64 * 2.0).powi(2) {
+                    let up = c.normalize();
+                    let d = (v - up * v.dot(up)).length() / *r as f64;
+                    if d < 1.8 {
+                        h += crater_profile(d) * *r as f64 * 0.34;
+                    }
+                }
+            }
+        }
+        Some(Ground { h, water: false })
     }
 
     /// Building or bridge deck over a lat/lon.
@@ -1033,10 +1084,28 @@ impl World {
                     None if self.in_flight < 28 => {
                         self.fields.insert(i, FSlot::Loading);
                         self.in_flight += 1;
-                        self.loader.submit(1.0 + (d / 9000.0) as f32, Job::Airfield(i));
+                        if let Some(evicted) = self.loader.submit(1.0 + (d / 9000.0) as f32, Job::Airfield(i)) {
+                            self.drop_loading(evicted);
+                        }
                     }
                     None => {}
                 }
+            }
+        }
+
+        // Cancel still-queued jobs that are now far behind the camera (fast flight / teleport).
+        if self.in_flight > 0 && self.frame % 15 == 0 {
+            let tile_pos = |id: TileId| {
+                let (la, lo) = id.lat_lon(0.5, 0.5);
+                geo::lla_to_pos(la, lo, 0.0)
+            };
+            let cancelled = self.loader.cancel_where(|job| match *job {
+                Job::Terrain(id) => id.z >= 10 && (tile_pos(id) - cam).length() > id.width_m() * 6.0 + 15_000.0,
+                Job::Buildings(id) => (tile_pos(id) - cam).length() > id.width_m() * 6.0 + 15_000.0,
+                Job::Airfield(_) => false,
+            });
+            for job in cancelled {
+                self.drop_loading(job);
             }
         }
 
@@ -1052,23 +1121,29 @@ impl World {
             let (prio, id) = self.wanted[k];
             sent += 1;
             self.in_flight += 1;
-            if id.z & 0x80 != 0 {
+            let evicted = if id.z & 0x80 != 0 {
                 let id = TileId::new(id.z & 0x7f, id.x, id.y);
                 self.builds.insert(id, BSlot::Loading);
-                self.loader.submit(prio, Job::Buildings(id));
+                self.loader.submit(prio, Job::Buildings(id))
             } else if id.z & 0x40 != 0 {
                 // keeps drawing the old tile until the new one is in
                 let id = TileId::new(id.z & 0x3f, id.x, id.y);
                 match self.tiles.get_mut(&id) {
                     Some(Slot::Ready(t)) if !t.refreshing => {
                         t.refreshing = true;
-                        self.loader.submit(prio, Job::Terrain(id));
+                        self.loader.submit(prio, Job::Terrain(id))
                     }
-                    _ => self.in_flight -= 1,
+                    _ => {
+                        self.in_flight -= 1;
+                        None
+                    }
                 }
             } else {
                 self.tiles.insert(id, Slot::Loading);
-                self.loader.submit(prio, Job::Terrain(id));
+                self.loader.submit(prio, Job::Terrain(id))
+            };
+            if let Some(ev) = evicted {
+                self.drop_loading(ev);
             }
         }
 
@@ -1089,6 +1164,27 @@ impl World {
             });
         }
         self.stats = (self.draw.len(), self.in_flight, self.draw_b.len());
+    }
+
+    fn drop_loading(&mut self, job: Job) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        match job {
+            Job::Terrain(id) => match self.tiles.get_mut(&id) {
+                Some(Slot::Loading) => { self.tiles.remove(&id); }
+                Some(Slot::Ready(t)) => t.refreshing = false,
+                _ => {}
+            },
+            Job::Buildings(id) => {
+                if matches!(self.builds.get(&id), Some(BSlot::Loading)) {
+                    self.builds.remove(&id);
+                }
+            }
+            Job::Airfield(i) => {
+                if matches!(self.fields.get(&i), Some(FSlot::Loading)) {
+                    self.fields.remove(&i);
+                }
+            }
+        }
     }
 
     /// Copy queued building geometry to the GPU until `bytes` (already used

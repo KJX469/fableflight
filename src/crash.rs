@@ -182,6 +182,7 @@ pub const GRIT: f32 = 7.0; // pale masonry dust
 pub const SOOT: f32 = 8.0; // smoke carried on from the fire simulation
 pub const GLASS: f32 = 9.0; // shards of window glass
 pub const DROPS: f32 = 10.0; // thrown water, streaked along its flight
+pub const FEATHER: f32 = 11.0; // a bird's feathers after a strike (temp = how pale)
 
 fn crash_ignition_chance(fuel: f32, energy_per_kg: f32, steep: f32, tank_hit: bool) -> f32 {
     let fuel = fuel.clamp(0.0, 1.0);
@@ -809,7 +810,7 @@ impl Crash {
         };
         for (k, b) in due.into_iter().enumerate() {
             let pos = if b.pos.is_nan() {
-                let pick = [2usize, 3, 0][(self.time * 7.0) as usize % 3 + k * 0 % 3];
+                let pick = [2usize, 3, 0][((self.time * 7.0) as usize + k) % 3];
                 self.debris.get(pick).filter(|d| !d.sunk).map(|d| self.local(d.pos) + up).unwrap_or(up * 2.0)
             } else {
                 b.pos

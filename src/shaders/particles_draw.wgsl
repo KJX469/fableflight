@@ -274,6 +274,16 @@ fn puff(in: VOut, kind: i32, z: f32) -> vec4f {
     if (a < 0.003) { discard; }
     return vec4f(c * a, a);
   }
+  if (kind == 11) {
+    // Feather: a narrow vane, pale or dark as the bird was (temp), a little
+    // translucent at its edge.
+    let e = abs(in.uv.x) * 2.6 + in.uv.y * in.uv.y;
+    if (e > 1.0) { discard; }
+    let ll = light_at(in.W);
+    let fadeo = 1.0 - smoothstep(0.85, 1.0, k);
+    let fc = vec3f(clamp(in.b.x, 0.03, 0.9)) * vec3f(1.0, 0.98, 0.94) * (0.85 + 0.3 * fract(seed * 5.7));
+    return vec4f(fc * (ll.sun * 0.6 / PI + ll.amb) * fadeo, fadeo * (1.0 - 0.4 * smoothstep(0.6, 1.0, e)));
+  }
   if (kind == 6) {
     // Leaf: a small opaque fleck, lit like foliage.
     if (abs(in.uv.x) + abs(in.uv.y) * 0.6 > 1.0) { discard; }

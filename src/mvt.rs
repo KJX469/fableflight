@@ -60,7 +60,7 @@ impl<'a> Pb<'a> {
 pub enum Val {
     Str(String),
     Num(f64),
-    /// a bool, not kept.
+    /// a true or false (not kept: nothing reads one)
     Bool,
 }
 impl Val {

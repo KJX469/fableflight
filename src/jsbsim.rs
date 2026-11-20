@@ -455,15 +455,28 @@ impl Aircraft {
                     for c in n.children().filter(|c| c.has_tag_name("contact")) {
                         let Some(at) = child(c, "location").and_then(location) else { continue };
                         let get = |k: &str| child(c, k).and_then(|v| num(text(v))).unwrap_or(0.0);
-                        // (spring and damper in lbs/ft unless stated otherwise)
+                        // (spring in lbs/ft, linear damper in lbs/ft/sec unless stated otherwise;
+                        // square-law dampers in lbs/ft2/sec2 or type="SQUARE" are linearised at a
+                        // typical 5 ft/s (~1.5 m/s) touchdown compression rate.)
+                        const V_REF_FT_S: f64 = 5.0;
                         let per_ft = |k: &str| {
                             child(c, k).map(|v| {
                                 let x = num(text(v)).unwrap_or(0.0);
-                                match v.attribute("unit").unwrap_or("").to_uppercase().as_str() {
-                                    "N/M" => x * 0.3048 / 4.448_22,
-                                    "N/M/SEC" | "N/M/S" => x * 0.3048 / 4.448_22,
-                                    "LBS/IN" => x * 12.0,
-                                    "LBS/IN/SEC" => x * 12.0,
+                                let unit = v.attribute("unit").unwrap_or("").to_uppercase();
+                                let square = v.attribute("type").is_some_and(|t| t.eq_ignore_ascii_case("SQUARE"));
+                                match unit.as_str() {
+                                    "N/M" | "N/M/SEC" | "N/M/S" => {
+                                        let lin = x * 0.3048 / 4.448_22;
+                                        if square { lin * 0.3048 * V_REF_FT_S } else { lin }
+                                    }
+                                    "N/M2/SEC2" | "N/M2/S2" | "N/(M/S)2" => x * (0.3048 * 0.3048 / 4.448_22) * V_REF_FT_S,
+                                    "LBS/IN" | "LBS/IN/SEC" => {
+                                        let lin = x * 12.0;
+                                        if square { lin * 12.0 * V_REF_FT_S } else { lin }
+                                    }
+                                    "LBS/IN2/SEC2" => x * 144.0 * V_REF_FT_S,
+                                    "LBS/FT2/SEC2" | "LBS/(FT/SEC)2" => x * V_REF_FT_S,
+                                    _ if square => x * V_REF_FT_S,
                                     _ => x,
                                 }
                             })
@@ -1052,5 +1065,40 @@ mod tests {
         let a = Aircraft::parse(TEST, Path::new(".")).unwrap();
         let r = compare(&a, &crate::aircraft::c172::SPEC, Some(1.0));
         assert!(r.contains("CL max clean") && r.contains("cl_a") && r.contains("roll rate"), "{r}");
+    }
+
+    #[test]
+    fn square_law_gear_damping_is_converted() {
+        let xml = r#"<fdm_config name="sq">
+          <metrics><wingarea>100</wingarea><wingspan>30</wingspan><chord>5</chord></metrics>
+          <mass_balance><emptywt>1000</emptywt><location name="CG" unit="IN"><x>0</x><y>0</y><z>0</z></location></mass_balance>
+          <ground_reactions>
+            <contact type="BOGEY" name="L">
+              <location unit="IN"><x>0</x><y>-30</y><z>-30</z></location>
+              <spring_coeff unit="LBS/FT">1000</spring_coeff>
+              <damping_coeff unit="LBS/FT2/SEC2">40</damping_coeff>
+            </contact>
+            <contact type="BOGEY" name="R">
+              <location unit="IN"><x>0</x><y>30</y><z>-30</z></location>
+              <spring_coeff unit="LBS/FT">1000</spring_coeff>
+              <damping_coeff type="SQUARE" unit="LBS/FT/SEC">40</damping_coeff>
+            </contact>
+            <contact type="BOGEY" name="N">
+              <location unit="IN"><x>-40</x><y>0</y><z>-30</z></location>
+              <spring_coeff unit="N/M">14593.9</spring_coeff>
+              <damping_coeff unit="N/M2/SEC2">500</damping_coeff>
+            </contact>
+          </ground_reactions>
+          <aerodynamics>
+            <axis name="LIFT"><function name="cl"><value>0.5</value></function></axis>
+          </aerodynamics>
+        </fdm_config>"#;
+        let a = Aircraft::parse(xml, Path::new(".")).unwrap();
+        assert_eq!(a.contacts.len(), 3);
+        // 40 lbs/(ft/s)^2 linearised at 5 ft/s = 200 lbs/(ft/s)
+        assert!((a.contacts[0].damping - 200.0).abs() < 1e-6, "{}", a.contacts[0].damping);
+        assert!((a.contacts[1].damping - 200.0).abs() < 1e-6, "{}", a.contacts[1].damping);
+        // 500 N/(m/s)^2 -> 500 * 0.3048^2 / 4.44822 * 5.0 ≈ 52.213 lbs/(ft/s)
+        assert!((a.contacts[2].damping - 52.213).abs() < 0.05, "{}", a.contacts[2].damping);
     }
 }

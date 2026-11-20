@@ -124,11 +124,11 @@ pub fn supercell(c: &[[f32; 4]; 2]) -> f64 {
 }
 /// A supercell: its anvil height (m above sea level) and how far its
 /// overshooting top climbs above that (m). (The storm ceiling takes it in.)
-pub const SUPER_TOP: f32 = STORM_TOP + 300.0;
-pub const SUPER_OVERSHOOT: f32 = 2300.0;
+pub const SUPER_TOP: f32 = STORM_TOP + 400.0;
+pub const SUPER_OVERSHOOT: f32 = 2400.0;
 const _: () = assert!(SUPER_TOP + SUPER_OVERSHOOT <= STORM_TOP + 700.0 + STORM_OVERSHOOT + 300.0);
 /// A supercell's tower radius, km.
-pub const SUPER_R: f64 = 9.0;
+pub const SUPER_R: f64 = 14.0;
 /// The cell for the shaders, centre `cen` (cloud space km), radius `rad` km,
 /// `on` 0..1 how far it has grown in (to 0.5 an ordinary storm growing, then a
 /// supercell).
@@ -226,18 +226,18 @@ const DECK_GONE: f64 = 26.0;
 /// How far below its mean base the rain deck's ragged scud hangs, m.
 pub const DECK_RAG: f32 = 320.0;
 /// Spacing of candidate storm sites, km.
-const STORM_GRID: f64 = 40.0;
+const STORM_GRID: f64 = 52.0;
 /// Spacing of candidate squall-line sites, km (on stormy days one now and then
 /// stands in for the scattered cells around it).
 const SQUALL_GRID: f64 = 400.0;
 /// A squall line's tower radius (km): its depth across is about 3x this.
-pub const SQUALL_R: f64 = 6.5;
+pub const SQUALL_R: f64 = 9.5;
 /// Share of candidate storm sites that hold a supercell on the stormiest days,
 /// and how far round one no other cell stands, km.
-const SUPER_P: f64 = 0.006;
-const SUPER_CLEAR: f64 = 50.0;
+const SUPER_P: f64 = 0.010;
+const SUPER_CLEAR: f64 = 68.0;
 /// Storm cells are found out to this distance from the camera, km.
-const STORM_RANGE: f64 = 260.0;
+const STORM_RANGE: f64 = 300.0;
 
 fn shash(x: u32) -> u32 {
     let h = x.wrapping_mul(747796405).wrapping_add(2891336453);
@@ -584,7 +584,7 @@ impl Weather {
         let a = dist_km / 6371.0;
         let p = up * a.cos() + dir * a.sin();
         let cen = (p * 6371.0 + self.cloud_off / 1000.0).normalize() * 6371.0;
-        let size = smoothstep(2.0, 7.0, rad_km);
+        let size = smoothstep(4.0, 12.0, rad_km);
         // Each placed storm gets its own seed (turret layout), so a line of them is not
         // one cloud repeated.
         let seed = (0.37 + dist_km * 0.1373 + bearing * 0.0619 + rad_km * 0.271).fract() as f32;
@@ -630,11 +630,11 @@ impl Weather {
     /// the way, and more around it.
     pub fn storm_field(&mut self, pos: DVec3, heading: f64) {
         self.preset("Storms");
-        self.place_storm(pos, 8.0, heading, 6.5, None);
-        self.place_storm(pos, 24.0, heading + 55.0, 5.0, None);
-        self.place_storm(pos, 30.0, heading - 45.0, 8.0, None);
-        self.place_storm(pos, 42.0, heading + 150.0, 4.5, None);
-        self.place_storm(pos, 55.0, heading - 120.0, 6.0, None);
+        self.place_storm(pos, 26.0, heading, 10.5, None);
+        self.place_storm(pos, 46.0, heading + 48.0, 9.0, None);
+        self.place_storm(pos, 58.0, heading - 40.0, 12.5, None);
+        self.place_storm(pos, 72.0, heading + 140.0, 8.5, None);
+        self.place_storm(pos, 90.0, heading - 115.0, 10.5, None);
     }
 
     /// Storm cells (cumulonimbus) near the camera, nearest first, two vec4s each for
@@ -667,12 +667,12 @@ impl Weather {
             // thunder, all but the strongest (~47 dBZ and up) are.
             let shower = c.age < 0.4 || (self.live && self.showers_only && c.age < 0.8);
             let (age, top) = if shower { let a = age.min(0.35); (a, shower_anvil(self.base() as f64, 4500.0 + 2500.0 * c.seed as f64, a)) } else { (age, c.top) };
-            let over = STORM_OVERSHOOT * (0.25 + 0.75 * smoothstep(2.5, 8.0, rad) as f32) * smoothstep(0.6, 0.95, age) as f32;
+            let over = STORM_OVERSHOOT * (0.25 + 0.75 * smoothstep(4.5, 13.0, rad) as f32) * smoothstep(0.6, 0.95, age) as f32;
             out.push((dist, [[c.at.x as f32, c.at.y as f32, c.at.z as f32, rad as f32], [age as f32, top, over, c.seed]]));
         }
         // (Showers are many and small: a low setting still has a fair few.)
         let st = self.storms as f64;
-        let prob_amount = (0.15 + 0.35 * st) * (st * 8.0).min(1.0) * smoothstep(0.12, 0.45, self.clouds as f64);
+        let prob_amount = (0.19 + 0.39 * st) * (st * 8.0).min(1.0) * smoothstep(0.12, 0.45, self.clouds as f64);
         // Share of cells that are showers: nearly all on a showery day, a few
         // on a stormy one (and all where live weather says no thunder).
         let p_shower = if self.live && self.showers_only { 1.0 } else { (0.95 - 0.85 * st * st.sqrt()).clamp(0.1, 0.95) };
@@ -699,8 +699,8 @@ impl Weather {
                     return;
                 }
                 let h1 = shash(h0 ^ 0x27d4eb2d);
-                let len = (60.0 + 90.0 * unit(h1)) * (0.6 + 0.4 * on);
-                let rad = (SQUALL_R - 1.0 + 2.0 * unit(h1 >> 16)) * (0.6 + 0.4 * on);
+                let len = (70.0 + 80.0 * unit(h1)) * (0.6 + 0.4 * on);
+                let rad = (SQUALL_R - 1.2 + 2.4 * unit(h1 >> 16)) * (0.6 + 0.4 * on);
                 let h2 = shash(h1);
                 let top = STORM_TOP + 700.0 * (unit(h2) as f32 * 2.0 - 1.0);
                 lines.push((cen, 0.5 * len));
@@ -714,21 +714,21 @@ impl Weather {
         if p_super > 0.0 {
             sites(q, STORM_GRID, STORM_RANGE + SUPER_CLEAR, |cen, dist, h0| {
                 let hs = shash(h0 ^ 0x68e3_1da4);
-                let clear = lines.iter().map(|&(c, l2)| smoothstep(l2 + 30.0, l2 + 90.0, c.distance(cen))).fold(1.0, f64::min);
+                let clear = lines.iter().map(|&(c, l2)| smoothstep(l2 + 30.0, l2 + 65.0, c.distance(cen))).fold(1.0, f64::min);
                 let on = smoothstep(unit(hs) - 0.25 * SUPER_P, unit(hs) + 0.25 * SUPER_P, p_super) * (1.0 - seen_at(cen)) * clear;
                 if on <= 0.0 {
                     return;
                 }
                 supers.push(cen);
                 if dist <= STORM_RANGE {
-                    let rad = (SUPER_R - 1.0 + 2.0 * unit(hs >> 16)) * (0.6 + 0.4 * on);
+                    let rad = (SUPER_R - 1.5 + 3.0 * unit(hs >> 16)) * (0.6 + 0.4 * on);
                     out.push((dist, super_cell(cen, rad, on, unit(shash(hs)) as f32 * 0.999)));
                 }
             });
         }
         sites(q, STORM_GRID, STORM_RANGE, |cen, dist, h0| {
             // (A supercell stands here, or near enough to keep this one off.)
-            let lone = supers.iter().map(|s| smoothstep(0.5 * SUPER_CLEAR, SUPER_CLEAR, s.distance(cen))).fold(1.0, f64::min);
+            let lone = supers.iter().map(|s| smoothstep(0.6 * SUPER_CLEAR, SUPER_CLEAR, s.distance(cen))).fold(1.0, f64::min);
             if lone <= 0.0 {
                 return;
             }
@@ -738,7 +738,7 @@ impl Weather {
             // Fades in rather than pops as the slider or the region changes.
             let r0 = unit(h0);
             // (A squall line takes the place of the cells round it.)
-            let clear = lines.iter().map(|&(c, l2)| smoothstep(l2 + 30.0, l2 + 90.0, c.distance(cen))).fold(1.0, f64::min);
+            let clear = lines.iter().map(|&(c, l2)| smoothstep(l2 + 30.0, l2 + 65.0, c.distance(cen))).fold(1.0, f64::min);
             let on = smoothstep(r0 - 0.04, r0 + 0.04, prob) * (1.0 - seen_at(cen)) * clear * lone;
             if on <= 0.0 {
                 return;
@@ -749,25 +749,25 @@ impl Weather {
             let h3 = shash(h2 ^ 0x9e3779b9);
             let seed = unit(h3 >> 16) as f32;
             if unit(shash(h3 ^ 0x5bd1e995)) < p_shower {
-                // A shower: a tower 2.4-5 km across, no anvil, topping out at
-                // 4-7 km (higher on stormier days).
-                let rad = (1.2 + 1.3 * us) * (0.6 + 0.4 * on);
-                let age = (0.12 + 0.25 * u) * on;
-                let top = 4000.0 + 3000.0 * (unit(h3) * (0.6 + 0.4 * st));
+                // A shower: a towering cumulus 5-10 km across, no anvil, topping
+                // out at 4.2-6.6 km (higher on stormier days).
+                let rad = (2.4 + 2.4 * us) * (0.6 + 0.4 * on);
+                let age = (0.14 + 0.24 * u) * on;
+                let top = 4200.0 + 2400.0 * (unit(h3) * (0.6 + 0.4 * st));
                 out.push((dist, [[cen.x as f32, cen.y as f32, cen.z as f32, rad as f32], [age as f32, shower_anvil(self.base() as f64, top, age), 0.0, seed]]));
                 return;
             }
-            // Thunderstorms. Sizes have a long tail: mostly single towers a
-            // few km across, now and then a giant multicell / supercell 12-18 km wide.
-            let giant = smoothstep(0.82, 1.0, us) * (0.5 + 0.5 * st);
-            let rad = (2.4 + 2.6 * us + 4.0 * giant * giant) * (0.6 + 0.4 * on);
+            // Thunderstorms. Broad convective complexes 10-20 km across, with a
+            // tail of giant multicell storms 20-30 km wide.
+            let giant = smoothstep(0.76, 1.0, us) * (0.5 + 0.5 * st);
+            let rad = (5.2 + 4.6 * us + 5.5 * giant * giant) * (0.6 + 0.4 * on);
             // Mature (with anvils); stormier days have more of the older,
             // bigger ones; giants always are.
             let age = (0.5 + 0.5 * (u + (1.0 - (1.0 - u) * (1.0 - u) - u) * st)).max(giant * 1.6).min(1.0) * on;
             // Anvil height (the tropopause varies a little) and how far the
             // strongest updraft overshoots it: big, mature cells the most.
             let top = STORM_TOP + 700.0 * (unit(h3) as f32 * 2.0 - 1.0);
-            let over = STORM_OVERSHOOT * (0.25 + 0.75 * smoothstep(2.5, 8.0, rad) as f32) * smoothstep(0.6, 0.95, age) as f32;
+            let over = STORM_OVERSHOOT * (0.25 + 0.75 * smoothstep(4.5, 13.0, rad) as f32) * smoothstep(0.6, 0.95, age) as f32;
             out.push((dist, [[cen.x as f32, cen.y as f32, cen.z as f32, rad as f32], [age as f32, top, over, seed]]));
         });
         out.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -966,7 +966,7 @@ impl Weather {
 
     /// The real-weather switch, and where the report comes from.
     fn live_switch(&mut self, ui: &mut egui::Ui) {
-        switch_row(ui, t!("Real weather", "Météo réelle"), t!("METAR, else Open-Meteo; radar", "METAR, sinon Open-Meteo ; radar"), &mut self.live);
+        ui.checkbox(&mut self.live, t!("Real weather (METAR, else Open-Meteo; radar)", "Météo réelle (METAR, sinon Open-Meteo ; radar)"));
         if self.live {
             let text = if self.live_station.is_empty() {
                 if self.live_raw.is_empty() { t!("Waiting for a report…", "En attente d'un bulletin…").to_string() } else { self.live_raw.clone() }
@@ -975,7 +975,7 @@ impl Weather {
             } else {
                 self.live_raw.clone()
             };
-            ui.add(egui::Label::new(RichText::new(text).font(egui::FontId::monospace(12.5)).color(crate::menu::DIM)).wrap());
+            ui.label(RichText::new(text).font(crate::menu::data()).weak());
         }
     }
 
@@ -997,10 +997,10 @@ impl Weather {
         real_time_switch(ui, real_time);
         let free = !*real_time;
         egui::Grid::new("start_time").num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, |ui| {
-            row_label(ui, t!("Local time", "Heure locale"));
+            ui.label(t!("Local time", "Heure locale"));
             ui.add_enabled_ui(free, |ui| add(ui, Slider::new(hour, 0.0..=23.99).custom_formatter(|v, _| crate::menu::hhmm(v))));
             ui.end_row();
-            row_label(ui, "Date");
+            ui.label("Date");
             ui.add_enabled_ui(free, |ui| add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(|v, _| date_label(v))));
             ui.end_row();
         });
@@ -1024,46 +1024,46 @@ impl Weather {
     fn day_controls(&mut self, ui: &mut egui::Ui, utc: &mut f64, doy: &mut f64, lon: f64) {
         real_time_switch(ui, &mut self.real_time);
         let free = !self.real_time;
-        section(ui, t!("Day", "Jour"), |ui| {
-            row_label(ui, t!("Local time", "Heure locale"));
+        section(ui, tr("DAY"), |ui| {
+            ui.label(t!("Local time", "Heure locale"));
             let mut local = (*utc + lon / 15.0).rem_euclid(24.0);
             let hhmm = |v: f64, _: std::ops::RangeInclusive<usize>| format!("{:02}:{:02}", v as u32 % 24, (v.fract() * 60.0) as u32);
             if ui.add_enabled_ui(free, |ui| add(ui, Slider::new(&mut local, 0.0..=23.99).custom_formatter(hhmm))).inner.changed() {
                 *utc = (local - lon / 15.0).rem_euclid(24.0);
             }
             ui.end_row();
-            row_label(ui, "Date");
+            ui.label("Date");
             let date = |v: f64, _: std::ops::RangeInclusive<usize>| date_label(v);
             ui.add_enabled_ui(free, |ui| add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(date)));
             ui.end_row();
-            row_label(ui, t!("Clock speed", "Vitesse de l'horloge"));
+            ui.label(t!("Clock speed", "Vitesse de l'horloge"));
             let rate = &mut self.time_rate;
             ui.add_enabled_ui(free, |ui| add(ui, Slider::new(rate, 0.0..=3600.0).logarithmic(true).smallest_positive(1.0).custom_formatter(|v, _| if v == 0.0 { t!("stopped", "arrêtée").into() } else { format!("{v:.0}×") })));
             ui.end_row();
-            row_label(ui, t!("Moon", "Lune"));
+            ui.label(t!("Moon", "Lune"));
             add(ui, Slider::new(&mut self.moon_age, 0.0..=29.5).custom_formatter(|v, _| tr(moon_phase(v)).into()));
             ui.end_row();
         });
     }
 
     fn sky_controls(&mut self, ui: &mut egui::Ui) {
-        section(ui, t!("Sky", "Ciel"), |ui| {
-            row_label(ui, t!("Cloud cover", "Couverture nuageuse"));
+        section(ui, tr("SKY"), |ui| {
+            ui.label(t!("Cloud cover", "Couverture nuageuse"));
             add(ui, Slider::new(&mut self.clouds, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             ui.end_row();
-            row_label(ui, t!("Cloud base", "Base des nuages"));
+            ui.label(t!("Cloud base", "Base des nuages"));
             add(ui, Slider::new(&mut self.cloud_base, 300.0..=4000.0).step_by(50.0).suffix(" m"));
             ui.end_row();
-            row_label(ui, t!("Cloud depth", "Épaisseur des nuages"));
+            ui.label(t!("Cloud depth", "Épaisseur des nuages"));
             add(ui, Slider::new(&mut self.cloud_depth, 500.0..=8000.0).step_by(50.0).suffix(" m"));
             ui.end_row();
-            row_label(ui, t!("Storm cells", "Cellules orageuses"));
+            ui.label(t!("Storm cells", "Cellules orageuses"));
             add(ui, Slider::new(&mut self.storms, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             ui.end_row();
-            row_label(ui, t!("Mid-level cloud", "Nuages moyens"));
+            ui.label(t!("Mid-level cloud", "Nuages moyens"));
             add(ui, Slider::new(&mut self.alto, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             ui.end_row();
-            row_label(ui, t!("Rain", "Pluie"));
+            ui.label(t!("Rain", "Pluie"));
             ui.horizontal(|ui| {
                 let mut r = self.rain_set.unwrap_or(self.rain);
                 if add(ui, Slider::new(&mut r, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed() {
@@ -1072,44 +1072,43 @@ impl Weather {
                 // Set, a rain deck (nimbostratus) that heavy closes in overhead;
                 // unset, the rain is wherever the storm cells drop it.
                 let mut auto = self.rain_set.is_none();
-                if crate::menu::toggle(ui, &mut auto, "auto").changed() {
+                if ui.checkbox(&mut auto, "auto").changed() {
                     self.rain_set = if auto { None } else { Some(self.rain) };
                 }
             });
             ui.end_row();
-            row_label(ui, t!("Haze", "Brume"));
+            ui.label(t!("Haze", "Brume"));
             add(ui, Slider::new(&mut self.haze, 0.2..=40.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.1}×")));
             ui.end_row();
-            ui.label(RichText::new(t!("Visibility", "Visibilité")).font(crate::menu::caption()).color(crate::menu::DIM));
-            ui.label(RichText::new(format!("~{:.0} km", self.visibility_km())).font(egui::FontId::monospace(12.5)).color(crate::menu::TEXT));
+            ui.label("");
+            ui.label(RichText::new(t!("visibility ~{:.0} km", "visibilité ~{:.0} km", self.visibility_km())).font(crate::menu::caption()).weak());
             ui.end_row();
         });
     }
 
     fn wind_controls(&mut self, ui: &mut egui::Ui) {
-        section(ui, t!("Wind", "Vent"), |ui| {
-            row_label(ui, t!("Speed", "Vitesse"));
+        section(ui, tr("WIND"), |ui| {
+            ui.label(t!("Speed", "Vitesse"));
             let mut kt = self.wind * 1.94384;
             if add(ui, Slider::new(&mut kt, 0.0..=50.0).fixed_decimals(0).suffix(" kt")).changed() {
                 self.wind = kt / 1.94384;
             }
             ui.end_row();
-            row_label(ui, t!("From", "Direction"));
+            ui.label(t!("From", "Direction"));
             add(ui, Slider::new(&mut self.wind_from, 0.0..=359.0).step_by(1.0).custom_formatter(|v, _| format!("{:03.0}° {}", v, tr(compass(v)))));
             ui.end_row();
-            row_label(ui, t!("Gusts", "Rafales"));
+            ui.label(t!("Gusts", "Rafales"));
             add(ui, Slider::new(&mut self.gusts, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             ui.end_row();
         });
     }
 
     fn presets(&mut self, ui: &mut egui::Ui) {
-        crate::flightui::pane_section(ui, t!("Presets", "Préréglages"));
+        crate::menu::heading(ui, tr("PRESETS"));
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-            let now = self.summary();
+            ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
             for &(name, c, b, d, s, a, h, w, g) in PRESETS {
-                if crate::flightui::chip(ui, tr(name), false, !self.live && now == tr(name)).clicked() {
+                if ui.button(tr(name)).clicked() {
                     (self.clouds, self.cloud_base, self.cloud_depth, self.storms, self.alto, self.haze, self.wind, self.gusts) = (c, b, d, s, a, h, w, g);
                 }
             }
@@ -1122,23 +1121,7 @@ use egui::{RichText, Slider};
 
 /// The "real time" switch above the clock's sliders.
 fn real_time_switch(ui: &mut egui::Ui, on: &mut bool) {
-    switch_row(ui, t!("Real time", "Heure réelle"), t!("the sun where you are, now", "le soleil là où vous êtes, maintenant"), on);
-}
-
-/// a switch on its own row with its name at the left.
-fn switch_row(ui: &mut egui::Ui, name: &str, hint: &str, on: &mut bool) {
-    let w = ui.available_width();
-    ui.allocate_ui_with_layout(egui::vec2(w, 36.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_width(w);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(RichText::new(name).font(crate::menu::label()).color(crate::menu::TEXT));
-            ui.label(RichText::new(hint).font(crate::menu::caption()).color(crate::flightui::SOFT));
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            crate::menu::switch(ui, on);
-        });
-    });
+    ui.checkbox(on, t!("Real time (the sun where you are, now)", "Heure réelle (le soleil là où vous êtes, maintenant)"));
 }
 
 /// The real time now: hours UTC and the day of the year (0 = 1 January,
@@ -1184,13 +1167,8 @@ pub fn date_label(doy: f64) -> String {
 
 /// A headed two-column grid of labelled sliders.
 fn section(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
-    crate::flightui::pane_section(ui, title);
-    egui::Grid::new(("wx", title)).num_columns(2).min_col_width(104.0).spacing([10.0, 6.0]).show(ui, rows);
-}
-
-/// a row's name.
-fn row_label(ui: &mut egui::Ui, s: &str) {
-    ui.label(RichText::new(s).font(crate::menu::caption()).color(crate::flightui::SOFT));
+    crate::menu::heading(ui, title);
+    egui::Grid::new(("wx", title)).num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, rows);
 }
 
 /// A focused slider would also take the arrow keys that fly the aircraft, so it lets go.

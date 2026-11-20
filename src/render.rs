@@ -28,8 +28,6 @@ const MAX_FALL: usize = 4096;
 /// trees and undergrowth close enough to the camera for their leaf cards
 pub const MAX_NEAR: usize = 20000;
 const BLOOM_MIPS: u32 = 6;
-/// halvings of the frame for the frosted glass.
-const FROST_MIPS: u32 = 4;
 pub const MAX_PARTICLES: u32 = 1 << 16;
 /// Smoke volume around the effects anchor: cells along east, north, up; cell
 /// size in metres; height of the bottom of the grid above the anchor.
@@ -223,6 +221,12 @@ pub struct Globals {
     pub snow_tr_c: [f32; 4],
     pub snow_tr_e: [f32; 4],
     pub snow_tr_n: [f32; 4],
+    /// precomputed horizontal bounding circles of the storm cells (storm.rs
+    /// `bound`): xyz centre on the planet surface (planet frame, m) + w radius (m)
+    pub storm_bounds: [[f32; 4]; crate::weather::MAX_STORMS],
+    /// precomputed lone-cell turrets (5 per cell: tc.xy, rk, ck) and flanking
+    /// towers (3 per cell: fo.xy, fr, ft) (storm.rs `turrets`)
+    pub storm_turrets: [[f32; 4]; 8 * crate::weather::MAX_STORMS],
 }
 
 /// Raindrops drawn around the camera in rain (as many as the rain is heavy show).
@@ -258,6 +262,8 @@ type CsMap = [[f32; 4]; CS_MAP];
 struct CloudShadow {
     p_in: wgpu::RenderPipeline,
     p_out: wgpu::RenderPipeline,
+    p_in_plain: wgpu::RenderPipeline,
+    p_out_plain: wgpu::RenderPipeline,
     layers: Vec<wgpu::TextureView>,
     /// the cross-fade into what lookups read
     p_mix: [wgpu::RenderPipeline; 2],
@@ -329,7 +335,7 @@ impl CloudShadow {
         self.sun = sun;
         // Aim each map at the sun of the frame it shows at most: two cycles on,
         // when the lookups have cross-faded fully onto it.
-        let ahead = (sun + self.sun_v * (2 * CS_SLICES) as f64).normalize();
+        let ahead = (sun + self.sun_v * (2 * self.slices) as f64).normalize();
         // A jump (new flight, teleport, a new cloud base, a clock set by hand) redraws it all at once.
         let want = self.aim(g, ahead, !self.ok);
         let cen = |m: &CsMap| (v(&m[0]) + (v(&m[1]) * m[3][2] as f64 + v(&m[2]) * m[3][3] as f64) / 6.4e6).normalize();
@@ -353,7 +359,7 @@ impl CloudShadow {
         // How far the lookups have faded from the previous map to the front one;
         // not at all across a change of tangent frame (texels no longer line up).
         let same = prev[..2] == front[..2] && prev[2][..3] == front[2][..3];
-        let a = if full || !same { 1.0 } else { (self.slice + 1) as f32 / CS_SLICES as f32 };
+        let a = if full || !same { 1.0 } else { (self.slice + 1) as f32 / self.slices as f32 };
         let lerp = |i: usize| -> [f32; 4] { std::array::from_fn(|j| prev[i][j] + (front[i][j] - prev[i][j]) * a) };
         // Lookups use the front map's grid, with the sun and drift in between.
         let mut look = front;
@@ -380,10 +386,11 @@ impl CloudShadow {
     }
 
     /// Draw (a slice of) the back map, then make it the front once it is complete.
-    fn draw(&mut self, enc: &mut wgpu::CommandEncoder, bg0: &wgpu::BindGroup, full: bool) {
+    fn draw(&mut self, enc: &mut wgpu::CommandEncoder, bg0: &wgpu::BindGroup, full: bool, plain: bool) {
         let back_layer = self.back[2][3] as usize;
         let rows = CS_RES / self.slices;
-        for (k, p) in [&self.p_in, &self.p_out].into_iter().enumerate() {
+        let pipes = if plain { [&self.p_in_plain, &self.p_out_plain] } else { [&self.p_in, &self.p_out] };
+        for (k, p) in pipes.into_iter().enumerate() {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&self.layers[back_layer + k], false))], None));
             rp.set_pipeline(p);
             rp.set_bind_group(0, bg0, &[]);
@@ -827,6 +834,7 @@ pub struct Frame<'a> {
     pub egui: Option<(Vec<egui::ClippedPrimitive>, egui::TexturesDelta, f32)>,
     pub shot: Option<std::path::PathBuf>,
     /// the start screen's title, drawn at this UI scale (None: not shown)
+    pub logo: Option<f32>,
     /// raindrops to draw around the camera (0: no rain)
     pub rain_drops: u32,
     /// lightning channel segments (storm.rs `Lightning::segments`)
@@ -864,15 +872,25 @@ struct Targets {
     bg_glass: wgpu::BindGroup,
     cloud: wgpu::TextureView,
     cloud_dist: wgpu::TextureView,
+    cloud_raw: wgpu::TextureView,
+    cloud_dist_raw: wgpu::TextureView,
+    cloud_cls_data: wgpu::TextureView,
+    cloud_cls_depth: wgpu::TextureView,
     cloud_hist: [wgpu::TextureView; 2],
     /// anti-aliased frames: this one and the one before, taking turns
     taa: [wgpu::TextureView; 2],
     bg_taa: [wgpu::BindGroup; 2],
     bloom: Vec<wgpu::TextureView>,
     ldr_tex: wgpu::Texture,
+    /// the start screen's title, one coverage byte per pixel (see logo.rs)
+    logo_tex: wgpu::Texture,
+    bg_logo: wgpu::BindGroup,
     ldr: wgpu::TextureView,
     bg_composite: wgpu::BindGroup,
     bg_cloud: wgpu::BindGroup,
+    bg_cloud_storm: wgpu::BindGroup,
+    bg_cloud_plain_comp: wgpu::BindGroup,
+    bg_cloud_rain: wgpu::BindGroup,
     bg_cloud_temporal: [wgpu::BindGroup; 2],
     bg_cloud_apply: [wgpu::BindGroup; 2],
     bg_particles: wgpu::BindGroup,
@@ -882,12 +900,6 @@ struct Targets {
     bg_up: Vec<wgpu::BindGroup>,
     bg_final: [wgpu::BindGroup; 3],
     bg_blit: wgpu::BindGroup,
-    /// the frosted glass's halvings and result.
-    frost: Vec<wgpu::TextureView>,
-    frost_out: wgpu::TextureView,
-    bg_frost_in: wgpu::BindGroup,
-    bg_frost_down: Vec<wgpu::BindGroup>,
-    bg_frost_out: wgpu::BindGroup,
 }
 
 pub struct Renderer {
@@ -903,6 +915,10 @@ pub struct Renderer {
     /// chips): the defaults trade a little for speed there
     pub integrated: bool,
     pub queue: wgpu::Queue,
+    instance: wgpu::Instance,
+    window: Arc<winit::window::Window>,
+    gpu_error: Arc<parking_lot::Mutex<Option<String>>>,
+    device_lost: Arc<std::sync::atomic::AtomicBool>,
     surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
     globals_ub: wgpu::Buffer,
@@ -957,6 +973,8 @@ pub struct Renderer {
     l_build: wgpu::BindGroupLayout,
     l_composite: wgpu::BindGroupLayout,
     l_cloud: wgpu::BindGroupLayout,
+    l_cloud_storm: wgpu::BindGroupLayout,
+    l_cloud_rain: wgpu::BindGroupLayout,
     l_cloud_apply: wgpu::BindGroupLayout,
     l_cloud_temporal: wgpu::BindGroupLayout,
     l_post: wgpu::BindGroupLayout,
@@ -1028,6 +1046,11 @@ pub struct Renderer {
     /// the composite again, sample by sample, where water shares a pixel
     p_composite_edge: wgpu::RenderPipeline,
     p_cloud: wgpu::RenderPipeline,
+    p_cloud_plain: wgpu::RenderPipeline,
+    p_cloud_classify: wgpu::RenderPipeline,
+    p_cloud_plain_cls: wgpu::RenderPipeline,
+    p_cloud_storm_cls: wgpu::RenderPipeline,
+    p_cloud_rain: wgpu::RenderPipeline,
     p_cloud_apply: wgpu::RenderPipeline,
     p_cloud_temporal: wgpu::RenderPipeline,
     p_particles: wgpu::RenderPipeline,
@@ -1048,13 +1071,12 @@ pub struct Renderer {
     parts_until: f32,
     now: f32,
     p_down: wgpu::RenderPipeline,
-    /// the frosted glass passes.
-    p_frost_in: wgpu::RenderPipeline,
-    p_frost_out: wgpu::RenderPipeline,
     p_up: wgpu::RenderPipeline,
     p_final: wgpu::RenderPipeline,
     p_final_taa: wgpu::RenderPipeline,
     p_blit: wgpu::RenderPipeline,
+    /// the start screen's title, inverting what is under it
+    p_logo: wgpu::RenderPipeline,
     psim_ub: wgpu::Buffer,
     pbuf: wgpu::Buffer,
     bg_psim: wgpu::BindGroup,
@@ -1074,9 +1096,10 @@ pub struct Renderer {
     taa_hist_ok: bool,
     pub meshes: Vec<MeshGpu>,
     pub egui: egui_wgpu::Renderer,
-    /// the frame blurred, as an egui texture for the frosted glass.
-    pub frost_id: Option<egui::TextureId>,
-    frost_dirty: bool,
+    /// the font of the start screen's title, and the screen size and UI
+    /// scale its mask was last drawn for
+    pub logo_font: Option<Vec<u8>>,
+    logo_key: Option<(u32, u32, u32)>,
 }
 
 pub(crate) fn tex_entry(binding: u32, dim: wgpu::TextureViewDimension, depth: bool) -> wgpu::BindGroupLayoutEntry {
@@ -1550,9 +1573,57 @@ impl Renderer {
         MSAA_N.store(if ok { samples } else { 4 }, std::sync::atomic::Ordering::Relaxed);
         let required_features = if msaa() != 4 { afeat } else { wgpu::Features::empty() } | crate::gputime::GpuTimer::features(&adapter);
         log::info!("MSAA {}x", msaa());
+        let al = adapter.limits();
+        if al.max_texture_dimension_2d < 8192
+            || al.max_sampled_textures_per_shader_stage < 26
+            || al.max_storage_buffers_per_shader_stage < 8
+            || al.max_storage_textures_per_shader_stage < 4
+        {
+            anyhow::bail!(
+                "GPU {} does not meet required limits (need max_texture_dimension_2d >= 8192 [{}], sampled_textures >= 26 [{}], storage_buffers >= 8 [{}], storage_textures >= 4 [{}])",
+                info.name,
+                al.max_texture_dimension_2d,
+                al.max_sampled_textures_per_shader_stage,
+                al.max_storage_buffers_per_shader_stage,
+                al.max_storage_textures_per_shader_stage,
+            );
+        }
+        let defaults = wgpu::Limits::default();
+        let required_limits = wgpu::Limits {
+            max_texture_dimension_2d: al.max_texture_dimension_2d.min(16384).max(8192),
+            max_sampled_textures_per_shader_stage: al.max_sampled_textures_per_shader_stage.clamp(26, 64),
+            max_storage_buffers_per_shader_stage: al.max_storage_buffers_per_shader_stage.max(defaults.max_storage_buffers_per_shader_stage).min(16),
+            max_storage_textures_per_shader_stage: al.max_storage_textures_per_shader_stage.max(defaults.max_storage_textures_per_shader_stage).min(8),
+            max_samplers_per_shader_stage: al.max_samplers_per_shader_stage.max(defaults.max_samplers_per_shader_stage).min(32),
+            ..defaults
+        };
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor { label: None, required_features, required_limits: wgpu::Limits { max_texture_dimension_2d: 8192, max_sampled_textures_per_shader_stage: adapter.limits().max_sampled_textures_per_shader_stage.clamp(16, 32), ..Default::default() }, memory_hints: MEMORY_HINTS, ..Default::default() })
+            .request_device(&wgpu::DeviceDescriptor { label: None, required_features, required_limits, memory_hints: MEMORY_HINTS, ..Default::default() })
             .await?;
+        let gpu_error: Arc<parking_lot::Mutex<Option<String>>> = Arc::new(parking_lot::Mutex::new(None));
+        let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let err_slot = gpu_error.clone();
+            device.on_uncaptured_error(Arc::new(move |err| {
+                log::error!("GPU error: {err}");
+                let mut g = err_slot.lock();
+                if g.is_none() {
+                    *g = Some(err.to_string());
+                }
+            }));
+        }
+        {
+            let err_slot = gpu_error.clone();
+            let lost_flag = device_lost.clone();
+            device.set_device_lost_callback(move |reason, msg| {
+                log::error!("GPU device lost ({reason:?}): {msg}");
+                lost_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                let mut g = err_slot.lock();
+                if g.is_none() {
+                    *g = Some(format!("GPU device lost ({reason:?}): {msg}"));
+                }
+            });
+        }
         let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).ok_or_else(|| anyhow::anyhow!("surface unsupported"))?;
         let caps = surface.get_capabilities(&adapter);
@@ -1564,30 +1635,42 @@ impl Renderer {
         let d = &device;
         let common = include_str!("shaders/common.wgsl");
         let module = |name: &str, src: &str| d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(format!("{common}\n{src}").into()) });
-        let m_lut = module("lut", include_str!("shaders/lut.wgsl"));
-        let m_terrain = module("terrain", include_str!("shaders/terrain.wgsl"));
-        let m_photo = module("photo", include_str!("shaders/photo.wgsl"));
         let facade = include_str!("shaders/facade.wgsl");
-        let m_build = module("buildings", &format!("{facade}\n{}", include_str!("shaders/buildings.wgsl")));
-        let obj_src = format!("{}\n{}\n{}\n{}\n{}", include_str!("shaders/plane.wgsl"), crate::aircraft::b747::deck::strings_wgsl(), include_str!("shaders/deck747.wgsl"), include_str!("shaders/pit18.wgsl"), include_str!("shaders/deck650.wgsl"));
-        let m_obj = module("plane", &obj_src);
-        let obj_src = std::sync::Arc::new(format!("{common}\n{obj_src}"));
         let sky = include_str!("shaders/sky.wgsl");
-        let m_comp = module("composite", &format!("{sky}\n{}", include_str!("shaders/composite.wgsl")));
-        let m_cloud = module("clouds", &format!("{sky}\n{}", include_str!("shaders/clouds.wgsl")));
-        let m_post = module("post", include_str!("shaders/post.wgsl"));
-        let m_psim = module("psim", include_str!("shaders/particles_sim.wgsl"));
-        let m_pdraw = module("pdraw", include_str!("shaders/particles_draw.wgsl"));
-        let m_road = module("roads", include_str!("shaders/roads.wgsl"));
-        let m_field = module("airfield", include_str!("shaders/airfield.wgsl"));
-        let m_lights = module("lights", include_str!("shaders/lights.wgsl"));
-        let m_tree = module("trees", include_str!("shaders/trees.wgsl"));
-        let m_inst = module("inst", &format!("{facade}\n{}", include_str!("shaders/inst.wgsl")));
-        let m_vol = module("vol", include_str!("shaders/vol.wgsl"));
-        let m_ao = module("ao", include_str!("shaders/ao.wgsl"));
-        let m_taa = module("taa", include_str!("shaders/taa.wgsl"));
-        let m_precip = module("precip", include_str!("shaders/precip.wgsl"));
-        let m_dres = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("resolve"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/resolve.wgsl").into()) });
+        let obj_src = format!("{}\n{}\n{}\n{}\n{}", include_str!("shaders/plane.wgsl"), crate::aircraft::b747::deck::strings_wgsl(), include_str!("shaders/deck747.wgsl"), include_str!("shaders/pit18.wgsl"), include_str!("shaders/deck650.wgsl"));
+        // Compile shader modules in parallel across threads so startup does not block on one core.
+        let (m_obj, (m_lut, m_terrain, m_photo, m_build), (m_comp, m_cloud, m_post, m_psim, m_pdraw), (m_road, m_field, m_lights, m_tree, m_inst), (m_vol, m_ao, m_taa, m_precip, m_dres)) = std::thread::scope(|s| {
+            let t_obj = s.spawn(|| module("plane", &obj_src));
+            let t1 = s.spawn(|| (
+                module("lut", include_str!("shaders/lut.wgsl")),
+                module("terrain", include_str!("shaders/terrain.wgsl")),
+                module("photo", include_str!("shaders/photo.wgsl")),
+                module("buildings", &format!("{facade}\n{}", include_str!("shaders/buildings.wgsl"))),
+            ));
+            let t2 = s.spawn(|| (
+                module("composite", &format!("{sky}\n{}", include_str!("shaders/composite.wgsl"))),
+                module("clouds", &format!("{sky}\n{}", include_str!("shaders/clouds.wgsl"))),
+                module("post", include_str!("shaders/post.wgsl")),
+                module("psim", include_str!("shaders/particles_sim.wgsl")),
+                module("pdraw", include_str!("shaders/particles_draw.wgsl")),
+            ));
+            let t3 = s.spawn(|| (
+                module("roads", include_str!("shaders/roads.wgsl")),
+                module("airfield", include_str!("shaders/airfield.wgsl")),
+                module("lights", include_str!("shaders/lights.wgsl")),
+                module("trees", include_str!("shaders/trees.wgsl")),
+                module("inst", &format!("{facade}\n{}", include_str!("shaders/inst.wgsl"))),
+            ));
+            let m4 = (
+                module("vol", include_str!("shaders/vol.wgsl")),
+                module("ao", include_str!("shaders/ao.wgsl")),
+                module("taa", include_str!("shaders/taa.wgsl")),
+                module("precip", include_str!("shaders/precip.wgsl")),
+                d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("resolve"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/resolve.wgsl").into()) }),
+            );
+            (t_obj.join().unwrap(), t1.join().unwrap(), t2.join().unwrap(), t3.join().unwrap(), m4)
+        });
+        let obj_src = std::sync::Arc::new(format!("{common}\n{obj_src}"));
 
         // ---- shared resources
         let sampler = |addr, aniso: u16, cmp| {
@@ -1823,7 +1906,15 @@ impl Renderer {
             ms_entry(5, false), ms_entry(6, false), ms_entry(7, true), ms_entry(8, false),
         ]);
         let l_ao = layout("ao", &[tex_entry(0, d2, true), tex_entry(1, d2, false), tex_entry(2, d2, false)]);
+        let utex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: ALL_STAGES,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: d2, multisampled: false },
+            count: None,
+        };
         let l_cloud = layout("cloud", &[tex_entry(0, d2, true)]);
+        let l_cloud_storm = layout("cloud storm", &[tex_entry(0, d2, true), utex_entry(6)]);
+        let l_cloud_rain = layout("cloud rain", &[tex_entry(0, d2, true), tex_entry(2, d2, false), tex_entry(3, d2, false), utex_entry(6)]);
         let l_cloud_apply = layout("cloud apply", &[tex_entry(0, d2, true), tex_entry(1, d2, false), tex_entry(3, d2, false), tex_entry(5, d2, false)]);
         let l_cloud_temporal = layout("cloud temporal", &[tex_entry(2, d2, false), tex_entry(3, d2, false), tex_entry(4, d2, false)]);
         let l_post = layout("post", &[tex_entry(0, d2, false), tex_entry(1, d2, false), tex_entry(2, d2, true)]);
@@ -1854,7 +1945,7 @@ impl Renderer {
         let pl = |l1: &wgpu::BindGroupLayout| d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(l1)], immediate_size: 0 });
         let pl0 = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0)], immediate_size: 0 });
 
-        // ---- pipelines
+        // ---- pipelines (built in parallel across threads to cut startup wait)
         let full = |label: &str, layout: &wgpu::PipelineLayout, m: &wgpu::ShaderModule, fs: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>| {
             d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -1868,9 +1959,6 @@ impl Renderer {
                 cache: None,
             })
         };
-        let p_trans = full("trans", &pl0, &m_lut, "fs_trans", HDR, None);
-        let p_ms = full("ms", &pl0, &m_lut, "fs_ms", HDR, None);
-        let p_sky = full("sky", &pl0, &m_lut, "fs_sky", HDR, None);
         let l_csmix = layout("cloud shadow mix", &[tex_entry(0, wgpu::TextureViewDimension::D2Array, false), ub_entry(1, false, 48)]);
         let mix_ub = d.create_buffer(&wgpu::BufferDescriptor { label: Some("cloud shadow mix"), size: 48, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let bg_mix = d.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1880,74 +1968,8 @@ impl Renderer {
         });
         let m_csmix = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("csmix"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/csmix.wgsl").into()) });
         let pl_csmix = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l_csmix)], immediate_size: 0 });
-        let cshadow = CloudShadow {
-            p_in: full("cloud shadow", &pl0, &m_cloud, "fs_cshadow_in", CS_FMT, None),
-            p_out: full("cloud shadow", &pl0, &m_cloud, "fs_cshadow_out", CS_FMT, None),
-            layers: cs_layers,
-            p_mix: [full("cloud shadow mix", &pl_csmix, &m_csmix, "fs_in", CS_FMT, None), full("cloud shadow mix", &pl_csmix, &m_csmix, "fs_out", CS_FMT, None)],
-            bg_mix,
-            mix_ub,
-            mix_layers: cs_mix_layers,
-            prev: [[0.0; 4]; CS_MAP],
-            front: [[0.0; 4]; CS_MAP],
-            back: [[0.0; 4]; CS_MAP],
-            slot: [0, 0, 1],
-            slice: 0,
-            slices: if integrated { CS_SLICES_INTEGRATED } else { CS_SLICES },
-            ok: false,
-            anchor: [glam::DVec3::Z, glam::DVec3::X, glam::DVec3::Y],
-            sun: glam::DVec3::Z,
-            sun_v: glam::DVec3::ZERO,
-            mix: ([0; 8], 1.0),
-        };
-        let p_composite = full("composite", &pl(&l_composite), &m_comp, "fs", HDR, None);
-        let p_composite_edge = full("composite edge", &pl(&l_composite), &m_comp, "fs_edge", HDR, None);
-        let p_gtao = full("gtao", &pl(&l_ao), &m_ao, "fs_gtao", AMB, None);
-        let p_ao_blur = full("ao blur", &pl(&l_ao), &m_ao, "fs_blur", AMB, None);
-        let p_cloud = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("cloud"),
-            layout: Some(&pl(&l_cloud)),
-            vertex: wgpu::VertexState { module: &m_cloud, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &m_cloud,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: HDR, blend: None, write_mask: wgpu::ColorWrites::ALL }), Some(wgpu::ColorTargetState { format: CLOUD_DIST, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let p_cloud_temporal = full("cloud temporal", &pl(&l_cloud_temporal), &m_cloud, "fs_temporal", HDR, None);
-        let over = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::SrcAlpha, operation: wgpu::BlendOperation::Add };
-        let p_cloud_apply = full("cloud apply", &pl(&l_cloud_apply), &m_cloud, "fs_apply", HDR, Some(wgpu::BlendState { color: over, alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } }));
-        let p_taa = full("taa", &pl(&l_post), &m_taa, "fs_taa", HDR, None);
-        let p_down = full("down", &pl(&l_post), &m_post, "fs_down", HDR, None);
-        let p_frost_in = full("frost in", &pl(&l_post), &m_post, "fs_frost_in", HDR, None);
-        let p_frost_out = full("frost out", &pl(&l_post), &m_post, "fs_up", HDR, None);
-        let add = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
-        let p_up = full("up", &pl(&l_post), &m_post, "fs_up", HDR, Some(wgpu::BlendState { color: add, alpha: add }));
-        let p_final = full("final", &pl(&l_post), &m_post, "fs_final", out_format(&config), None);
-        let p_final_taa = full("final taa", &pl(&l_post), &m_post, "fs_final_taa", out_format(&config), None);
-        let p_blit = full("blit", &pl(&l_post), &m_post, if config.format.is_srgb() { "fs_blit_srgb" } else { "fs_blit" }, config.format, None);
-        let pm = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add };
-        let p_particles = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("particles"),
-            layout: Some(&pl(&l_pdraw)),
-            vertex: wgpu::VertexState { module: &m_pdraw, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &m_pdraw, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: HDR, blend: Some(wgpu::BlendState { color: pm, alpha: pm }), write_mask: wgpu::ColorWrites::ALL })] }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let p_psim = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("psim"), layout: Some(&pl(&l_psim)), module: &m_psim, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
         let (pl_va, pl_vb) = (pl(&l_vol_a), pl(&l_vol_b));
-        let p_vol = [("splat", &pl_va), ("blur_x", &pl_va), ("blur_y", &pl_va), ("blur_z", &pl_va), ("light", &pl_vb)]
-            .map(|(e, l)| d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(e), layout: Some(l), module: &m_vol, entry_point: Some(e), compilation_options: Default::default(), cache: None }));
+        let pl_obj = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj)], immediate_size: 0 });
 
         // Geometry pipelines. Mode 0: lit colour + aux into the multisampled G-buffer.
         // Mode 1: depth only into a shadow cascade. Mode 2: blended decal (roads).
@@ -2027,192 +2049,308 @@ impl Renderer {
             wgpu::VertexAttribute { format: VF::Unorm8x4, offset: 32, shader_location: 5 },
         ];
         const A_INST: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4];
-        let p_terrain = geom("terrain", Some(&l_tile), &m_terrain, &[vb(40, false, &A_TERRAIN)], 0);
-        // Mode 8: cells near the camera as tessellated patches; 9: the rest of such a tile.
-        let tess_layout = wgpu::VertexBufferLayout { array_stride: 4, step_mode: wgpu::VertexStepMode::Instance, attributes: &wgpu::vertex_attr_array![0 => Uint32] };
-        let p_terrain_tess = geom("terrain tess", Some(&l_tile), &m_terrain, &[Some(tess_layout)], 8);
-        let p_terrain_cells = geom("terrain cells", Some(&l_tile), &m_terrain, &[], 9);
-        let p_build = geom("build", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 0);
-        let p_build_whole = geom("build whole", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 14);
         const A_PHOTO: [wgpu::VertexAttribute; 3] = [
             wgpu::VertexAttribute { format: VF::Float32x3, offset: 0, shader_location: 0 },
             wgpu::VertexAttribute { format: VF::Float32x2, offset: 12, shader_location: 1 },
             wgpu::VertexAttribute { format: VF::Snorm8x4, offset: 20, shader_location: 2 },
         ];
-        let p_photo = geom("photo", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 0);
-        // Mode 11: the 3D tiles' mesh of a destroyed building, riding on its pieces.
         const A_SKIN: [wgpu::VertexAttribute; 4] = [
             wgpu::VertexAttribute { format: VF::Float32x3, offset: 0, shader_location: 0 },
             wgpu::VertexAttribute { format: VF::Float32x2, offset: 12, shader_location: 1 },
             wgpu::VertexAttribute { format: VF::Snorm8x4, offset: 20, shader_location: 2 },
             wgpu::VertexAttribute { format: VF::Uint32, offset: 24, shader_location: 3 },
         ];
-        let p_skin = geom("skin", Some(&l_skin), &m_photo, &[vb(28, false, &A_SKIN)], 11);
-        let p_photo_shadow = geom("photo shadow", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 13);
-        let p_photo_shadow_fast = geom("photo shadow fast", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 12);
-        // The coverage mask: the same tiles from above, 1 wherever they are.
-        let p_photo_mask = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("photo mask"),
-            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_photo), Some(&l_casc)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_photo, entry_point: Some("vs_mask"), compilation_options: Default::default(), buffers: &[vb(24, false, &A_PHOTO)] },
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &m_photo, entry_point: Some("fs_mask"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::RED })] }),
-            multiview_mask: None,
-            cache: None,
-        });
-        // Our water into the same mask (green): where the mesh gives way to it.
-        let p_water_top = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("water top"),
-            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tile), Some(&l_casc)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_terrain, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(40, false, &A_TERRAIN)] },
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &m_terrain, entry_point: Some("fs_top"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::GREEN })] }),
-            multiview_mask: None,
-            cache: None,
-        });
-        // Where there is ground at all, into the shore mask (red; our water
-        // goes into its green with `p_water_top`).
-        let p_shore_cover = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("shore cover"),
-            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tile), Some(&l_casc)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_terrain, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(40, false, &A_TERRAIN)] },
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &m_terrain, entry_point: Some("fs_cover"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::RED })] }),
-            multiview_mask: None,
-            cache: None,
-        });
-        // Our street lamps into the same mask (blue, with the road's height in
-        // alpha): the light they would throw on the mesh at night.
-        let max = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Max };
-        let p_lamp_top = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lamp top"),
-            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tileu), Some(&l_casc)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_road, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(32, false, &A_ROAD)] },
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &m_road, entry_point: Some("fs_top"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: Some(wgpu::BlendState { color: max, alpha: max }), write_mask: wgpu::ColorWrites::BLUE | wgpu::ColorWrites::ALPHA })] }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let p_build_shadow = geom("build shadow", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 1);
         const A_PART: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4];
-        let p_obj = geom("obj", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 0);
-        let p_obj_shadow = geom("obj shadow", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 4);
-        let p_obj_solid = geom("obj solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 5);
-        let p_obj_shadow_solid = geom("obj shadow solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 1);
-        let pl_obj = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj)], immediate_size: 0 });
-        // Glass and the propeller blur: blended over the finished, lit scene,
-        // tested against the resolved depth.
-        let p_glass = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("glass"),
-            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj), Some(&l_glass)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_obj, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[vb(64, false, &A_PART)] },
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &m_obj,
-                entry_point: Some("fs_glass"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
-                        alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let p_road = geom("road", Some(&l_tileu), &m_road, &[vb(32, false, &A_ROAD)], 2);
         const A_AIR: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x4, 3 => Float32, 4 => Float32x2];
-        let p_field = geom("airfield", Some(&l_tileu), &m_field, &[vb(56, false, &A_AIR)], 2);
         const A_LIGHT: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Float32, 4 => Unorm8x4, 5 => Uint8x4];
-        let p_lights = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lights"),
-            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tileu)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_lights, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[vb(40, true, &A_LIGHT)] },
-            primitive: Default::default(),
-            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &m_lights,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
-                        alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        // Rain and lightning: over the finished scene and clouds, behind the
-        // glass, tested against the resolved depth. Both write how much they
-        // cover into alpha (hdr alpha is otherwise 1) so the anti-aliasing takes
-        // them from this frame instead of smearing them into the history.
         const A_BOLT: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
-        let precip = |label: &str, vs: &str, fs: &str, color: wgpu::BlendComponent, alpha: wgpu::BlendComponent, buffers: &[Option<wgpu::VertexBufferLayout>]| {
-            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pl(&l_cloud_apply)),
-                vertex: wgpu::VertexState { module: &m_precip, entry_point: Some(vs), compilation_options: Default::default(), buffers },
-                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-                depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
+
+        let (
+            (p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass),
+            (p_cshadow_in, p_cshadow_out, p_cshadow_in_plain, p_cshadow_out_plain, p_cshadow_mix, p_composite, p_composite_edge, p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_temporal, p_cloud_apply),
+            (p_terrain, p_terrain_tess, p_terrain_cells, p_build, p_build_whole, p_build_shadow, p_photo, p_skin, p_photo_shadow, p_photo_shadow_fast, p_photo_mask, p_water_top, p_shore_cover),
+            (p_road, p_field, p_lights, p_lamp_top, p_rain, p_bolt, p_veil, p_tree, imp, p_tree_near, p_tree_shadow, p_tree_shadow_fixed, p_card, p_inst, p_inst_shadow),
+            (p_trans, p_ms, p_sky, p_gtao, p_ao_blur, p_taa, p_down, p_up, p_final, p_final_taa, p_logo, p_blit, p_particles, p_psim, p_vol, p_dres),
+        ) = std::thread::scope(|s| {
+            let t_obj = s.spawn(|| {
+                let p_obj = geom("obj", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 0);
+                let p_obj_shadow = geom("obj shadow", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 4);
+                let p_obj_solid = geom("obj solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 5);
+                let p_obj_shadow_solid = geom("obj shadow solid", Some(&l_obj), &m_obj, &[vb(64, false, &A_PART)], 1);
+                let p_glass = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("glass"),
+                    layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_obj), Some(&l_glass)], immediate_size: 0 })),
+                    vertex: wgpu::VertexState { module: &m_obj, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[vb(64, false, &A_PART)] },
+                    primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                    depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &m_obj,
+                        entry_point: Some("fs_glass"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: HDR,
+                            blend: Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+                                alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                (p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, p_glass)
+            });
+
+            let t_cloud = s.spawn(|| {
+                let p_cshadow_in = full("cloud shadow", &pl0, &m_cloud, "fs_cshadow_in", CS_FMT, None);
+                let p_cshadow_out = full("cloud shadow", &pl0, &m_cloud, "fs_cshadow_out", CS_FMT, None);
+                let p_cshadow_in_plain = full("cloud shadow plain", &pl0, &m_cloud, "fs_cshadow_in_plain", CS_FMT, None);
+                let p_cshadow_out_plain = full("cloud shadow plain", &pl0, &m_cloud, "fs_cshadow_out_plain", CS_FMT, None);
+                let p_cshadow_mix = [full("cloud shadow mix", &pl_csmix, &m_csmix, "fs_in", CS_FMT, None), full("cloud shadow mix", &pl_csmix, &m_csmix, "fs_out", CS_FMT, None)];
+                let p_composite = full("composite", &pl(&l_composite), &m_comp, "fs", HDR, None);
+                let p_composite_edge = full("composite edge", &pl(&l_composite), &m_comp, "fs_edge", HDR, None);
+                let mk_cloud = |label: &str, l1: &wgpu::BindGroupLayout, vs: &str, entry: &str, depth: Option<wgpu::CompareFunction>| {
+                    d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(label),
+                        layout: Some(&pl(l1)),
+                        vertex: wgpu::VertexState { module: &m_cloud, entry_point: Some(vs), compilation_options: Default::default(), buffers: &[] },
+                        primitive: Default::default(),
+                        depth_stencil: depth.map(|cmp| wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth16Unorm, depth_write_enabled: Some(false), depth_compare: Some(cmp), stencil: Default::default(), bias: Default::default() }),
+                        multisample: Default::default(),
+                        fragment: Some(wgpu::FragmentState {
+                            module: &m_cloud,
+                            entry_point: Some(entry),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::ColorTargetState { format: HDR, blend: None, write_mask: wgpu::ColorWrites::ALL }), Some(wgpu::ColorTargetState { format: CLOUD_DIST, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                        }),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+                };
+                let p_cloud = mk_cloud("cloud", &l_cloud, "vs_full", "fs", None);
+                let p_cloud_plain = mk_cloud("cloud plain", &l_cloud, "vs_full", "fs_plain", None);
+                let p_cloud_classify = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("cloud classify"),
+                    layout: Some(&pl(&l_cloud)),
+                    vertex: wgpu::VertexState { module: &m_cloud, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
+                    primitive: Default::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth16Unorm, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &m_cloud,
+                        entry_point: Some("fs_classify"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba32Uint, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                let p_cloud_plain_cls = mk_cloud("cloud plain comp", &l_cloud_rain, "vs_full", "fs_plain_comp", None);
+                let p_cloud_storm_cls = mk_cloud("cloud storm cls", &l_cloud_storm, "vs_full_z05", "fs_storm", Some(wgpu::CompareFunction::Less));
+                let p_cloud_rain = mk_cloud("cloud rain", &l_cloud_rain, "vs_full", "fs_storm_rain", None);
+                let p_cloud_temporal = full("cloud temporal", &pl(&l_cloud_temporal), &m_cloud, "fs_temporal", HDR, None);
+                let over = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::SrcAlpha, operation: wgpu::BlendOperation::Add };
+                let p_cloud_apply = full("cloud apply", &pl(&l_cloud_apply), &m_cloud, "fs_apply", HDR, Some(wgpu::BlendState { color: over, alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } }));
+                (p_cshadow_in, p_cshadow_out, p_cshadow_in_plain, p_cshadow_out_plain, p_cshadow_mix, p_composite, p_composite_edge, p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_temporal, p_cloud_apply)
+            });
+
+            let t_world = s.spawn(|| {
+                let p_terrain = geom("terrain", Some(&l_tile), &m_terrain, &[vb(40, false, &A_TERRAIN)], 0);
+                let tess_layout = wgpu::VertexBufferLayout { array_stride: 4, step_mode: wgpu::VertexStepMode::Instance, attributes: &wgpu::vertex_attr_array![0 => Uint32] };
+                let p_terrain_tess = geom("terrain tess", Some(&l_tile), &m_terrain, &[Some(tess_layout)], 8);
+                let p_terrain_cells = geom("terrain cells", Some(&l_tile), &m_terrain, &[], 9);
+                let p_build = geom("build", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 0);
+                let p_build_whole = geom("build whole", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 14);
+                let p_build_shadow = geom("build shadow", Some(&l_build), &m_build, &[vb(40, false, &A_BUILD)], 1);
+                let p_photo = geom("photo", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 0);
+                let p_skin = geom("skin", Some(&l_skin), &m_photo, &[vb(28, false, &A_SKIN)], 11);
+                let p_photo_shadow = geom("photo shadow", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 13);
+                let p_photo_shadow_fast = geom("photo shadow fast", Some(&l_photo), &m_photo, &[vb(24, false, &A_PHOTO)], 12);
+                let p_photo_mask = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("photo mask"),
+                    layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_photo), Some(&l_casc)], immediate_size: 0 })),
+                    vertex: wgpu::VertexState { module: &m_photo, entry_point: Some("vs_mask"), compilation_options: Default::default(), buffers: &[vb(24, false, &A_PHOTO)] },
+                    primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState { module: &m_photo, entry_point: Some("fs_mask"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::RED })] }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                let p_water_top = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("water top"),
+                    layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tile), Some(&l_casc)], immediate_size: 0 })),
+                    vertex: wgpu::VertexState { module: &m_terrain, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(40, false, &A_TERRAIN)] },
+                    primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState { module: &m_terrain, entry_point: Some("fs_top"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::GREEN })] }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                let p_shore_cover = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("shore cover"),
+                    layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tile), Some(&l_casc)], immediate_size: 0 })),
+                    vertex: wgpu::VertexState { module: &m_terrain, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(40, false, &A_TERRAIN)] },
+                    primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState { module: &m_terrain, entry_point: Some("fs_cover"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: None, write_mask: wgpu::ColorWrites::RED })] }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                (p_terrain, p_terrain_tess, p_terrain_cells, p_build, p_build_whole, p_build_shadow, p_photo, p_skin, p_photo_shadow, p_photo_shadow_fast, p_photo_mask, p_water_top, p_shore_cover)
+            });
+
+            let t_misc = s.spawn(|| {
+                let p_road = geom("road", Some(&l_tileu), &m_road, &[vb(32, false, &A_ROAD)], 2);
+                let p_field = geom("airfield", Some(&l_tileu), &m_field, &[vb(56, false, &A_AIR)], 2);
+                let p_lights = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("lights"),
+                    layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tileu)], immediate_size: 0 })),
+                    vertex: wgpu::VertexState { module: &m_lights, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[vb(40, true, &A_LIGHT)] },
+                    primitive: Default::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &m_lights,
+                        entry_point: Some("fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: HDR,
+                            blend: Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+                                alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                let max = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Max };
+                let p_lamp_top = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("lamp top"),
+                    layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l0), Some(&l_tileu), Some(&l_casc)], immediate_size: 0 })),
+                    vertex: wgpu::VertexState { module: &m_road, entry_point: Some("vs_top"), compilation_options: Default::default(), buffers: &[vb(32, false, &A_ROAD)] },
+                    primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState { module: &m_road, entry_point: Some("fs_top"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: PHOTO_MASK_FMT, blend: Some(wgpu::BlendState { color: max, alpha: max }), write_mask: wgpu::ColorWrites::BLUE | wgpu::ColorWrites::ALPHA })] }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                let precip = |label: &str, vs: &str, fs: &str, color: wgpu::BlendComponent, alpha: wgpu::BlendComponent, buffers: &[Option<wgpu::VertexBufferLayout>]| {
+                    d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(label),
+                        layout: Some(&pl(&l_cloud_apply)),
+                        vertex: wgpu::VertexState { module: &m_precip, entry_point: Some(vs), compilation_options: Default::default(), buffers },
+                        primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                        depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
+                        multisample: Default::default(),
+                        fragment: Some(wgpu::FragmentState {
+                            module: &m_precip,
+                            entry_point: Some(fs),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: HDR,
+                                blend: Some(wgpu::BlendState { color, alpha }),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+                };
+                let cover = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add };
+                let over = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add };
+                let p_rain = precip("rain", "vs_rain", "fs_rain", over, cover, &[]);
+                let p_bolt = precip("lightning", "vs_bolt", "fs_bolt", wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add }, cover, &[vb(32, true, &A_BOLT)]);
+                let p_veil = precip("rain veil", "vs_veil", "fs_veil", over, wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add }, &[]);
+                let p_tree = geom("tree", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 0);
+                let imp = crate::impostor::Impostors::new(d, &l0, &l_tileu, &m_tree);
+                let p_tree_near = geom("trees near", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 7);
+                let p_tree_shadow = geom("tree shadow", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 1);
+                let p_tree_shadow_fixed = geom("tree shadow fixed", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 10);
+                let p_card = geom("leaf cards", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 3);
+                let p_inst = geom("inst", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 0);
+                let p_inst_shadow = geom("inst shadow", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 1);
+                (p_road, p_field, p_lights, p_lamp_top, p_rain, p_bolt, p_veil, p_tree, imp, p_tree_near, p_tree_shadow, p_tree_shadow_fixed, p_card, p_inst, p_inst_shadow)
+            });
+
+            let p_trans = full("trans", &pl0, &m_lut, "fs_trans", HDR, None);
+            let p_ms = full("ms", &pl0, &m_lut, "fs_ms", HDR, None);
+            let p_sky = full("sky", &pl0, &m_lut, "fs_sky", HDR, None);
+            let p_gtao = full("gtao", &pl(&l_ao), &m_ao, "fs_gtao", AMB, None);
+            let p_ao_blur = full("ao blur", &pl(&l_ao), &m_ao, "fs_blur", AMB, None);
+            let p_taa = full("taa", &pl(&l_post), &m_taa, "fs_taa", HDR, None);
+            let p_down = full("down", &pl(&l_post), &m_post, "fs_down", HDR, None);
+            let add = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
+            let p_up = full("up", &pl(&l_post), &m_post, "fs_up", HDR, Some(wgpu::BlendState { color: add, alpha: add }));
+            let p_final = full("final", &pl(&l_post), &m_post, "fs_final", out_format(&config), None);
+            let p_final_taa = full("final taa", &pl(&l_post), &m_post, "fs_final_taa", out_format(&config), None);
+            let invert = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::OneMinusDst, dst_factor: wgpu::BlendFactor::OneMinusSrc, operation: wgpu::BlendOperation::Add };
+            let p_logo = full("logo", &pl(&l_post), &m_post, "fs_logo", out_format(&config), Some(wgpu::BlendState { color: invert, alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } }));
+            let p_blit = full("blit", &pl(&l_post), &m_post, if config.format.is_srgb() { "fs_blit_srgb" } else { "fs_blit" }, config.format, None);
+            let pm = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add };
+            let p_particles = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("particles"),
+                layout: Some(&pl(&l_pdraw)),
+                vertex: wgpu::VertexState { module: &m_pdraw, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                primitive: Default::default(),
+                depth_stencil: None,
                 multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &m_precip,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: HDR,
-                        blend: Some(wgpu::BlendState { color, alpha }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
+                fragment: Some(wgpu::FragmentState { module: &m_pdraw, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: HDR, blend: Some(wgpu::BlendState { color: pm, alpha: pm }), write_mask: wgpu::ColorWrites::ALL })] }),
                 multiview_mask: None,
                 cache: None,
-            })
-        };
-        // (Alpha: the share of this frame the anti-aliasing must take.)
-        let cover = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add };
-        let over = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add };
-        let p_rain = precip("rain", "vs_rain", "fs_rain", over, cover, &[]);
-        let p_bolt = precip("lightning", "vs_bolt", "fs_bolt", wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add }, cover, &[vb(32, true, &A_BOLT)]);
-        // The veil of distant rain is smooth and steady: it leaves alpha alone.
-        let p_veil = precip("rain veil", "vs_veil", "fs_veil", over, wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add }, &[]);
-        let p_tree = geom("tree", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 0);
-        let imp = crate::impostor::Impostors::new(d, &l0, &l_tileu, &m_tree);
-        let p_tree_near = geom("trees near", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 7);
-        let p_tree_shadow = geom("tree shadow", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 1);
-        let p_tree_shadow_fixed = geom("tree shadow fixed", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 10);
-        let p_card = geom("leaf cards", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 3);
-        let p_inst = geom("inst", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 0);
-        let p_inst_shadow = geom("inst shadow", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 1);
-        let p_dres = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("depth resolve"),
-            layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l_dres)], immediate_size: 0 })),
-            vertex: wgpu::VertexState { module: &m_dres, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
-            primitive: Default::default(),
-            depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() }),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &m_dres, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[] }),
-            multiview_mask: None,
-            cache: None,
+            });
+            let p_psim = d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("psim"), layout: Some(&pl(&l_psim)), module: &m_psim, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+            let p_vol = [("splat", &pl_va), ("blur_x", &pl_va), ("blur_y", &pl_va), ("blur_z", &pl_va), ("light", &pl_vb)]
+                .map(|(e, l)| d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(e), layout: Some(l), module: &m_vol, entry_point: Some(e), compilation_options: Default::default(), cache: None }));
+            let p_dres = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("depth resolve"),
+                layout: Some(&d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&l_dres)], immediate_size: 0 })),
+                vertex: wgpu::VertexState { module: &m_dres, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                primitive: Default::default(),
+                depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState { module: &m_dres, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[] }),
+                multiview_mask: None,
+                cache: None,
+            });
+            (
+                t_obj.join().unwrap(),
+                t_cloud.join().unwrap(),
+                t_world.join().unwrap(),
+                t_misc.join().unwrap(),
+                (p_trans, p_ms, p_sky, p_gtao, p_ao_blur, p_taa, p_down, p_up, p_final, p_final_taa, p_logo, p_blit, p_particles, p_psim, p_vol, p_dres),
+            )
         });
+
+        let cshadow = CloudShadow {
+            p_in: p_cshadow_in,
+            p_out: p_cshadow_out,
+            p_in_plain: p_cshadow_in_plain,
+            p_out_plain: p_cshadow_out_plain,
+            layers: cs_layers,
+            p_mix: p_cshadow_mix,
+            bg_mix,
+            mix_ub,
+            mix_layers: cs_mix_layers,
+            prev: [[0.0; 4]; CS_MAP],
+            front: [[0.0; 4]; CS_MAP],
+            back: [[0.0; 4]; CS_MAP],
+            slot: [0, 0, 1],
+            slice: 0,
+            slices: if integrated { CS_SLICES_INTEGRATED } else { CS_SLICES },
+            ok: false,
+            anchor: [glam::DVec3::Z, glam::DVec3::X, glam::DVec3::Y],
+            sun: glam::DVec3::Z,
+            sun_v: glam::DVec3::ZERO,
+            mix: ([0; 8], 1.0),
+        };
 
         // ---- per-draw uniform pools
         let pool = |label: &str, n: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: n * UB_ALIGN, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -2268,7 +2406,7 @@ impl Renderer {
         let fluid = crate::fluid::FluidGpu::new(d, &l0, common, &vol_acc);
 
         let egui = egui_wgpu::Renderer::new(d, out_format(&config), egui_wgpu::RendererOptions::default());
-        let targets = Self::make_targets(d, &config, (config.width, config.height), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
+        let targets = Self::make_targets(d, &config, (config.width, config.height), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_storm, &l_cloud_rain, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
         let fluid_t = fluid.draw_targets(d, &targets.depth, config.width, config.height);
         // The transmittance and multi-scatter tables depend only on the planet
         // and the haze: bake them now, and again whenever the haze changes.
@@ -2282,21 +2420,33 @@ impl Renderer {
             lut_bake.draw(&mut enc);
             queue.submit([enc.finish()]);
         }
+        if let Some(err) = gpu_error.lock().clone() {
+            anyhow::bail!("GPU initialisation error: {err}");
+        }
         Ok(Self {
-            p_frost_in, p_frost_out, frost_id: None, frost_dirty: true,
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_rain, p_veil, p_bolt, bolt_buf, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
             gpu_timer: crate::gputime::GpuTimer::new(&device, &queue),
-            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
+            globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_storm, l_cloud_rain, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, gclouds_tex, snow_tex, snow_track_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
-            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_glass, p_composite, p_composite_edge, p_cloud, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit,
-            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
+            p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_glass, p_composite, p_composite_edge, p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit, p_logo,
+            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, logo_font: crate::logo::find_font(), logo_key: None, instance, window, gpu_error, device_lost, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
         })
+    }
+
+    /// Takes the latest uncaptured GPU or device-lost error message, if any.
+    pub fn take_gpu_error(&self) -> Option<String> {
+        self.gpu_error.lock().take()
+    }
+
+    /// True if the GPU device was lost.
+    pub fn is_device_lost(&self) -> bool {
+        self.device_lost.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn make_targets(
-        d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, (w, h): (u32, u32), l_dres: &wgpu::BindGroupLayout, l_ao: &wgpu::BindGroupLayout, l_composite: &wgpu::BindGroupLayout, l_cloud: &wgpu::BindGroupLayout, l_cloud_apply: &wgpu::BindGroupLayout, l_cloud_temporal: &wgpu::BindGroupLayout,
+        d: &wgpu::Device, config: &wgpu::SurfaceConfiguration, (w, h): (u32, u32), l_dres: &wgpu::BindGroupLayout, l_ao: &wgpu::BindGroupLayout, l_composite: &wgpu::BindGroupLayout, l_cloud: &wgpu::BindGroupLayout, l_cloud_storm: &wgpu::BindGroupLayout, l_cloud_rain: &wgpu::BindGroupLayout, l_cloud_apply: &wgpu::BindGroupLayout, l_cloud_temporal: &wgpu::BindGroupLayout,
         l_post: &wgpu::BindGroupLayout, l_pdraw: &wgpu::BindGroupLayout, l_glass: &wgpu::BindGroupLayout, psim_ub: &wgpu::Buffer, pbuf: &wgpu::Buffer, black: &wgpu::TextureView,
     ) -> Targets {
         // Everything is drawn at the render resolution (w, h); the tonemap
@@ -2317,14 +2467,17 @@ impl Renderer {
         let (cw, ch) = ((w / 2).max(1), (h / 2).max(1));
         let cloud = view(&make_tex(d, "cloud", cw, ch, 1, 1, HDR, rt));
         let cloud_dist = view(&make_tex(d, "cloud dist", cw, ch, 1, 1, CLOUD_DIST, rt));
+        let cloud_raw = view(&make_tex(d, "cloud raw", cw, ch, 1, 1, HDR, rt));
+        let cloud_dist_raw = view(&make_tex(d, "cloud dist raw", cw, ch, 1, 1, CLOUD_DIST, rt));
+        let cloud_cls_data = view(&make_tex(d, "cloud cls data", cw, ch, 1, 1, wgpu::TextureFormat::Rgba32Uint, rt));
+        let cloud_cls_depth = view(&make_tex(d, "cloud cls depth", cw, ch, 1, 1, wgpu::TextureFormat::Depth16Unorm, wgpu::TextureUsages::RENDER_ATTACHMENT));
         let cloud_hist = [view(&make_tex(d, "cloud hist 0", cw, ch, 1, 1, HDR, rt)), view(&make_tex(d, "cloud hist 1", cw, ch, 1, 1, HDR, rt))];
         let bloom_tex = make_tex(d, "bloom", (w / 2).max(64), (h / 2).max(64), 1, BLOOM_MIPS, HDR, rt);
         let bloom: Vec<_> = (0..BLOOM_MIPS).map(|i| bloom_tex.create_view(&wgpu::TextureViewDescriptor { base_mip_level: i, mip_level_count: Some(1), ..Default::default() })).collect();
         let ldr_tex = make_tex(d, "ldr", ow, oh, 1, 1, out_format(config), rt | wgpu::TextureUsages::COPY_SRC);
         let ldr = view(&ldr_tex);
-        let frost_tex = make_tex(d, "frost", (ow / 2).max(16), (oh / 2).max(16), 1, FROST_MIPS, HDR, rt);
-        let frost: Vec<_> = (0..FROST_MIPS).map(|i| frost_tex.create_view(&wgpu::TextureViewDescriptor { base_mip_level: i, mip_level_count: Some(1), ..Default::default() })).collect();
-        let frost_out = view(&make_tex(d, "frost out", (ow / 8).max(4), (oh / 8).max(4), 1, 1, HDR, rt));
+        let logo_tex = make_tex(d, "logo", ow, oh, 1, 1, wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        let logo = view(&logo_tex);
         let taa = [view(&make_tex(d, "taa 0", w, h, 1, 1, HDR, rt)), view(&make_tex(d, "taa 1", w, h, 1, 1, HDR, rt))];
         let bg = |l: &wgpu::BindGroupLayout, e: &[wgpu::BindGroupEntry]| d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: l, entries: e });
         let post = |src: &wgpu::TextureView, bl: &wgpu::TextureView| bg(l_post, &[tex_res(0, src), tex_res(1, bl), tex_res(2, &depth)]);
@@ -2340,6 +2493,9 @@ impl Renderer {
             bg_ao_blur: bg(l_ao, &[tex_res(0, &depth), tex_res(1, &aux), tex_res(2, &ao_raw)]),
             ao_raw, ao,
             bg_cloud: bg(l_cloud, &[tex_res(0, &depth)]),
+            bg_cloud_storm: bg(l_cloud_storm, &[tex_res(0, &depth), tex_res(6, &cloud_cls_data)]),
+            bg_cloud_plain_comp: bg(l_cloud_rain, &[tex_res(0, &depth), tex_res(2, &cloud), tex_res(3, &cloud_dist), tex_res(6, &cloud_cls_data)]),
+            bg_cloud_rain: bg(l_cloud_rain, &[tex_res(0, &depth), tex_res(2, &cloud_raw), tex_res(3, &cloud_dist_raw), tex_res(6, &cloud_cls_data)]),
             bg_cloud_temporal: [0, 1].map(|i| bg(l_cloud_temporal, &[tex_res(2, &cloud), tex_res(3, &cloud_dist), tex_res(4, &cloud_hist[1 - i])])),
             bg_cloud_apply: [0, 1].map(|i| bg(l_cloud_apply, &[tex_res(0, &depth), tex_res(1, &cloud_hist[i]), tex_res(3, &cloud_dist), tex_res(5, &color)])),
             bg_glass: bg(l_glass, &[tex_res(1, &view(&scene_tex)), tex_res(2, &depth)]),
@@ -2352,11 +2508,9 @@ impl Renderer {
             bg_final: [&hdr, &taa[0], &taa[1]].map(|src| post(src, &bloom[0])),
             taa,
             bg_blit: post(&ldr, black),
-            bg_frost_in: post(&ldr, black),
-            bg_frost_down: (1..FROST_MIPS as usize).map(|i| post(&frost[i - 1], black)).collect(),
-            bg_frost_out: post(&frost[FROST_MIPS as usize - 1], black),
-            frost, frost_out,
-            color, aux, amb, depth, hdr, cloud, cloud_dist, cloud_hist, bloom, ldr_tex, ldr,
+            bg_logo: post(&logo, black),
+            logo_tex,
+            color, aux, amb, depth, hdr, cloud, cloud_dist, cloud_raw, cloud_dist_raw, cloud_cls_data, cloud_cls_depth, cloud_hist, bloom, ldr_tex, ldr,
         }
     }
 
@@ -2387,10 +2541,10 @@ impl Renderer {
     fn remake_targets(&mut self) {
         self.cloud_hist_ok = false;
         self.taa_hist_ok = false;
+        self.logo_key = None;
         let (w, h) = self.render_size();
-        self.targets = Self::make_targets(&self.device, &self.config, (w, h), &self.l_dres, &self.l_ao, &self.l_composite, &self.l_cloud, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
+        self.targets = Self::make_targets(&self.device, &self.config, (w, h), &self.l_dres, &self.l_ao, &self.l_composite, &self.l_cloud, &self.l_cloud_storm, &self.l_cloud_rain, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
         self.fluid_t = self.fluid.draw_targets(&self.device, &self.targets.depth, w, h);
-        self.frost_dirty = true;
     }
 
     /// Render resolution as a share of the window's (graphics settings).
@@ -2654,6 +2808,10 @@ impl Renderer {
     }
 
     pub fn render(&mut self, mut f: Frame) {
+        if self.is_device_lost() {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            return;
+        }
         // The UI's texture changes are taken in whether or not a frame can be
         // drawn: each builds on the one before, so one dropped with a skipped
         // frame (a hidden window on macOS) would leave the next nothing to patch.
@@ -2672,7 +2830,15 @@ impl Renderer {
         } else {
             match self.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
-                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                wgpu::CurrentSurfaceTexture::Outdated => {
+                    self.surface.configure(&self.device, &self.config);
+                    None
+                }
+                wgpu::CurrentSurfaceTexture::Lost => {
+                    match self.instance.create_surface(self.window.clone()) {
+                        Ok(s) => self.surface = s,
+                        Err(e) => log::error!("recreating lost GPU surface failed: {e}"),
+                    }
                     self.surface.configure(&self.device, &self.config);
                     None
                 }
@@ -2873,14 +3039,6 @@ impl Renderer {
 
         let _ = self.device.poll(wgpu::PollType::Poll);
         self.fluid.poll();
-        // hand the frosted texture to egui again after a resize.
-        if self.frost_dirty {
-            match self.frost_id {
-                Some(id) => self.egui.update_egui_texture_from_wgpu_texture(&self.device, &self.targets.frost_out, wgpu::FilterMode::Linear, id),
-                None => self.frost_id = Some(self.egui.register_native_texture(&self.device, &self.targets.frost_out, wgpu::FilterMode::Linear)),
-            }
-            self.frost_dirty = false;
-        }
         let t = &self.targets;
         let mut enc = self.device.create_command_encoder(&Default::default());
         let mut gt = self.gpu_timer.take();
@@ -2929,7 +3087,9 @@ impl Renderer {
             }
         }
         mark(&mut enc, "compute");
-        self.cshadow.draw(&mut enc, &self.bg0_pre, cs_full);
+        let plain_wx = f.g.storm[3] <= 0.0 && f.g.nimbo[0][3] <= 0.0;
+        self.cshadow.draw(&mut enc, &self.bg0_pre, cs_full, plain_wx);
+        mark(&mut enc, "cshadow");
         {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&self.lut_sky, true))], None));
             rp.set_pipeline(&self.p_sky);
@@ -3484,13 +3644,61 @@ impl Renderer {
                 rp.draw(0..6, 0..n_dyn as u32);
             }
         }
-        {
+        if !plain_wx && f.g.nimbo[0][3] <= 0.0 {
+            // 1. Classify half-res cloud pixels and cache storm_mask bounds in
+            //    cloud_cls_data; depth 1.0 marks storm-intersecting pixels.
+            {
+                let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.cloud_cls_data, true))], Some(depth_att(&t.cloud_cls_depth, 1.0))));
+                rp.set_pipeline(&self.p_cloud_classify);
+                rp.set_bind_group(0, &self.bg0, &[]);
+                rp.set_bind_group(1, &t.bg_cloud, &[]);
+                rp.draw(0..3, 0..1);
+            }
+            // 2. Pure-storm march on storm-intersecting pixels via Early-Z into
+            //    (cloud, cloud_dist); untouched pixels clear to (0, 0, 0, T=1).
+            {
+                let ds = wgpu::RenderPassDepthStencilAttachment {
+                    view: &t.cloud_cls_depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                };
+                let storm_clear = wgpu::RenderPassColorAttachment {
+                    view: &t.cloud,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }), store: wgpu::StoreOp::Store },
+                };
+                let mut rp = enc.begin_render_pass(&pass_desc(&[Some(storm_clear), Some(color_att(&t.cloud_dist, true))], Some(ds)));
+                rp.set_bind_group(0, &self.bg0, &[]);
+                rp.set_bind_group(1, &t.bg_cloud_storm, &[]);
+                rp.set_pipeline(&self.p_cloud_storm_cls);
+                rp.draw(0..3, 0..1);
+            }
+            // 3. Lean ordinary-cloud march + depth-ordered storm/alto composite
+            //    + aerial haze + cirrus into (cloud_raw, cloud_dist_raw).
+            {
+                let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.cloud_raw, true)), Some(color_att(&t.cloud_dist_raw, true))], None));
+                rp.set_bind_group(0, &self.bg0, &[]);
+                rp.set_bind_group(1, &t.bg_cloud_plain_comp, &[]);
+                rp.set_pipeline(&self.p_cloud_plain_cls);
+                rp.draw(0..3, 0..1);
+            }
+            // 4. Sub-cloud storm rain shafts composited into (cloud, cloud_dist).
+            {
+                let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.cloud, true)), Some(color_att(&t.cloud_dist, true))], None));
+                rp.set_bind_group(0, &self.bg0, &[]);
+                rp.set_bind_group(1, &t.bg_cloud_rain, &[]);
+                rp.set_pipeline(&self.p_cloud_rain);
+                rp.draw(0..3, 0..1);
+            }
+        } else {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.cloud, true)), Some(color_att(&t.cloud_dist, true))], None));
-            rp.set_pipeline(&self.p_cloud);
+            rp.set_pipeline(if plain_wx { &self.p_cloud_plain } else { &self.p_cloud });
             rp.set_bind_group(0, &self.bg0, &[]);
             rp.set_bind_group(1, &t.bg_cloud, &[]);
             rp.draw(0..3, 0..1);
         }
+        mark(&mut enc, "cloud_march");
         let cf = self.cloud_flip;
         full(&mut enc, &t.cloud_hist[cf], true, &self.p_cloud_temporal, &t.bg_cloud_temporal[cf]);
         {
@@ -3500,6 +3708,7 @@ impl Renderer {
             rp.set_bind_group(1, &t.bg_cloud_apply[cf], &[]);
             rp.draw(0..3, 0..1);
         }
+        mark(&mut enc, "cloud_post");
         if parts {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], None));
             rp.set_bind_group(0, &self.bg0, &[]);
@@ -3594,14 +3803,6 @@ impl Renderer {
         let out = direct.unwrap_or(&t.ldr);
         full(&mut enc, out, true, if taa { &self.p_final_taa } else { &self.p_final }, &t.bg_final[src]);
 
-        // the frosted glass: the frame shrunk and blurred.
-        if f.egui.is_some() {
-            full(&mut enc, &t.frost[0], true, &self.p_frost_in, &t.bg_frost_in);
-            for i in 1..FROST_MIPS as usize {
-                full(&mut enc, &t.frost[i], true, &self.p_down, &t.bg_frost_down[i - 1]);
-            }
-            full(&mut enc, &t.frost_out, true, &self.p_frost_out, &t.bg_frost_out);
-        }
         let egui_jobs = f.egui.map(|(jobs, delta, ppp)| {
             let sd = egui_wgpu::ScreenDescriptor { size_in_pixels: [self.config.width, self.config.height], pixels_per_point: ppp };
             self.egui.update_buffers(&self.device, &self.queue, &mut enc, &jobs, &sd);
@@ -3610,6 +3811,15 @@ impl Renderer {
         if let Some((jobs, _, sd)) = &egui_jobs {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(out, false))], None)).forget_lifetime();
             self.egui.render(&mut rp, jobs, sd);
+        }
+        if let Some(scale) = f.logo {
+            let (w, h) = (self.config.width, self.config.height);
+            if self.logo_key != Some((w, h, scale.to_bits())) {
+                let m = self.logo_font.as_deref().map(|font| crate::logo::mask(font, w, h, scale)).unwrap_or_else(|| vec![0; (w * h) as usize]);
+                self.queue.write_texture(t.logo_tex.as_image_copy(), &m, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) }, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+                self.logo_key = Some((w, h, scale.to_bits()));
+            }
+            full(&mut enc, out, false, &self.p_logo, &t.bg_logo);
         }
         mark(&mut enc, "post+ui");
         if let Some(sview) = sview.as_ref().filter(|_| direct.is_none()) {

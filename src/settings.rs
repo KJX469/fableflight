@@ -5,18 +5,20 @@
 use crate::i18n::Lang;
 use std::path::PathBuf;
 
+pub const TAIL_VIEW: u8 = 2;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// None: follow the system's language
     pub lang: Option<Lang>,
     pub sound_on: bool,
     pub volume: f32,
-    /// 0 chase, 1 cockpit
+    /// 0 chase, 1 cockpit, 2 fixed rear view
     pub cam_mode: u8,
     pub cockpit_fov: f32,
     pub look_sens: f64,
     pub show_hud: bool,
-    /// the hud in the cockpit view too.
+    /// the HUD in the cockpit view too (off: hidden there, the cockpit's own instruments in view)
     pub hud_cockpit: bool,
     pub taa: bool,
     pub minimap: bool,
@@ -40,24 +42,25 @@ pub struct Settings {
     pub multiplayer: bool,
     pub mp_server: String,
     pub mp_name: String,
-    /// where the last flight started.
+    /// where and how the last flight started (the globe opens on it, and
+    /// the main menu offers to fly it again)
     pub last: Option<LastStart>,
 }
 
-/// the start of the last flight.
+/// The start of the last flight.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LastStart {
     pub lat: f64,
     pub lon: f64,
-    /// the start point's name.
+    /// what the start point was called on the globe
     pub name: String,
-    /// the airport's ident, if any.
+    /// the airport's ident, when it was one
     pub airport: Option<String>,
-    /// "runway", "approach" or "overhead".
+    /// "runway", "approach" or "overhead"
     pub start: String,
-    /// the runway end, none for into the wind.
+    /// the runway end asked for (None: the one into the wind)
     pub runway: Option<String>,
-    /// the aircraft's key.
+    /// the aircraft's key (`aircraft::Spec::keys[0]`)
     pub aircraft: String,
 }
 
@@ -101,7 +104,7 @@ impl Settings {
             lang: j["language"].as_str().and_then(Lang::parse),
             sound_on: b("sound", d.sound_on),
             volume: f("volume", d.volume as f64).clamp(0.0, 1.0) as f32,
-            cam_mode: if j["camera"].as_str() == Some("cockpit") { 1 } else { 0 },
+            cam_mode: match j["camera"].as_str() { Some("cockpit") => 1, Some("tail") => TAIL_VIEW, _ => 0 },
             cockpit_fov: f("cockpit_fov", d.cockpit_fov as f64).clamp(35.0, 85.0) as f32,
             look_sens: f("mouse_look_speed", d.look_sens).clamp(0.25, 3.0),
             show_hud: b("hud", d.show_hud),
@@ -131,7 +134,7 @@ impl Settings {
             "language": self.lang.map(|l| l.code()),
             "sound": self.sound_on,
             "volume": self.volume,
-            "camera": if self.cam_mode == 1 { "cockpit" } else { "chase" },
+            "camera": match self.cam_mode { 1 => "cockpit", TAIL_VIEW => "tail", _ => "chase" },
             "cockpit_fov": self.cockpit_fov,
             "mouse_look_speed": self.look_sens,
             "hud": self.show_hud,
@@ -178,6 +181,8 @@ mod tests {
     fn round_trip() {
         let s = Settings { lang: Some(Lang::Fr), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, show_hud: false, hud_cockpit: true, minimap: false, landing_guidance: false, arcade: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, taa: false, live_traffic: false, live_weather: false, real_time: false, snow: crate::snow::Mode::Always, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }), multiplayer: true, mp_server: "example.org:7000".into(), mp_name: "Dany".into() };
         assert_eq!(Settings::from_json(&s.to_json()), s);
+        let tail = Settings { cam_mode: TAIL_VIEW, ..Settings::default() };
+        assert_eq!(Settings::from_json(&tail.to_json()), tail);
         assert_eq!(Settings::from_json(&serde_json::json!({"last_start": {"lat": 300.0, "lon": 0.0}})).last, None);
         let legacy = Settings::from_json(&serde_json::json!({"minimap_size": 420}));
         assert_eq!((legacy.minimap_size, legacy.minimap_height), (420.0, 420.0));

@@ -1,4 +1,3 @@
-
 <div align="center">
 
 # Fable Flight
@@ -28,24 +27,90 @@ Download the [latest release](https://github.com/Rolandjg/fableflight/releases/l
 
 ## Compiling
 
-Install [Rust](https://www.rust-lang.org/tools/install), then run:
+Requires **Rust 1.85+** (edition 2024). Note that the Cargo crate and main simulator binary are named `fablegame` (and the optional AI copilot bridge binary is `fableflight-mcp`), while the application is Fable Flight.
+
+### Platform prerequisites
+
+- **Linux (Debian / Ubuntu):**
+  ```sh
+  sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+  ```
+- **Linux (Fedora):**
+  ```sh
+  sudo dnf install alsa-lib-devel systemd-devel pkgconf-pkg-config
+  ```
+- **macOS:** Xcode Command Line Tools (`xcode-select --install`).
+- **Windows:** [Rust](https://www.rust-lang.org/tools/install) with the MSVC C++ Build Tools. On Windows x64, use **Visual Studio Installer** to modify your Build Tools installation and add **C++ ATL for x64/x86** under **Individual components**. ATL provides `atls.lib`, which the bundled DirectX shader compiler needs at link time.
+
+### Build and run
 
 ```sh
 cargo run --release
 ```
 
-Or build with `cargo build --release`.
+Or build the release binaries (`target/release/fablegame` and `target/release/fableflight-mcp`) with:
+
+```sh
+cargo build --release --locked
+```
 
 ## Features
 
-- **Aircraft:** Cessna 172RG, Robin DR400, Boeing 747, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
+- **Aircraft:** Cessna 172RG, Robin DR400, Boeing 747, Gulfstream G650, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
 - **Flight systems:** fuel, mass and balance, electrical failures, clickable cockpits, radio navigation, and autopilot.
-- **World:** real METAR weather, satellite/road minimap, live ADS-B traffic, and multiplayer.
-- **Controls:** remappable keyboard, joystick, throttle, and pedals. Configure them in **Settings → Bindings**.
+- **World:** real METAR weather, seasonal & live snow cover, satellite/road minimap, live ADS-B traffic, and multiplayer.
+- **Controls:** remappable keyboard, joystick, throttle, pedals, and gamepad. Configure them in **Settings → Controls**.
 - **Arcade mode:** optional boosts, missiles, and in-flight respawns. Enable in **Settings → General** or pass `--arcade`.
 - **AI copilot:** optional MCP integration; see [docs/mcp.md](docs/mcp.md).
 
-The UI supports English and French. Settings and key bindings are saved automatically.
+The UI supports English (`en`), French (`fr`), and Korean (`ko`). Settings and key bindings are saved automatically.
+
+## Default Controls
+
+All bindings can be customized in **Settings → Controls**. In cockpit view, hover over switches, levers, and knobs to click, hold, or scroll them directly with the mouse (or the gamepad's aim dot).
+
+| Action | Default Key |
+| --- | --- |
+| Pitch down / up | `W` / `S` |
+| Roll left / right | `A` / `D` |
+| Rudder left / right | `Q` / `E` |
+| Throttle up / down | `Left Shift` / `Left Ctrl` |
+| Pitch trim down / up | `Numpad 7` / `Numpad 1` |
+| Wheel brakes / Parking brake | `B` / `.` |
+| Flaps down / up a notch | `F` / `V` |
+| Landing gear | `L` |
+| Speedbrake / Braking chute | `/` |
+| Thrust reversers (hold) | `Z` |
+| Canopy open / close | `6` |
+| Boost / Afterburner | `Space` |
+| Auto-start / stop engine | `F4` |
+| Battery master / Magnetos / Starter | `Insert` / `I` / `O` |
+| Mixture richer / leaner | `Page Up` / `Page Down` |
+| Autopilot toggle / HDG / NAV / APR / ALT | `F5` / `7` / `8` / `9` / `0` |
+| Heading bug / Altitude preselect | `-` `=` / `;` `'` |
+| Camera (chase / cockpit) | `C` |
+| HUD / Minimap toggle | `H` / `` ` `` |
+| Go to place / Respawn / Pause | `G` / `R` / `P` |
+| Flight panel / Pause menu | `Tab` / `Esc` |
+| Sound toggle / Screenshot | `U` / `F12` |
+
+## Configuration & Data Paths
+
+| Platform | Config (settings, bindings, Google key, MCP token) | Cache (tiles, downloaded hangar cache) |
+| --- | --- | --- |
+| **Linux** | `~/.config/fablegame/` | `~/.cache/fablegame/` |
+| **macOS** | `~/Library/Application Support/fablegame/` | `~/Library/Caches/fablegame/` |
+| **Windows** | `%APPDATA%\fablegame\` | `%LOCALAPPDATA%\fablegame\` |
+
+When using optional Google Maps imagery/3D tiles, prefer setting the `FABLE_GOOGLE_KEY` environment variable (or entering the key in **Settings → Map**) rather than passing `--google-key` on the command line.
+
+## Troubleshooting
+
+- **GPU startup or driver issues:** Run from a terminal to see GPU error output. Make sure Vulkan (Linux/Windows), DX12 (Windows), or Metal (macOS) drivers are up to date. On integrated GPUs, try `--graphics low --no-taa` or set `FABLE_MSAA=2`.
+- **No sound or switched headphones:** Audio automatically attempts to reopen the default output device every few seconds after a stream error. Use `U` to toggle mute or `--mute` to launch silently.
+- **Offline / slow network:** Launch with `--offline` to fly using only cached tiles and built-in data.
+- **Linux gamepads not detected:** Ensure your user has read access to `/dev/input/event*` (usually the `input` group) and `libudev` is installed.
+- **Invalid command-line flags:** Run `fablegame --help` to see all supported options.
 
 ## Multiplayer
 
@@ -59,7 +124,16 @@ Allow UDP port `7480` through your firewall.
 
 Read [docs/relay.md](docs/relay.md) for more info.
 
+## Assets & Attributions
+
+The source code is licensed under the MIT License (see [LICENSE](LICENSE)). Bundled data and media assets include:
+
+- **Airports & navigation aids (`assets/airports.tsv.gz`, `assets/navaids.tsv.gz`):** Derived from [OurAirports](https://ourairports.com/data/) (Public Domain).
+- **Night lights (`assets/night_lights.bin`):** Block-wise zlib-compressed global radiance tiles packed from NASA Earth Observatory's Black Marble 2016 dataset (Public Domain).
+- **Fonts (`assets/fonts/`):** Barlow and IBM Plex Mono, licensed under the SIL Open Font License 1.1 (see `assets/fonts/OFL-Barlow.txt` and `assets/fonts/OFL-IBMPlexMono.txt`).
+- **Google Maps badge (`assets/google_maps_logo.png`):** Displayed when optional Google Maps Platform imagery or Photorealistic 3D Tiles are enabled, per Google Maps attribution requirements.
+- **Aircraft models, textures, and audio (`assets/*.bin.gz`, `assets/*_paint.jpg`, `assets/audio/`, `assets/ui/`):** Project-authored or procedural assets bundled with Fable Flight. Optional downloadable aircraft from [FGAddon](https://wiki.flightgear.org/FGAddon) carry their own per-aircraft licenses recorded in each installed aircraft's `source.json`.
+
 ## Contributing
 
 Contributions are welcome, see [AGENTS.md](AGENTS.md) for guidance on coding agent standards.
-
