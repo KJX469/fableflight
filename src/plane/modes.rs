@@ -430,7 +430,7 @@ pub fn derivs(spec: &'static Spec, alt: f64, speed: f64) -> Derivs {
         let mut inp = p.strip_input(af, vb, (rho, a), 1.0);
         inp.omega = om;
         (inp.elevator, inp.aileron, inp.rudder) = (0.0, 0.0, 0.0);
-        let mut st = aero::State { sep: vec![0.0; af.strips.len()], eps: 0.0 };
+        let mut st = aero::State { sep: vec![0.0; af.strips.len()], eps: 0.0, gust: Vec::new() };
         let mut out = af.forces(&inp, &mut st, 0.0);
         for _ in 0..3 {
             st.eps = af.rig.downwash * 2.0 * out.cl_wing / (std::f64::consts::PI * af.ar);
