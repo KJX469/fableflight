@@ -149,7 +149,7 @@ impl Plane {
     /// How hot the air is making its windward side (0 .. 1: the tiles glowing).
     pub fn heat(&self) -> f32 {
         let (_, _, h) = geo::pos_to_lla(self.pos);
-        ((density(h) / RHO0).sqrt() * (self.airspeed().length() / 7800.0).powi(3) * 150.0).min(1.0) as f32
+        ((self.atmos.density(h) / RHO0).sqrt() * (self.airspeed().length() / 7800.0).powi(3) * 150.0).min(1.0) as f32
     }
     /// The highest it will coast to as it flies now (m above the sea; None: it is not coming back).
     pub fn apogee(&self) -> Option<f64> {
@@ -224,7 +224,7 @@ impl Plane {
         let o = self.origin;
         let (lat, lon, h) = geo::pos_to_lla(self.pos);
         let upw = self.pos.normalize();
-        let rho = density(h);
+        let rho = self.atmos.density(h);
         let ground = world.ground(lat, lon);
         // The landing flown for it, as the real one's computers do: level on
         // its belly until the ground is close, then the three sea-level
@@ -259,7 +259,7 @@ impl Plane {
         self.running = self.charge > 0.02;
         let f1 = st.thrust / st.n as f64;
         let vac = st.isp[1] / st.isp[0];
-        let each = f1 * (vac - (vac - 1.0) * pressure_ratio(h)) * self.charge;
+        let each = f1 * (vac - (vac - 1.0) * self.atmos.pressure_ratio(h)) * self.charge;
         let thrust = n_lit as f64 * each;
         self.fuel_flow = n_lit as f64 * f1 * self.charge / (st.isp[0] * G0);
         self.fuel = (self.fuel - self.fuel_flow * dt).max(0.0);
@@ -275,7 +275,7 @@ impl Plane {
         let vb = self.rot.inverse() * self.airspeed();
         let v = vb.length();
         let q = 0.5 * rho * v * v;
-        let mach = v / sound_speed(h);
+        let mach = v / self.atmos.sound_speed(h);
         let (front, aft) = (rk.stages[1].z[0], st.z[1]);
         let len = aft - front;
         let r = rk.radius;

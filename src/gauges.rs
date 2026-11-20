@@ -88,7 +88,7 @@ fn truth(p: &Plane) -> Truth {
     let eng = (p.dmg.engine as f64).clamp(0.0, 1.0);
     // Manifold pressure: the outside air's, less what the throttle plate holds
     // back while the engine draws; stopped, it reads the outside air.
-    let amb = 29.92 * crate::plane::pressure_ratio(h);
+    let amb = 29.92 * p.atmos.pressure_ratio(h);
     let mp = amb - amb * (0.62 - 0.6 * thr).max(0.0) * running;
     Truth {
         ias_kt: p.ias() * 1.94384,

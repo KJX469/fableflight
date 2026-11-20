@@ -284,6 +284,8 @@ struct Args {
     alto: Option<f32>,
     /// wind in knots and the direction it blows from, haze, day of year; open the F3 panel
     wind: Option<(f64, f64)>,
+    /// how much warmer (K) than the standard atmosphere the day is
+    isa_dev: Option<f64>,
     haze: Option<f32>,
     day: Option<f64>,
     weather_panel: bool,
@@ -436,6 +438,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
         time_rate: None,
         alto: None,
         wind: None,
+        isa_dev: None,
         haze: None,
         day: None,
         weather_panel: false,
@@ -681,6 +684,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
                 let p = req_nums(flag, i, 2, 2)?;
                 a.wind = Some((p[0], p[1]));
             }
+            "--isa-dev" => a.isa_dev = Some(req_num(flag, i)?),
             "--haze" => a.haze = Some(req_num(flag, i)? as f32),
             "--day" => a.day = Some(req_num(flag, i)?),
             "--weather" => {
@@ -1526,6 +1530,9 @@ impl Game {
         }
         if let Some(r) = args.time_rate {
             wx.time_rate = r.clamp(0.0, 3600.0);
+        }
+        if let Some(d) = args.isa_dev {
+            wx.isa_dev = d.clamp(-60.0, 60.0);
         }
         if let Some((kt, from)) = args.wind {
             (wx.wind, wx.wind_from) = (kt / 1.94384, from);
@@ -5209,6 +5216,7 @@ impl Game {
             air.draft += oro.w;
             self.plane.air = air;
             self.plane.auto_trim = self.auto_trim;
+            self.plane.atmos = self.wx.atmos();
             self.plane.wind = self.wx.at(self.plane.pos, agl, self.time) + self.plane.pos.normalize() * air.draft + air.gust;
             // The ground under it: rain (above the freezing level it falls as
             // snow, which lies rather than wets) and lying snow, for the tyres.
