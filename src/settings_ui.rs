@@ -381,7 +381,7 @@ impl Game {
             row(ui, t!("settings.arcade_mode"), t!("settings.missiles_boost_on_any_aircraft"), |ui| {
                 menu::switch(ui, &mut self.arcade);
             });
-            row(ui, t!("Auto-trim", "Trim automatique"), t!("winds the trim for you while you fly the stick", "règle le trim pour vous pendant que vous pilotez"), |ui| {
+            row(ui, t!("settings.auto_trim"), t!("settings.winds_the_trim_for_you"), |ui| {
                 menu::switch(ui, &mut self.auto_trim);
             });
         });
