@@ -395,8 +395,8 @@ struct FShade { albedo: vec3f, extra: vec3f, N: vec3f, mirror: f32 };
 // rooms behind the windows, lights at night), the normal to shade with and
 // how much of it is mirror. N faces the viewer, Tw runs along the wall the
 // way uv.x grows; fw is the pixel footprint in uv. Smashed: the glass is out.
-fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, smashed: bool) -> FShade {
-  let l = light_at(P);
+// l and sh: light_at(P) and shadow_at(P, N), which the caller shades with too.
+fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, smashed: bool, l: Light, sh: f32) -> FShade {
   let night = night_at(l.upn);
   let dist = length(P);
   var f = facade(uv, base, ftype, seed, wealth, H, fw);
@@ -413,7 +413,6 @@ fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, b
   let Bw = normalize(cross(N, Tw)) * sign(dot(cross(N, Tw), l.upn));
   let Vt = vec3f(dot(V, Tw), dot(V, Bw), dot(V, -N));
   let St = vec3f(dot(G.sun_dir.xyz, Tw), dot(G.sun_dir.xyz, Bw), dot(G.sun_dir.xyz, N));
-  let sh = shadow_at(P, N);
   // Close up, windows get depth: a recess, and a room behind the glass.
   // (out to distances the graphics settings' city detail scales)
   let ck = city_k();
@@ -446,7 +445,10 @@ fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, b
     let near_alb = mix(mix(albedo, rev_col, reveal), vec3f(0.012), pane);
     albedo = mix(albedo, near_alb, inner);
     gl = mix(gl, pane, inner);
-    room = interior(q, Vt, f, ftype, seed, wealth, night, l.amb, l.sun * max(St.z, 0.0) * sh, max(fwq.x, fwq.y)) * pane;
+    // (the room shows only through the pane: not cast for the rest of the bay)
+    if (pane > 0.0) {
+      room = interior(q, Vt, f, ftype, seed, wealth, night, l.amb, l.sun * max(St.z, 0.0) * sh, max(fwq.x, fwq.y)) * pane;
+    }
   }
   // Glass: Fresnel reflection of sky, clouds and ground, the sun's glint,
   // and what is behind it seen through the tint.

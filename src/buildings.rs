@@ -17,7 +17,10 @@ use std::sync::Arc;
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct BVertex {
     pub pos: [f32; 3],
-    pub nrm: [f32; 3],
+    /// the face's normal, signed 8-bit (w unused): a city tile holds millions
+    /// of these vertices, and 32 bytes a vertex rather than 40 keeps a fifth
+    /// of its geometry out of GPU memory
+    pub nrm: [i8; 4],
     /// walls: (metres along, metres above ground). roofs: material coordinates.
     pub uv: [f32; 2],
     /// rgb colour; a = surface kind (see K_*)
@@ -85,17 +88,18 @@ pub struct BuildingData {
     pub n_main: u32,
     /// end of the middle level of detail; the finest level runs from here to `n_far`
     pub n_det: u32,
-    /// end of the buildings' own part of the base level; the rest of it
-    /// (bridge decks) is drawn at every distance
-    pub n_bld: u32,
-    /// start of the far stand-ins (they run to the end), and end of those of
-    /// buildings tall enough to matter in the far shadow cascade
+    /// start of the far stand-ins (they run to the end)
     pub n_far: u32,
-    pub n_far_tall: u32,
     /// Where each height class (see `HCLASS`) ends in the building part of the
     /// base level, the middle level, the finest level and the far stand-ins
-    /// (absolute indices; buildings are laid down tallest first in each).
+    /// (absolute indices).
     pub cls: [[u32; 4]; 4],
+    /// Where each cell's part of each sort group ends in each of the four runs
+    /// (base, middle, finest, far stand-ins; absolute indices). See `by_cell`.
+    pub cell_end: Box<CellEnds>,
+    /// Bounding sphere of each cell's geometry: centre relative to the tile
+    /// centre, radius (negative when the cell is empty).
+    pub cell_bound: Vec<[f32; 4]>,
     pub atlas: Vec<Vec<u8>>,
     pub atlas_size: u32,
     pub ax: [f32; 4],
@@ -244,9 +248,10 @@ pub const FAR: Lvl = Lvl(3);
 /// Distances (from the camera) over which buildings dissolve from their full
 /// geometry into their far stand-ins. Must match FAR0/FAR1 in buildings.wgsl.
 pub const BFAR: [f32; 2] = [1000.0, 1300.0];
-/// Distance the finest level of detail starts to dissolve out at (60% of
-/// `LOD2_FAR` in buildings.wgsl; must match it).
-pub const FINE_FADE: f32 = 680.0 * 0.6;
+/// Distance the finest level of detail is drawn to (LOD2_FAR in buildings.wgsl;
+/// must match it), and where it starts to dissolve out (60% of that).
+pub const LOD2_FAR: f32 = 680.0;
+pub const FINE_FADE: f32 = LOD2_FAR * 0.6;
 /// Height classes, tallest first: (least height in metres, distance scale). A
 /// tower stands out against the skyline from much farther off than a house, so
 /// its full geometry, and the middle and finest levels that dress it, are kept
@@ -257,8 +262,47 @@ pub const HCLASS: [(f32, f32); 4] = [(150.0, 3.0), (100.0, 2.0), (65.0, 1.5), (0
 pub fn hclass(h: f32) -> usize {
     HCLASS.iter().position(|c| h >= c.0).unwrap_or(HCLASS.len() - 1)
 }
+/// A unit vector as `Snorm8x4`.
+fn snorm8(n: Vec3) -> [i8; 4] {
+    let q = |v: f32| (v.clamp(-1.0, 1.0) * 127.0).round() as i8;
+    [q(n.x), q(n.y), q(n.z), 0]
+}
+
 /// Most vertices a tile may spend on its finest level of detail.
 const FINE_BUDGET: usize = 450_000;
+/// The tile is cut into CELLS x CELLS cells (about 230-300 m across), and the
+/// geometry of each sort group is laid down cell by cell (`by_cell`), so a
+/// draw can leave out the cells it cannot see: a shadow cascade a few hundred
+/// metres wide, or the finest level of detail beyond its reach.
+pub const CELLS: usize = 8;
+pub const NCELL: usize = CELLS * CELLS;
+/// Sort groups in each index run, in order: height classes 0, 1 and 2, class
+/// 3 at least `TALL_CAST` metres high (they cast into the far shadow cascade),
+/// the rest of class 3, and what is not a building (bridge decks in the base
+/// level, street furniture in the middle and finest levels).
+pub const GROUPS: usize = 6;
+/// Least height of a building in the far shadow cascade.
+const TALL_CAST: f32 = 12.0;
+/// End of each (sort group, cell) in each run, see `BuildingData::cell_end`.
+pub type CellEnds = [[[u32; NCELL]; GROUPS]; 4];
+/// The sort group of a building `h` metres high.
+fn sort_group(h: f32) -> u8 {
+    match hclass(h) {
+        c if c + 1 < HCLASS.len() => c as u8,
+        _ if h >= TALL_CAST => 3,
+        _ => 4,
+    }
+}
+/// Groups `0..sort_groups_to(k)` hold height classes `0..k` (the last class
+/// spans the last three groups).
+pub fn sort_groups_to(k: usize) -> usize {
+    if k < HCLASS.len() { k } else { GROUPS }
+}
+/// The sort groups of height class `c` in run `r` (in the base level the
+/// last class stops short of the bridge decks).
+pub fn class_groups(r: usize, c: usize) -> std::ops::Range<usize> {
+    if c + 1 < HCLASS.len() { c..c + 1 } else if r == 0 { c..GROUPS - 1 } else { c..GROUPS }
+}
 
 #[derive(Default)]
 pub struct Mesh {
@@ -294,7 +338,7 @@ impl Mesh {
         let v0 = self.v.len() as u32;
         for (p, uv) in pts {
             self.radius = self.radius.max(p.length());
-            self.v.push(BVertex { pos: (*p).into(), nrm: n.into(), uv: *uv, col, sty });
+            self.v.push(BVertex { pos: (*p).into(), nrm: snorm8(n), uv: *uv, col, sty });
         }
         if lvl == FINE {
             self.fine_verts += pts.len();
@@ -1941,6 +1985,85 @@ pub fn on_road(road: &[u8], ring: &[[f32; 2]], ext: f32) -> bool {
     inside > 0 && hit * 5 > inside
 }
 
+/// Lays each of the mesh's four index runs down sort group by sort group
+/// (see `GROUPS`) and, within a group, cell by cell, keeping each building's
+/// indices together (a destroyed building is cut out by its ranges) and the
+/// order they were made in (tallest first) within a cell. What follows the
+/// buildings in a run (`bld_end`: bridge decks, street furniture) goes cell by
+/// cell triangle by triangle. `groups` is the sort group of each of the first
+/// footprints (the buildings), `cell_of` the cell a tile-local point lies in.
+/// Returns where each (group, cell) ends in each run, relative to the run, and
+/// the bounding sphere of each cell's geometry. Footprint ranges are updated.
+fn by_cell(m: &mut Mesh, fps: &mut [Footprint], groups: &[u8], bld_end: [usize; 4], cell_of: impl Fn(Vec3) -> usize) -> (Box<CellEnds>, Vec<[f32; 4]>) {
+    let mut ends: Box<CellEnds> = Box::new([[[0; NCELL]; GROUPS]; 4]);
+    let mut lo = vec![Vec3::splat(f32::MAX); NCELL];
+    let mut hi = vec![Vec3::splat(f32::MIN); NCELL];
+    let fcell: Vec<usize> = fps.iter().take(groups.len()).map(|f| cell_of(f.center)).collect();
+    for r in 0..4 {
+        let ix = std::mem::take(match r {
+            0 => &mut m.main,
+            1 => &mut m.det,
+            2 => &mut m.fine,
+            _ => &mut m.far,
+        });
+        let range = |f: &Footprint| match r {
+            0 => f.main,
+            1 => f.det,
+            2 => f.fine,
+            _ => f.far,
+        };
+        // (group, cell, start, count, footprint or usize::MAX)
+        let mut items: Vec<(u8, u8, u32, u32, usize)> = Vec::with_capacity(groups.len() + (ix.len() - bld_end[r]) / 3);
+        for (i, f) in fps.iter().take(groups.len()).enumerate() {
+            let (s, n) = range(f);
+            if n > 0 {
+                items.push((groups[i], fcell[i] as u8, s, n, i));
+            }
+        }
+        debug_assert_eq!(items.iter().map(|it| it.3 as usize).sum::<usize>(), bld_end[r], "buildings cover the start of run {r}");
+        for t in (bld_end[r]..ix.len()).step_by(3) {
+            let c = (Vec3::from(m.v[ix[t] as usize].pos) + Vec3::from(m.v[ix[t + 1] as usize].pos) + Vec3::from(m.v[ix[t + 2] as usize].pos)) / 3.0;
+            items.push((GROUPS as u8 - 1, cell_of(c) as u8, t as u32, 3, usize::MAX));
+        }
+        items.sort_by_key(|it| (it.0, it.1));
+        let mut out = Vec::with_capacity(ix.len());
+        let mut next = items.iter().peekable();
+        for g in 0..GROUPS {
+            for c in 0..NCELL {
+                while let Some(&(_, _, s, n, f)) = next.next_if(|it| it.0 as usize == g && it.1 as usize == c) {
+                    let part = &ix[s as usize..(s + n) as usize];
+                    for &i in part {
+                        let p = Vec3::from(m.v[i as usize].pos);
+                        lo[c] = lo[c].min(p);
+                        hi[c] = hi[c].max(p);
+                    }
+                    if f != usize::MAX {
+                        let fr = &mut fps[f];
+                        let at = (out.len() as u32, n);
+                        match r {
+                            0 => fr.main = at,
+                            1 => fr.det = at,
+                            2 => fr.fine = at,
+                            _ => fr.far = at,
+                        }
+                    }
+                    out.extend_from_slice(part);
+                }
+                ends[r][g][c] = out.len() as u32;
+            }
+        }
+        debug_assert_eq!(out.len(), ix.len());
+        *match r {
+            0 => &mut m.main,
+            1 => &mut m.det,
+            2 => &mut m.fine,
+            _ => &mut m.far,
+        } = out;
+    }
+    let bound = (0..NCELL).map(|c| if lo[c].x > hi[c].x { [0.0, 0.0, 0.0, -1.0] } else { let (m, h) = ((lo[c] + hi[c]) * 0.5, (hi[c] - lo[c]) * 0.5); [m.x, m.y, m.z, h.length()] }).collect();
+    (ends, bound)
+}
+
 pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
     debug_assert_eq!(id.z, DATA_ZOOM);
     let vt = src.vector(id)?;
@@ -1977,9 +2100,8 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
     let rels = relate(cx.unit_m, &vt.buildings);
     let mut order: Vec<usize> = (0..vt.buildings.len()).collect();
     order.sort_by(|a, b| rels[*b].hi.total_cmp(&rels[*a].hi));
-    let mut n_far_tall = 0;
-    // Ends of each height class in the four runs (relative to each run's start).
-    let mut cls: [Option<[u32; 4]>; 4] = [None; 4];
+    // The sort group of each footprint built here (bridges come later, from the roads).
+    let mut groups: Vec<u8> = Vec::new();
     let mut built = vec![0u8; RASTER * RASTER];
     // Where the streets run on the ground, known before any building is made:
     // a footprint that sits on one is a map error (or a road drawn through a
@@ -1992,15 +2114,12 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
         if !on_street {
             if let Some(f) = building(&cx, &mut m, &vt.buildings, &rels, bi, &hoods, &landuse) {
                 footprints.push(f);
+                groups.push(sort_group(rels[bi].hi));
                 raster(&mut built, RASTER, ext, &b.rings[..1], 1);
             }
         }
-        if rels[bi].hi >= 12.0 {
-            n_far_tall = m.far.len() as u32;
-        }
-        cls[hclass(rels[bi].hi)] = Some([m.main.len(), m.det.len(), m.fine.len(), m.far.len()].map(|n| n as u32));
     }
-    let n_bld = m.main.len() as u32;
+    let bld_end = [m.main.len(), m.det.len(), m.fine.len(), m.far.len()];
 
     let mut roads = crate::roads::build(&cx, &vt, src, &mut m, &mut footprints, &built);
     let parked = crate::roads::park_cars(&cx, &roads.net, &hoods, &built);
@@ -2009,6 +2128,16 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
     // Affine map from tile-local position to atlas uv.
     let (p0, px, py) = (cx.pos([ext * 0.5, ext * 0.5], 0.0), cx.pos([ext, ext * 0.5], 0.0) - cx.pos([0.0, ext * 0.5], 0.0), cx.pos([ext * 0.5, ext], 0.0) - cx.pos([ext * 0.5, 0.0], 0.0));
     let (ax, ay) = (px / px.length_squared(), py / py.length_squared());
+    let (ax4, ay4) = ([ax.x, ax.y, ax.z, 0.5 - ax.dot(p0)], [ay.x, ay.y, ay.z, 0.5 - ay.dot(p0)]);
+    // Cells are numbered along a Z curve, so that the cells a draw wants (a
+    // cascade's square, the view's wedge) mostly follow on from each other in
+    // the index runs and join into few draws.
+    let cell_of = |p: Vec3| {
+        let k = |a: [f32; 4]| ((Vec3::new(a[0], a[1], a[2]).dot(p) + a[3]) * CELLS as f32).clamp(0.0, CELLS as f32 - 1.0) as usize;
+        let (x, y) = (k(ax4), k(ay4));
+        (0..CELLS.trailing_zeros()).map(|b| ((x >> b) & 1) << (2 * b) | ((y >> b) & 1) << (2 * b + 1)).sum::<usize>()
+    };
+    let (mut cell_end, cell_bound) = by_cell(&mut m, &mut footprints, &groups, bld_end, cell_of);
     let n_main = m.main.len() as u32;
     let n_det = n_main + m.det.len() as u32;
     let n_far = n_det + m.fine.len() as u32;
@@ -2017,19 +2146,18 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
         f.fine.0 += n_det;
         f.far.0 += n_far;
     }
-    // Empty classes end where the one before does; the last takes the rest of
-    // each run (street furniture in the middle and finest levels).
-    let n_idx = n_far + m.far.len() as u32;
     let starts = [0, n_main, n_det, n_far];
-    let mut cls_abs = [[0u32; 4]; 4];
-    let mut prev = [0u32; 4];
-    for (c, e) in cls.iter().enumerate() {
-        let e = if c + 1 == HCLASS.len() { [n_bld, n_det - n_main, n_far - n_det, n_idx - n_far] } else { e.unwrap_or(prev) };
-        prev = e;
-        for r in 0..4 {
-            cls_abs[r][c] = starts[r] + e[r];
+    for (r, run) in cell_end.iter_mut().enumerate() {
+        for e in run.iter_mut().flatten() {
+            *e += starts[r];
         }
     }
+    // Height classes 0..2 are sort groups 0..2; the last class takes the rest
+    // of each run (street furniture in the middle and finest levels), but in
+    // the base level stops at the bridge decks.
+    let group_end = |r: usize, g: usize| cell_end[r][g][NCELL - 1];
+    let cls_abs: [[u32; 4]; 4] = std::array::from_fn(|r| std::array::from_fn(|c| if c + 1 < HCLASS.len() { group_end(r, c) } else if r == 0 { group_end(0, 4) } else { group_end(r, GROUPS - 1) }));
+    debug_assert_eq!(cls_abs[0][3] as usize, bld_end[0]);
     let mut indices = m.main;
     indices.extend(m.det);
     indices.extend(m.fine);
@@ -2041,14 +2169,14 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
         indices,
         n_main,
         n_det,
-        n_bld,
         n_far,
-        n_far_tall: n_far + n_far_tall,
         cls: cls_abs,
+        cell_end,
+        cell_bound,
         atlas: mip_chain(cx.atlas, ATLAS, 4),
         atlas_size: ATLAS as u32,
-        ax: [ax.x, ax.y, ax.z, 0.5 - ax.dot(p0)],
-        ay: [ay.x, ay.y, ay.z, 0.5 - ay.dot(p0)],
+        ax: ax4,
+        ay: ay4,
         footprints,
         road_verts: std::mem::take(&mut roads.verts),
         road_idx: std::mem::take(&mut roads.idx),
@@ -2061,4 +2189,128 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
         cells: grown.cells,
         near_idx: grown.near_idx,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn footprint(center: Vec3) -> Footprint {
+        Footprint { min: [0.0; 2], max: [0.0; 2], ring: Vec::new(), base: 0.0, top: 0.0, kind: 0, col: [0; 3], main: (0, 0), det: (0, 0), fine: (0, 0), far: (0, 0), alive: true, center, area: 0.0, sty: [0; 4], gref: 0.0, roof_col: [0; 3], tiers: Vec::new() }
+    }
+
+    /// `by_cell` keeps every index, keeps each building's indices together
+    /// (its ranges still hold its own triangles), orders the runs by sort
+    /// group and cell, and bounds each cell's geometry.
+    #[test]
+    fn by_cell_regroups_runs() {
+        // Points on a 1000 m square: cell = x and y in tenths, one cell per 125 m.
+        let cell_of = |p: Vec3| ((p.z / 125.0) as usize).min(CELLS - 1) * CELLS + ((p.x / 125.0) as usize).min(CELLS - 1);
+        let mut m = Mesh::default();
+        // Buildings made in order (tallest first): group, centre (x, z), triangles per run.
+        let made: [(u8, [f32; 2], [usize; 4]); 5] = [(0, [900.0, 900.0], [2, 1, 0, 1]), (1, [10.0, 10.0], [1, 0, 1, 1]), (3, [600.0, 10.0], [3, 2, 1, 1]), (3, [610.0, 10.0], [1, 1, 1, 1]), (4, [300.0, 700.0], [2, 0, 2, 1])];
+        let mut fps = Vec::new();
+        let mut groups = Vec::new();
+        let mut owner: Vec<usize> = Vec::new(); // building of each vertex
+        for (b, (g, c, tris)) in made.iter().enumerate() {
+            let mut f = footprint(Vec3::new(c[0], 0.0, c[1]));
+            for (r, &n) in tris.iter().enumerate() {
+                let run = match r {
+                    0 => &mut m.main,
+                    1 => &mut m.det,
+                    2 => &mut m.fine,
+                    _ => &mut m.far,
+                };
+                let start = run.len() as u32;
+                for t in 0..n {
+                    let v0 = m.v.len() as u32;
+                    for k in 0..3 {
+                        let p = [c[0] + k as f32 + t as f32, 5.0 * k as f32, c[1]];
+                        m.v.push(BVertex { pos: p, nrm: [0; 4], uv: [0.0; 2], col: [0; 4], sty: [0; 4] });
+                        owner.push(b);
+                    }
+                    run.extend([v0, v0 + 1, v0 + 2]);
+                }
+                let at = (start, run.len() as u32 - start);
+                match r {
+                    0 => f.main = at,
+                    1 => f.det = at,
+                    2 => f.fine = at,
+                    _ => f.far = at,
+                }
+            }
+            fps.push(f);
+            groups.push(*g);
+        }
+        let bld_end = [m.main.len(), m.det.len(), m.fine.len(), m.far.len()];
+        // Street furniture after the buildings in the middle level, in two far-apart cells.
+        for x in [990.0f32, 5.0, 995.0] {
+            let v0 = m.v.len() as u32;
+            for k in 0..3 {
+                m.v.push(BVertex { pos: [x + k as f32, 0.0, 500.0], nrm: [0; 4], uv: [0.0; 2], col: [0; 4], sty: [0; 4] });
+                owner.push(usize::MAX);
+            }
+            m.det.extend([v0, v0 + 1, v0 + 2]);
+        }
+        let before: Vec<Vec<u32>> = vec![m.main.clone(), m.det.clone(), m.fine.clone(), m.far.clone()];
+        let (ends, bound) = by_cell(&mut m, &mut fps, &groups, bld_end, cell_of);
+        let after = [&m.main, &m.det, &m.fine, &m.far];
+        for r in 0..4 {
+            // Nothing lost or added.
+            let (mut a, mut b) = (before[r].clone(), after[r].clone());
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "run {r}");
+            // Ends rise through the groups and cells and close the run.
+            let flat: Vec<u32> = ends[r].iter().flatten().copied().collect();
+            assert!(flat.windows(2).all(|w| w[0] <= w[1]), "run {r}");
+            assert_eq!(*flat.last().unwrap() as usize, after[r].len());
+            // Every (group, cell) range holds only what belongs there.
+            let mut at = 0;
+            for g in 0..GROUPS {
+                for c in 0..NCELL {
+                    let end = ends[r][g][c] as usize;
+                    for &i in &after[r][at..end] {
+                        let b = owner[i as usize];
+                        if b == usize::MAX {
+                            assert_eq!(g, GROUPS - 1);
+                            // (each piece of furniture lies within one cell)
+                            assert_eq!(cell_of(Vec3::from(m.v[i as usize].pos)), c, "furniture by its triangle's cell");
+                        } else {
+                            assert_eq!(groups[b] as usize, g);
+                            assert_eq!(cell_of(fps[b].center), c);
+                        }
+                    }
+                    at = end;
+                }
+            }
+        }
+        // Each building's ranges cover exactly its own indices.
+        for (b, f) in fps.iter().enumerate() {
+            for (r, (s, n)) in [f.main, f.det, f.fine, f.far].into_iter().enumerate() {
+                assert_eq!(n as usize, made[b].2[r] * 3);
+                assert!(after[r][s as usize..(s + n) as usize].iter().all(|&i| owner[i as usize] == b), "building {b} run {r}");
+            }
+        }
+        // Within a cell the buildings keep the order they were made in.
+        let c = cell_of(Vec3::new(600.0, 0.0, 10.0));
+        let in_cell: Vec<usize> = m.main[ends[0][3][c - 1] as usize..ends[0][3][c] as usize].iter().map(|&i| owner[i as usize]).collect();
+        assert_eq!(in_cell, [vec![2; 9], vec![3; 3]].concat());
+        // Bounds enclose every vertex of the cell; empty cells say so.
+        for (i, v) in m.v.iter().enumerate() {
+            let c = if owner[i] == usize::MAX { None } else { Some(cell_of(fps[owner[i]].center)) };
+            if let Some(c) = c {
+                let b = bound[c];
+                assert!((Vec3::from(v.pos) - Vec3::new(b[0], b[1], b[2])).length() <= b[3] + 1e-3);
+            }
+        }
+        assert!(bound[cell_of(Vec3::new(500.0, 0.0, 300.0))][3] < 0.0);
+    }
+
+    #[test]
+    fn sort_groups_cover_classes() {
+        assert_eq!((sort_group(200.0), sort_group(120.0), sort_group(70.0), sort_group(30.0), sort_group(5.0)), (0, 1, 2, 3, 4));
+        assert_eq!((0..=HCLASS.len()).map(sort_groups_to).collect::<Vec<_>>(), vec![0, 1, 2, 3, GROUPS]);
+        assert_eq!((class_groups(0, 3), class_groups(1, 3), class_groups(2, 1)), (3..GROUPS - 1, 3..GROUPS, 1..2));
+    }
 }

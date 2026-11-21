@@ -15,18 +15,24 @@ use crate::trees::{CARDS, LODS, TREE_SPECIES, VARIANTS};
 
 /// Pictures per side of the grid. Must match IMP_N in trees.wgsl.
 pub const N: u32 = 8;
-/// Pixels per side of one picture. Must match IMP_CELL in trees.wgsl.
+/// Pixels per side of one picture (trees.wgsl reads it off the texture).
+/// Half on an integrated GPU: the two atlases are 480 MB at 128, taken from
+/// the system's memory there, and 120 MB at 64.
 pub const CELL: u32 = 128;
-const SIZE: u32 = N * CELL;
+pub const CELL_INTEGRATED: u32 = 64;
 pub const LAYERS: u32 = (TREE_SPECIES * VARIANTS) as u32;
+const FRAMES: u32 = N * N;
 /// Down to two pixels a picture; a box filter of whole texels never mixes
 /// neighbouring pictures, since every level's picture size is a whole number.
-const MIPS: u32 = 7;
-const FRAMES: u32 = N * N;
+fn mips(cell: u32) -> u32 {
+    cell.trailing_zeros()
+}
 const FMT_A: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const FMT_N: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 pub struct Impostors {
+    /// pixels per side of a picture
+    cell: u32,
     tex_a: wgpu::Texture,
     tex_n: wgpu::Texture,
     bounds: wgpu::Buffer,
@@ -66,12 +72,13 @@ struct O { @location(0) a: vec4f, @location(1) n: vec4f };
 "#;
 
 impl Impostors {
-    pub fn new(d: &wgpu::Device, l0: &wgpu::BindGroupLayout, l_tileu: &wgpu::BindGroupLayout, m_tree: &wgpu::ShaderModule) -> Self {
+    pub fn new(d: &wgpu::Device, l0: &wgpu::BindGroupLayout, l_tileu: &wgpu::BindGroupLayout, m_tree: &wgpu::ShaderModule, cell: u32) -> Self {
+        let size = N * cell;
         let tex = |label: &str, format| {
             d.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: LAYERS },
-                mip_level_count: MIPS,
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: LAYERS },
+                mip_level_count: mips(cell),
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
@@ -128,7 +135,7 @@ impl Impostors {
         let l_mip = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("impostor mips"), entries: &[tex_entry(0, d2, false), tex_entry(1, d2, false)] });
         let p_mip = pipe("impostor mips", &[Some(&l_mip)], &m_mip, "vs", "fs", &[], &bake_targets, false, 1);
         let quad = wgpu::util::DeviceExt::create_buffer_init(d, &wgpu::util::BufferInitDescriptor { label: Some("impostor quad"), contents: bytemuck::cast_slice(&[0u32, 1, 2, 2, 1, 3]), usage: wgpu::BufferUsages::INDEX });
-        Self { tex_a, tex_n, bounds, bg_bake, bg, p_bake, p_bake_card, p_mip, l_mip, p_draw, quad, ready: false }
+        Self { cell, tex_a, tex_n, bounds, bg_bake, bg, p_bake, p_bake_card, p_mip, l_mip, p_draw, quad, ready: false }
     }
 
     /// Bounding sphere (centre, radius) of each tree model at full detail:
@@ -161,7 +168,7 @@ impl Impostors {
         let ms = |f| {
             d.create_texture(&wgpu::TextureDescriptor {
                 label: Some("impostor bake target"),
-                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d { width: N * self.cell, height: N * self.cell, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: BAKE_MSAA,
                 dimension: wgpu::TextureDimension::D2,
@@ -198,7 +205,8 @@ impl Impostors {
             let solid = ranges[layer as usize * LODS];
             let cards = ranges[layer as usize * LODS + CARDS as usize];
             for f in 0..FRAMES {
-                rp.set_viewport(((f % N) * CELL) as f32, ((f / N) * CELL) as f32, CELL as f32, CELL as f32, 0.0, 1.0);
+                let c = self.cell;
+                rp.set_viewport(((f % N) * c) as f32, ((f / N) * c) as f32, c as f32, c as f32, 0.0, 1.0);
                 // The instance index tells the shader which model and which picture.
                 let inst = layer * FRAMES + f;
                 rp.set_pipeline(&self.p_bake);
@@ -210,7 +218,7 @@ impl Impostors {
             }
         }
         for layer in 0..LAYERS {
-            for mip in 1..MIPS {
+            for mip in 1..mips(self.cell) {
                 let (sa, sn) = (one(&self.tex_a, layer, mip - 1), one(&self.tex_n, layer, mip - 1));
                 let bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,

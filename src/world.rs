@@ -240,6 +240,14 @@ pub struct World {
     /// graphics settings: multiplies the distances buildings change level of
     /// detail at (buildings.wgsl `city_k`)
     pub city_k: f32,
+    /// terrain tiles kept loaded before the ones unused for a while go, and
+    /// building tiles kept past the reach (the graphics settings: in a city
+    /// each building tile is 50-170 MB of geometry, which an integrated GPU
+    /// takes out of the system's memory)
+    pub tile_cap: usize,
+    pub spare_builds: usize,
+    /// building tiles made (or waiting to go to the GPU) at once
+    pub max_build_jobs: usize,
     /// graphics settings: how far out trees are drawn (m), and the factor on
     /// the distance they turn into impostors at (trees.wgsl `tree_far`, `tree_imp_k`)
     pub tree_far: f32,
@@ -286,7 +294,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, flat_surface: crate::gear::Surface::Asphalt, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tile_cap: 700, spare_builds: 12, max_build_jobs: 12, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new(), flat_surface: crate::gear::Surface::Asphalt }
     }
 
     /// Tiles wanted but not yet asked for (at most 28 are on their way at once).
@@ -1113,13 +1121,23 @@ impl World {
         self.wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
         // (What is not asked for this time stays in `wanted` until the next
         // update clears it: `queued` counts it.)
-        let mut sent = 0;
+        // Building tiles being made or waiting for the GPU: each is some
+        // 150-250 MB of memory in a city until uploaded, so only a few at once
+        // (`max_build_jobs`); the rest wait their turn in `wanted`.
+        let mut building = self.builds.values().filter(|s| matches!(s, BSlot::Loading)).count();
+        let mut sent = vec![false; self.wanted.len()];
         for k in 0..self.wanted.len() {
             if self.in_flight >= 28 {
                 break;
             }
             let (prio, id) = self.wanted[k];
-            sent += 1;
+            if id.z & 0x80 != 0 {
+                if building >= self.max_build_jobs {
+                    continue;
+                }
+                building += 1;
+            }
+            sent[k] = true;
             self.in_flight += 1;
             let evicted = if id.z & 0x80 != 0 {
                 let id = TileId::new(id.z & 0x7f, id.x, id.y);
@@ -1147,16 +1165,38 @@ impl World {
             }
         }
 
-        self.wanted.drain(..sent);
+        let mut k = 0;
+        self.wanted.retain(|_| {
+            k += 1;
+            !sent[k - 1]
+        });
 
         // Evict what has not been needed for a while.
         if self.frame % 120 == 0 {
             let f = self.frame;
-            if self.tiles.len() > 700 {
+            if self.tiles.len() > self.tile_cap {
                 self.tiles.retain(|id, s| id.z <= 3 || !matches!(s, Slot::Ready(t) if f - t.last_used > 600));
+            }
+            // Still over: the least recently used of those not drawn in the
+            // last couple of seconds go too.
+            if self.tiles.len() > self.tile_cap {
+                let mut old: Vec<(u64, TileId)> = self.tiles.iter().filter_map(|(id, s)| match s { Slot::Ready(t) if id.z > 3 && f - t.last_used > 120 => Some((t.last_used, *id)), _ => None }).collect();
+                old.sort_unstable_by_key(|o| o.0);
+                for (_, id) in old.iter().take(self.tiles.len() - self.tile_cap) {
+                    self.tiles.remove(id);
+                }
             }
             self.tiles.retain(|_, s| !matches!(s, Slot::Failed) || f % 3600 != 0);
             self.builds.retain(|_, s| !matches!(s, BSlot::Ready(b) if f - b.last_used > 900));
+            // Of the building tiles left behind (out of reach this frame),
+            // only the most recent few stay, for turning back.
+            let mut behind: Vec<(u64, TileId)> = self.builds.iter().filter_map(|(id, s)| match s { BSlot::Ready(b) if b.last_used != f => Some((b.last_used, *id)), _ => None }).collect();
+            if behind.len() > self.spare_builds {
+                behind.sort_unstable_by_key(|b| b.0);
+                for (_, id) in &behind[..behind.len() - self.spare_builds] {
+                    self.builds.remove(id);
+                }
+            }
             self.fields.retain(|_, s| match s {
                 FSlot::Ready(fl) => f - fl.last_used < 1200,
                 FSlot::Failed => f % 3600 != 0,

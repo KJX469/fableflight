@@ -139,6 +139,9 @@ struct Globals {
   // Precomputed lone-cell turrets (5 per cell: tc.xy, rk, ck) and flanking
   // towers (3 per cell: fo.xy, fr, ft) (storm.rs `turrets`).
   storm_turrets: array<vec4f, 128>,
+  // Graphics settings (graphics.rs): x the water's detail (0 plain, 1 full,
+  // 2 full + screen-space reflections), y 1 while the clouds are drawn.
+  lite: vec4f,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -2609,9 +2612,13 @@ fn snow_track_at(P: vec3f, dist: f32, fw: f32) -> vec4f {
 }
 
 fn shade(P: vec3f, N: vec3f, albedo: vec3f) -> vec3f {
-  let l = light_at(P);
+  return shade_lit(P, N, albedo, light_at(P), shadow_at(P, N));
+}
+// The same with the light at P (light_at) and its shadow for N (shadow_at)
+// already in hand: both cost texture reads (shadow_at up to 36 compares), and
+// the drivers do not merge a second identical call.
+fn shade_lit(P: vec3f, N: vec3f, albedo: vec3f, l: Light, sh: f32) -> vec3f {
   let ndl = max(dot(N, G.sun_dir.xyz), 0.0);
-  let sh = shadow_at(P, N);
   let sky = 0.55 + 0.45 * dot(N, l.upn);
   let moon = moon_light(l.upn, l.h) * max(dot(N, G.moon.xyz), 0.0);
   // Light bounced off the ground: what keeps walls and overhangs from going

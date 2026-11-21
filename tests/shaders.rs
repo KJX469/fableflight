@@ -1,6 +1,9 @@
 //! Parses, validates, and translates every shader to MSL without needing a GPU
 //! (and compiles the translated MSL with Apple's Metal compiler on macOS).
 
+#[path = "../src/single_sample.rs"]
+mod single_sample;
+
 fn msl_check(name: &str, m: &naga::Module, info: &naga::valid::ModuleInfo) -> bool {
     use naga::back::msl;
     let mut resources = msl::BindingMap::default();
@@ -169,6 +172,14 @@ fn shaders_validate() {
     for (name, src) in [("composite", include_str!("../src/shaders/composite.wgsl")), ("clouds", include_str!("../src/shaders/clouds.wgsl"))] {
         ok &= check(name, &format!("{common}\n{sky}\n{src}"));
     }
+    // Without MSAA (graphics settings) the composite and the depth resolve read plain textures.
+    let comp1 = single_sample::for_samples(&format!("{common}\n{sky}\n{}", include_str!("../src/shaders/composite.wgsl")), 1);
+    let res1 = single_sample::for_samples(include_str!("../src/shaders/resolve.wgsl"), 1);
+    for v in [&comp1, &res1] {
+        assert!(!v.contains("_multisampled_2d") && !v.contains("textureNumSamples"), "single-sample variant still multisampled");
+    }
+    ok &= check("composite (no MSAA)", &comp1);
+    ok &= check("resolve (no MSAA)", &res1);
     // plane.wgsl takes the 747 deck's string table: checked (including MSL/Metal) in b747::deck's tests.
     assert!(ok, "shader errors above");
 }

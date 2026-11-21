@@ -83,7 +83,7 @@ impl LastStart {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, hud_cockpit: false, path_marker: false, minimap: true, landing_guidance: true, arcade: false, auto_trim: true, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, taa: true, live_traffic: true, live_weather: true, real_time: true, snow: crate::snow::Mode::Auto, last: None, multiplayer: false, mp_server: "auto".into(), mp_name: String::new() }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, show_hud: true, hud_cockpit: false, path_marker: false, minimap: true, landing_guidance: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, taa: true, live_traffic: true, live_weather: true, real_time: true, snow: crate::snow::Mode::Auto, last: None, multiplayer: false, mp_server: "auto".into(), mp_name: String::new(), auto_trim: true }
     }
 }
 

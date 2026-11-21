@@ -477,7 +477,6 @@ fn blades(uv: vec2f, seed: f32, grow: f32) -> vec4f {
 // nearest the view are blended and lit like the real tree from the albedo,
 // normal, depth and openness to the sky stored for every pixel.
 const IMP_N = 8u;          // must match N in impostor.rs
-const IMP_CELL = 128.0;    // must match CELL in impostor.rs
 const IMP_FRAMES = 64u;    // IMP_N * IMP_N
 const IMP_PAD = 0.94;      // part of a picture's width the bounding sphere fills
 struct ImpBounds { b: array<vec4f, 40> };   // per model: centre, radius
@@ -731,9 +730,11 @@ struct IOut {
   if (ign(in.clip.xy) >= 1.0 - smoothstep(tf * 0.8, tf, length(in.C))) { discard; }
   // Mip level from how big a picture is on screen, a little on the sharp
   // side (the temporal filter takes out the shimmer).
-  let lod = clamp(log2(max(length(dpdx(in.uva.xy)), length(dpdy(in.uva.xy))) * 0.5 * IMP_CELL) - 0.5, 0.0, 6.0);
+  // (pixels per side of a picture: impostor.rs, less on an integrated GPU)
+  let cell = f32(textureDimensions(t_imp_a).x) / f32(IMP_N);
+  let lod = clamp(log2(max(length(dpdx(in.uva.xy)), length(dpdy(in.uva.xy))) * 0.5 * cell) - 0.5, 0.0, f32(textureNumLevels(t_imp_a) - 1u));
   // Keep the filter inside the picture: half a texel of the coarser level.
-  let half = 0.5 * exp2(ceil(lod)) / IMP_CELL;
+  let half = 0.5 * exp2(ceil(lod)) / cell;
   // Mostly the nearest picture alone: blends of three are softer, since
   // leaves do not line up exactly between views. They cross-fade only near
   // the hand-over from one picture to the next.

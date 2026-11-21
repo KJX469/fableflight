@@ -64,6 +64,7 @@ mod weapons;
 mod mvt;
 mod plane;
 mod render;
+mod single_sample;
 mod roads;
 mod skin;
 mod sources;
@@ -149,10 +150,6 @@ const PSHADOW_DEPTH: f32 = 1600.0;
 /// Moonlight relative to sunlight. Far brighter than the real ratio, so a
 /// moonlit night reads like a film's night scene instead of a black screen.
 const MOON_E: f32 = SUN_E * 0.0035;
-/// Default --render-scale on an integrated GPU (Apple silicon and the like):
-/// it shares memory bandwidth and power with the CPU, and the full-resolution
-/// scene is too much for it. The temporal AA and its sharpening hide most of it.
-const INTEGRATED_SCALE: f32 = 0.75;
 /// What a 3D tiles detail level costs, as measured over San Francisco (see
 /// docs/photorealistic-3d-tiles-plan.md).
 fn detail_hint(d: gmaps::Detail) -> &'static str {
@@ -297,10 +294,10 @@ struct Args {
     find_storms: bool,
     vsync: bool,
     taa: bool,
-    /// graphics preset and render resolution for this run (not saved; the
-    /// resolution defaults to INTEGRATED_SCALE on a GPU without memory of its
-    /// own until the graphics settings are saved)
-    graphics: Option<graphics::Level>,
+    /// graphics preset and render resolution for this run (not saved; on a
+    /// GPU without memory of its own the preset defaults to
+    /// `graphics::integrated_preset` until the graphics settings are saved)
+    graphics: Option<graphics::Preset>,
     storm_quality: Option<graphics::Level>,
     render_scale: Option<f32>,
     upscaler: Option<graphics::Upscaler>,
@@ -406,7 +403,7 @@ struct Args {
     mcp_port: u16,
 }
 
-const CLI_USAGE: &str = "fablegame [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--isa-dev K] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--render-scale 0.5..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--fps-log] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "fablegame [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--isa-dev K] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--fps-log] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -869,7 +866,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
             "--speed" => a.speed = Some(req_num(flag, i)?),
             "--graphics" => {
                 let s = req(flag, i)?;
-                a.graphics = Some(graphics::Level::parse(s).filter(|l| *l != graphics::Level::Off).ok_or_else(|| format!("{flag}: expected low, medium, high or ultra, got '{s}'"))?);
+                a.graphics = Some(graphics::Preset::parse(s).ok_or_else(|| format!("{flag}: expected very-low, low, medium, high or ultra, got '{s}'"))?);
             }
             "--storm-quality" => {
                 let s = req(flag, i)?;
@@ -1045,6 +1042,50 @@ impl Loading {
     fn new(now: f64) -> Self {
         Loading { t0: now, most: 0, frac: 0.0, quiet_since: None, done: None, tip: (now * 1000.0) as usize }
     }
+}
+
+/// The bar for the aircraft's shaders: the pipelines done filled in, and a
+/// glint running over the one being compiled (it gives no progress of its own).
+fn prep_bar(p: &egui::Painter, bar: egui::Rect, prep: render::AircraftPrep, now: f64, a: f32) {
+    let fade = |c: egui::Color32| c.gamma_multiply(a);
+    p.rect_filled(bar, menu::R_WIDGET, fade(egui::Color32::from_gray(45)));
+    let step = bar.width() / prep.total.max(1) as f32;
+    let mut done = bar;
+    done.set_width(step * prep.done as f32);
+    p.rect_filled(done, menu::R_WIDGET, fade(menu::ACCENT));
+    let x0 = bar.left() + done.width();
+    let glint = (step * 0.3).min(80.0);
+    let x = x0 + ((now * 0.6).fract() as f32) * (step + glint) - glint;
+    let g = egui::Rect::from_x_y_ranges(x.max(x0)..=(x + glint).min(x0 + step), bar.y_range());
+    if g.width() > 0.0 {
+        p.rect_filled(g, menu::R_WIDGET, fade(menu::ACCENT.gamma_multiply(0.55)));
+    }
+}
+
+/// The aircraft's shaders: the bar `w` wide with its top centred on `top`,
+/// what they are at and why it takes so long under it (wrapped to `w`), on a
+/// dark panel if `panel`.
+fn draw_prep(p: &egui::Painter, top: egui::Pos2, w: f32, prep: render::AircraftPrep, now: f64, a: f32, panel: bool) {
+    let fade = |c: egui::Color32| c.gamma_multiply(a);
+    let s = prep.secs as u64;
+    // (centred line by line: a galley laid out about x = 0)
+    let centred = |text: String, col: egui::Color32| {
+        let mut job = egui::text::LayoutJob::simple(text, menu::caption(), fade(col), w);
+        job.halign = egui::Align::Center;
+        p.layout_job(job)
+    };
+    let head = centred(t!("game.aircraft_shaders", prep.done + 1, prep.total, s / 60, s % 60), menu::ACCENT);
+    let note = centred(t!("game.aircraft_shaders_note").to_string(), egui::Color32::from_gray(150));
+    let bar = egui::Rect::from_center_size(egui::pos2(top.x, top.y + 3.0), egui::vec2(w, 6.0));
+    let y_head = bar.bottom() + 10.0;
+    let y_note = y_head + head.size().y + 4.0;
+    if panel {
+        let r = egui::Rect::from_min_max(egui::pos2(top.x - w / 2.0 - 18.0, top.y - 16.0), egui::pos2(top.x + w / 2.0 + 18.0, y_note + note.size().y + 14.0));
+        p.rect_filled(r, 8.0, egui::Color32::from_black_alpha((190.0 * a) as u8));
+    }
+    prep_bar(p, bar, prep, now, a);
+    p.galley(egui::pos2(top.x, y_head), head, egui::Color32::WHITE);
+    p.galley(egui::pos2(top.x, y_note), note, egui::Color32::WHITE);
 }
 
 /// Shown on the loading screen, one at a time (translated in i18n.rs).
@@ -1413,17 +1454,25 @@ impl Game {
         }
         gfx.vsync &= args.vsync;
         gfx.taa &= args.taa && prefs.taa;
-        let r = pollster::block_on(Renderer::new(window.clone(), gfx.vsync, std::env::var("FABLE_MSAA").ok().and_then(|v| v.parse().ok()).unwrap_or(gfx.samples())))?;
+        // A first start (nothing saved, no preset asked for) leaves the MSAA
+        // and the preset to the GPU found: lighter on integrated graphics.
+        let first = !graphics::Graphics::saved() && args.graphics.is_none();
+        let samples = std::env::var("FABLE_MSAA").ok().and_then(|v| v.parse().ok()).or((!first).then_some(gfx.msaa as u32));
+        let r = pollster::block_on(Renderer::new(window.clone(), gfx.vsync, samples))?;
+        graphics::set_integrated(r.integrated);
+        if r.integrated && first {
+            let p = graphics::integrated_preset(r.vendor);
+            gfx.apply(p);
+            if let Some(l) = args.storm_quality {
+                gfx.storms = l;
+            }
+            log::info!("integrated graphics: {} preset until the graphics settings are saved", p.name());
+        }
         if let Some(u) = args.upscaler {
             gfx.upscaler = u;
         }
         if let Some(sc) = args.render_scale {
             gfx.scale = sc;
-        } else if r.integrated && !graphics::Graphics::saved() {
-            gfx.scale = INTEGRATED_SCALE;
-            if args.graphics.is_none() && args.storm_quality.is_none() {
-                gfx.storms = graphics::Level::Medium;
-            }
         }
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
         {
@@ -1434,6 +1483,8 @@ impl Game {
         }
         let mut r = r;
         r.headless = args.headless;
+        // Scripted pictures show the aircraft from the first frame they take.
+        r.wait_objs = !args.shots.is_empty() || args.record.is_some();
         // Cached scans load offline too; missing ones keep the procedural layer.
         r.load_ground_photos(fetch::Fetcher::new(cache.clone(), args.offline));
         let google_key = args.google_key.clone().or_else(|| std::env::var("FABLE_GOOGLE_KEY").ok().filter(|s| !s.is_empty()));
@@ -2160,6 +2211,7 @@ impl Game {
     fn loading_overlay(&mut self, ctx: &egui::Context) {
         use egui::{Align2, Color32, FontId};
         let Some(l) = self.loading.clone() else { return };
+        let prep = self.r.aircraft_prep();
         let a = match l.done {
             Some(d) => (1.0 - (self.real - d) / Loading::FADE).clamp(0.0, 1.0) as f32,
             None => 1.0,
@@ -2196,6 +2248,10 @@ impl Game {
             y = bar.bottom() + 12.0;
             let what = if l.done.is_some() { t!("game.ready").to_string() } else { t!("game.loading_the_scenery").to_string() };
             p.text(egui::pos2(c.x, y), Align2::CENTER_TOP, what, menu::caption(), fade(Color32::from_gray(150)));
+            // The aircraft's shaders, if they are still being compiled.
+            if let Some(prep) = prep {
+                draw_prep(p, egui::pos2(c.x, y + 40.0), w.min(460.0), prep, self.real, a, false);
+            }
             // A tip, and how to skip.
             let tip = tr_en(LOADING_TIPS[l.tip % LOADING_TIPS.len()]);
             p.text(egui::pos2(c.x, screen.bottom() - 70.0), Align2::CENTER_TOP, tip, menu::body(), fade(Color32::from_gray(200)));
@@ -2205,6 +2261,17 @@ impl Game {
         if l.done.is_none() && ctx.input(|i| i.pointer.any_click()) {
             self.finish_loading();
         }
+    }
+
+    /// A panel at the top while the aircraft's shaders are still compiling
+    /// (it is not drawn until they are): how far, and that it takes a while.
+    fn aircraft_prep_overlay(&self, ctx: &egui::Context) {
+        let Some(prep) = self.r.aircraft_prep() else { return };
+        let screen = ctx.content_rect();
+        let w = (screen.width() - 80.0).clamp(160.0, 460.0);
+        egui::Area::new(egui::Id::unique("aircraft prep")).order(egui::Order::Foreground).fixed_pos(screen.min).interactable(false).show(ctx, |ui| {
+            draw_prep(ui.painter(), egui::pos2(screen.center().x, screen.top() + 40.0), w, prep, self.real, 1.0, true);
+        });
     }
 
     fn start_airport(&mut self, idx: u32, runway: Option<String>, approach: bool, keep_local: bool) {
@@ -6161,7 +6228,7 @@ impl Game {
             vol_o: [0.0; 4],
             vol_u: [0.0; 4],
             // screen space reflections on water and glass, off on low.
-            misc: [near, self.city_glow, if self.gfx.matches() == Some(graphics::Level::Low) { 0.0 } else { 1.0 }, 2.0 * (fov * 0.5).tan() / rh],
+            misc: [near, self.city_glow, if self.gfx.ssr() { 1.0 } else { 0.0 }, 2.0 * (fov * 0.5).tan() / rh],
             csm: [CASC[0] * 2.0 / sres, CASC[1] * 2.0 / sres, CASC[2] * 2.0 / sres, if shadow_on { 1.0 } else { 0.0 }],
             scorch: [[0.0; 4]; 8],
             crater: [[0.0; 4]; 8],
@@ -6220,6 +6287,7 @@ impl Game {
             snow_tr_n: snow_tr[2],
             storm_bounds: [[0.0; 4]; weather::MAX_STORMS],
             storm_turrets: [[0.0; 4]; 8 * weather::MAX_STORMS],
+            lite: [self.gfx.water_detail(), if self.gfx.clouds_on() { 1.0 } else { 0.0 }, 0.0, 0.0],
         };
         if !in_menu {
             let cells = self.wx.storm_cells(cam);
@@ -7178,14 +7246,20 @@ impl Game {
         self.r.set_vsync(g.vsync);
         self.r.ao = g.ao;
         self.r.cloud_step = g.cloud_step();
+        self.r.clouds = g.clouds_on();
+        self.r.cloud_shadows = g.clouds_on() && g.cloud_shadows;
+        self.r.set_cloud_shadow_slices(g.cloud_shadow_slices());
         self.world.lod_k = g.lod_k();
         self.world.reach_k = g.reach();
         self.world.city_k = g.city_k();
+        self.world.tile_cap = g.tile_cap();
+        self.world.spare_builds = g.spare_builds();
+        self.world.max_build_jobs = g.max_build_jobs();
         self.world.tree_far = g.tree_far();
         self.world.tree_imp_k = g.tree_imp_k();
         self.world.cars = g.car_density();
         if self.gfx_applied.is_some() {
-            log::info!("graphics: {} at {:.0}%, shadows {}, clouds {}, storms {}, terrain {}, scenery {}, city {}, trees {}, traffic {}, AO {}", g.matches().map(graphics::Level::name).unwrap_or("custom"), g.scale * 100.0, g.shadows.name(), g.clouds.name(), g.storms.name(), g.terrain.name(), g.scenery.name(), g.city.name(), g.trees.name(), g.cars.name(), g.ao);
+            log::info!("graphics: {} at {:.0}%, shadows {}, clouds {} (shadows {}), storms {}, terrain {}, scenery {}, city {}, trees {}, traffic {}, AO {}, water {}, MSAA {}x", g.matches().map(graphics::Preset::name).unwrap_or("custom"), g.scale * 100.0, g.shadows.name(), g.clouds.name(), g.cloud_shadows, g.storms.name(), g.terrain.name(), g.scenery.name(), g.city.name(), g.trees.name(), g.cars.name(), g.ao, g.water.name(), g.msaa);
         }
         self.gfx_applied = Some(g);
     }
@@ -7825,6 +7899,10 @@ impl Game {
             }
             // The loading screen, over everything else.
             self.loading_overlay(ctx);
+            // After it, the aircraft still waiting for its shaders.
+            if self.loading.is_none() {
+                self.aircraft_prep_overlay(ctx);
+            }
             // Google's imagery has to carry its credit, HUD or not.
             if self.hud_on() || self.google_shown() {
                 self.credits(ctx);

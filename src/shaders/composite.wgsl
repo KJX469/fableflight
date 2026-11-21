@@ -251,6 +251,11 @@ fn breakers(wc: vec2f, sh: ShoreAt, wclass: f32, fp: f32, t: f32) -> Surf {
 }
 
 fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> vec3f {
+  // Plain water (graphics settings, G.lite.x 0: Very Low): one sky reflection
+  // rather than five, one reflected cloud sample rather than three, a flat sea
+  // bed, foam without its lace and bubbles - about half the texture reads of
+  // the full surface.
+  let plain = G.lite.x < 0.5;
   // Keep the water parameters in their physical ranges.
   let wd = max(aux.x, 0.0);
   let wclass = clamp(aux.y, 0.0, 3.0);
@@ -370,15 +375,18 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // horizon, which is where the lifted rays then look.
   let dv = sqrt(3.0 * max(sv2, 0.0));
   let dc = sqrt(3.0 * max(sc2, 0.0));
-  var refl = sky_lut(R) / 3.0;
-  for (var k = 0; k < 4; k++) {
-    let o = select(Tb * select(dc, -dc, k == 3), Ta * select(dv, -dv, k == 1), k < 2);
-    var Rk = reflect(V, normalize(N - o));
-    Rk = normalize(Rk + upn * max(0.03 - dot(Rk, upn), 0.0));
-    refl += sky_lut(Rk) / 6.0;
+  var refl = sky_lut(R);
+  if (!plain) {
+    refl /= 3.0;
+    for (var k = 0; k < 4; k++) {
+      let o = select(Tb * select(dc, -dc, k == 3), Ta * select(dv, -dv, k == 1), k < 2);
+      var Rk = reflect(V, normalize(N - o));
+      Rk = normalize(Rk + upn * max(0.03 - dot(Rk, upn), 0.0));
+      refl += sky_lut(Rk) / 6.0;
+    }
   }
   let mid = G.cloud.y + 400.0;
-  if (l.h < mid) {
+  if (G.lite.y > 0.5 && l.h < mid) {
     // The cloud layer is far away along a grazing reflection: a wave tilt of
     // a few degrees moves the reflected point by kilometres, so neighbouring
     // pixels would see unrelated clouds (sparkling noise). Tame the tilt so
@@ -391,13 +399,14 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     // vertical streak (as the sky above): three reflections across that lobe
     // (centre 2/3, +-sqrt(3) sigma 1/6 each). The haze between the water and
     // a reflected cloud fades it toward the sky colour behind it, as it does
-    // for the clouds seen directly.
+    // for the clouds seen directly. (Plain water: the centre one alone.)
     let ext = atm_ext(atm_density(0.5 * (l.h + mid)));
     let kext = dot(ext, vec3f(0.2126, 0.7152, 0.0722));
     var cov_c = 0.0;
     var tc0 = 0.0;
     var Rc0 = reflect(V, Nc);
-    for (var k = 0; k < 3; k++) {
+    let nk = select(3, 1, plain);
+    for (var k = 0; k < nk; k++) {
       let off = select(select(0.0, dv, k == 1), -dv, k == 2);
       var Rc = reflect(V, normalize(Nc - Ta * off));
       Rc = normalize(Rc + upn * max(0.03 - dot(Rc, upn), 0.0));
@@ -405,7 +414,7 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
       if (k == 0) { tc0 = tc; Rc0 = Rc; }
       if (tc < 90000.0) {
         let cd = cloud_density(P - G.planet.xyz + Rc * tc, mid, true);
-        cov_c += select(1.0 / 6.0, 2.0 / 3.0, k == 0) * (1.0 - exp(-cd * 7.0)) * (1.0 - smoothstep(40000.0, 90000.0, tc)) * exp(-tc * kext);
+        cov_c += select(select(1.0 / 6.0, 2.0 / 3.0, k == 0), 1.0, plain) * (1.0 - exp(-cd * 7.0)) * (1.0 - smoothstep(40000.0, 90000.0, tc)) * exp(-tc * kext);
       }
     }
     if (cov_c > 0.0) {
@@ -451,7 +460,12 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   let Tv = exp(-ext * path);
   let mu = max(dot(upn, G.sun_dir.xyz), 0.0);
   var under = body * (l.sun * (0.3 + 0.7 * mu) / PI + l.amb) * 3.2 * (vec3f(1.0) - Tv);
-  if (luma(Tv) > 0.01) {
+  if (plain && luma(Tv) > 0.01) {
+    // The bed, sand tinted by the photo, without its detail, weed or caustics.
+    let bed = mix(vec3f(0.58, 0.51, 0.37), tint * 2.4, 0.4);
+    let Td = exp(-ext * wd / max(mu, 0.35));
+    under += bed * (l.sun * mu * Td / PI + l.amb * Td) * Tv;
+  } else if (luma(Tv) > 0.01) {
     let bp = wc + vec2f(dot(Rf, e), dot(Rf, n)) * path;
     let near = 1.0 - smoothstep(300.0, 2500.0, dist);
     // Organic bed detail from the 3D noise volume (no visible repeat).
@@ -487,8 +501,13 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   var col = mix(under, refl, clamp(F, 0.0, 1.0)) + spec + point_light(P, upn) * body * 4.0;
 
   // Foam: breakers along the shore, whitecaps where the crests fold over.
-  let fa = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 37.0 + vec2f(0.012, 0.007) * t, t * 0.02), 0.0);
-  let fb = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 5.3 - vec2f(0.02, 0.03) * t, 0.4 + t * 0.03), 0.0);
+  // (plain water: the noise layers at their means)
+  var fa = vec4f(0.5);
+  var fb = vec4f(0.55 / 1.1);
+  if (!plain) {
+    fa = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 37.0 + vec2f(0.012, 0.007) * t, t * 0.02), 0.0);
+    fb = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 5.3 - vec2f(0.02, 0.03) * t, 0.4 + t * 0.03), 0.0);
+  }
   // The noise volume has no mips: fade each layer to its mean before the
   // pixel footprint outgrows its features, or it sparkles as white speckle.
   let lace = mix(fb.g * 0.6 + fb.b * 0.5, 0.55, smoothstep(0.12, 0.7, fp));
@@ -507,14 +526,17 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
   // threshold over noise stretched along the wind (in the surface's own
   // coordinates too) that keeps the cover on average. Far off, where the
   // pattern would sparkle, the mips' mean cover shows instead.
-  let wl = wc + (x0 - xo);
-  let wwl = vec2f(dot(wl, wdir) - 0.03 * wind * t, dot(wl, wn));
-  let sA = textureSampleLevel(t_noise, s_repeat, vec3f(wwl.x / 40.0, wwl.y / 12.0, 0.29), 0.0);
-  let sB = textureSampleLevel(t_noise, s_repeat, vec3f(wwl.x / 12.0, wwl.y / 4.0, 0.63), 0.0);
-  // (the noise volume has no mips: each layer goes to its mean before its
-  // texels shrink under a pixel)
-  let nc = (sA.r - 0.5) * 0.7 + (mix(sB.g, 0.55, smoothstep(0.04, 0.2, fp)) - 0.55) * 0.5;
-  let spent = mix(smoothstep(-0.1, 0.1, fz.r - 0.5 - nc * 2.2), fz.r, smoothstep(0.15, 0.8, fp));
+  var spent = fz.r;
+  if (!plain) {
+    let wl = wc + (x0 - xo);
+    let wwl = vec2f(dot(wl, wdir) - 0.03 * wind * t, dot(wl, wn));
+    let sA = textureSampleLevel(t_noise, s_repeat, vec3f(wwl.x / 40.0, wwl.y / 12.0, 0.29), 0.0);
+    let sB = textureSampleLevel(t_noise, s_repeat, vec3f(wwl.x / 12.0, wwl.y / 4.0, 0.63), 0.0);
+    // (the noise volume has no mips: each layer goes to its mean before its
+    // texels shrink under a pixel)
+    let nc = (sA.r - 0.5) * 0.7 + (mix(sB.g, 0.55, smoothstep(0.04, 0.2, fp)) - 0.55) * 0.5;
+    spent = mix(smoothstep(-0.1, 0.1, fz.r - 0.5 - nc * 2.2), fz.r, smoothstep(0.15, 0.8, fp));
+  }
   // The breaking itself: solid white right on the folding crest, sharp at
   // this pixel's own fold, where the foam is fresh.
   let crest = fz.g * smoothstep(fz.b + 0.12, fz.b - 0.08, J01);
@@ -543,10 +565,13 @@ fn water(P: vec3f, V: vec3f, dist: f32, tint: vec3f, aux: vec4f, jit: f32) -> ve
     foam = max(foam, clamp(k * (1.0 + 0.9 * fresh) - (1.0 - lc) * (1.0 - k) * 1.8, 0.0, 1.0) * fnear);
   }
   // Foam is bubbles, not paint: holes and lace within it, close up.
-  let bub = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 2.1, 0.2 + t * 0.04), 0.0);
-  let bub2 = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 0.55, 0.6), 0.0);
-  let holes = smoothstep(0.3, 0.65, bub.r * 0.6 + bub2.g * 0.5);
-  foam *= mix(1.0, 0.45 + 0.7 * holes, 1.0 - smoothstep(0.04, 0.2, fp));
+  var bub2 = vec4f(0.5);
+  if (!plain && foam > 0.0) {
+    let bub = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 2.1, 0.2 + t * 0.04), 0.0);
+    bub2 = textureSampleLevel(t_noise, s_repeat, vec3f(wc / 0.55, 0.6), 0.0);
+    let holes = smoothstep(0.3, 0.65, bub.r * 0.6 + bub2.g * 0.5);
+    foam *= mix(1.0, 0.45 + 0.7 * holes, 1.0 - smoothstep(0.04, 0.2, fp));
+  }
   // (bubbles just under the surface: the water pale and milky green)
   col = mix(col, vec3f(0.12, 0.26, 0.25) * (l.sun * (0.3 + 0.7 * mu) / PI + l.amb), aer * 0.55 * fnear);
   col = mix(col, vec3f(0.78, 0.8, 0.8) * (0.85 + 0.3 * bub2.b) * (l.sun * (0.4 + 0.6 * mu) / PI + l.amb), foam);
