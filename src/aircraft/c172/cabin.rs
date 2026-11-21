@@ -947,19 +947,7 @@ pub const MOUSE_ACTIONS: &[&str] = &["prop_up", "prop_down", "cowl_open", "cowl_
     "fuel_control_l", "fuel_control_r", "battery_l", "battery_r"];
 
 pub fn action_label(id: &str) -> &str {
-    match id {
-        "prop_up" => "Propeller RPM up", "prop_down" => "Propeller RPM down",
-        "cowl_open" => "Open cowl flaps", "cowl_close" => "Close cowl flaps",
-        "brake_left" => "Left toe brake", "brake_right" => "Right toe brake",
-        "nav_next" => "Tune next NAV station", "nav_prev" => "Tune previous NAV station",
-        "adf_next" => "Tune next ADF station", "adf_prev" => "Tune previous ADF station",
-        "landing_lights" => "Landing lights", "fuel_valve" => "Fuel selector",
-        "fuel_next" => "Next fuel tank", "fuel_prev" => "Previous fuel tank",
-        "ap_vs" => "Autopilot: vertical speed mode", "ap_vs_up" => "Vertical speed up", "ap_vs_down" => "Vertical speed down",
-        "ap_at" => "Autothrottle on / off", "ap_spd_up" => "Speed target up", "ap_spd_down" => "Speed target down",
-        "fuel_control_l" => "L fuel control switch", "fuel_control_r" => "R fuel control switch",
-        "battery_l" => "L main battery", "battery_r" => "R main battery", _ => id,
-    }
+    crate::i18n::try_tr(&format!("action.{id}")).unwrap_or(id)
 }
 
 pub fn moving_piece(h: &Hotspot) -> Option<&'static str> {

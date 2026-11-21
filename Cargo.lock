@@ -844,6 +844,7 @@ version = "1.0.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
+ "ash",
  "bytemuck",
  "crossbeam-channel",
  "dirs",
@@ -861,6 +862,7 @@ dependencies = [
  "naga",
  "parking_lot 0.13.0",
  "pollster",
+ "ring",
  "rodio",
  "roxmltree",
  "rustc-hash 2.1.3",

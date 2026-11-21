@@ -236,15 +236,15 @@ pub fn does(id: &str, rocket: bool) -> Option<Does> {
 pub fn label(id: &str) -> &'static str {
     use crate::i18n::t;
     match id {
-        "view_ahead" => t!("Look ahead", "Regarder devant"),
-        "view_down" => t!("Look down / behind", "Regarder en bas / derrière"),
-        "view_left" => t!("Look left", "Regarder à gauche"),
-        "view_right" => t!("Look right", "Regarder à droite"),
-        "view_reset" => t!("Reset the view", "Recentrer la vue"),
-        "ap" => t!("Autopilot (rocket: autoland)", "Pilote auto (fusée : atterrissage)"),
-        "master_arm" => t!("Master arm (rocket: engines)", "Armement maître (fusée : moteurs)"),
-        "target_lock" => t!("Lock target (rocket: staging)", "Verrouiller (fusée : largage)"),
-        "fire_missile" => t!("Fire missile", "Tirer un missile"),
+        "view_ahead" => t!("gamepad.look_ahead"),
+        "view_down" => t!("gamepad.look_down_behind"),
+        "view_left" => t!("gamepad.look_left"),
+        "view_right" => t!("gamepad.look_right"),
+        "view_reset" => t!("gamepad.reset_the_view"),
+        "ap" => t!("gamepad.autopilot_rocket_autoland"),
+        "master_arm" => t!("gamepad.master_arm_rocket_engines"),
+        "target_lock" => t!("gamepad.lock_target_rocket_staging"),
+        "fire_missile" => t!("gamepad.fire_missile"),
         _ => crate::bind::ACTIONS.iter().find(|a| a.id == id).map(|a| a.label()).unwrap_or("?"),
     }
 }
@@ -283,12 +283,12 @@ impl PadAxis {
     pub fn label(self) -> &'static str {
         use crate::i18n::t;
         match self {
-            PadAxis::Pitch => t!("Pitch", "Profondeur"),
-            PadAxis::Roll => t!("Roll", "Roulis"),
-            PadAxis::Rudder => t!("Rudder", "Palonnier"),
-            PadAxis::Throttle => t!("Throttle up / down", "Gaz plus / moins"),
-            PadAxis::LookX => t!("Look left / right", "Regarder à gauche / droite"),
-            PadAxis::LookY => t!("Look up / down", "Regarder en haut / bas"),
+            PadAxis::Pitch => t!("gamepad.pitch"),
+            PadAxis::Roll => t!("gamepad.roll"),
+            PadAxis::Rudder => t!("gamepad.rudder"),
+            PadAxis::Throttle => t!("gamepad.throttle_up_down"),
+            PadAxis::LookX => t!("gamepad.look_left_right"),
+            PadAxis::LookY => t!("gamepad.look_up_down"),
         }
     }
 
@@ -296,12 +296,12 @@ impl PadAxis {
     pub fn how(self) -> &'static str {
         use crate::i18n::t;
         match self {
-            PadAxis::Pitch => t!("Pull the stick back (nose up), then let it go.", "Tirez le stick (cabrer), puis lâchez-le."),
-            PadAxis::Roll => t!("Push the stick right, then let it go.", "Poussez le stick à droite, puis lâchez-le."),
-            PadAxis::Rudder => t!("Push the stick right, or squeeze RT, then let go.", "Poussez le stick à droite, ou pressez RT, puis lâchez."),
-            PadAxis::Throttle => t!("Push the stick up (more power), then let it go.", "Poussez le stick vers le haut (plus de gaz), puis lâchez-le."),
-            PadAxis::LookX => t!("Push the stick right, then let it go.", "Poussez le stick à droite, puis lâchez-le."),
-            PadAxis::LookY => t!("Push the stick up, then let it go.", "Poussez le stick vers le haut, puis lâchez-le."),
+            PadAxis::Pitch => t!("gamepad.pull_the_stick_back_nose"),
+            PadAxis::Roll => t!("gamepad.push_the_stick_right_then"),
+            PadAxis::Rudder => t!("gamepad.push_the_stick_right_or"),
+            PadAxis::Throttle => t!("gamepad.push_the_stick_up_more"),
+            PadAxis::LookX => t!("gamepad.push_the_stick_right_then"),
+            PadAxis::LookY => t!("gamepad.push_the_stick_up_then"),
         }
     }
 
@@ -343,10 +343,10 @@ impl Stick {
     pub fn spec(self) -> String {
         use crate::i18n::t;
         match self {
-            Stick::LX => format!("LS {}", t!("left-right", "gauche-droite")),
-            Stick::LY => format!("LS {}", t!("up-down", "haut-bas")),
-            Stick::RX => format!("RS {}", t!("left-right", "gauche-droite")),
-            Stick::RY => format!("RS {}", t!("up-down", "haut-bas")),
+            Stick::LX => format!("LS {}", t!("gamepad.left_right")),
+            Stick::LY => format!("LS {}", t!("gamepad.up_down")),
+            Stick::RX => format!("RS {}", t!("gamepad.left_right")),
+            Stick::RY => format!("RS {}", t!("gamepad.up_down")),
             Stick::Trig => "LT / RT".to_string(),
         }
     }
@@ -675,7 +675,7 @@ pub fn flying_rows() -> Vec<(String, String)> {
         let mut c = s.chars();
         c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
     };
-    NOW.with(|n| rows(&n.borrow())).into_iter().map(|(k, w)| (k, low(crate::i18n::tr(w)))).collect()
+    NOW.with(|n| rows(&n.borrow())).into_iter().map(|(k, w)| (k, low(crate::i18n::tr_en(w)))).collect()
 }
 
 fn rows(m: &PadMap) -> Vec<(String, &'static str)> {
@@ -710,7 +710,7 @@ fn rows(m: &PadMap) -> Vec<(String, &'static str)> {
                 continue;
             }
         }
-        let spec = if c == Y_ALONE { crate::i18n::t!("Y (let go)", "Y (relâché)").to_string() } else { c.spec() };
+        let spec = if c == Y_ALONE { crate::i18n::t!("gamepad.y_let_go").to_string() } else { c.spec() };
         rows.push((spec, label(id)));
     }
     rows.push(("A".into(), "fly again after a crash"));

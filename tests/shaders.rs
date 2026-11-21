@@ -135,6 +135,8 @@ fn shaders_validate() {
     ok &= check("detail", include_str!("../src/shaders/detail.wgsl"));
     ok &= check("ocean", include_str!("../src/shaders/ocean.wgsl"));
     ok &= check("shore", include_str!("../src/shaders/shore.wgsl"));
+    // AMD FSR 3.1 upscaler port: standalone compute passes (fsr3.rs).
+    ok &= check("fsr3", include_str!("../src/shaders/fsr3.wgsl"));
     for (name, src) in [
         ("lut", include_str!("../src/shaders/lut.wgsl")),
         ("terrain", include_str!("../src/shaders/terrain.wgsl")),

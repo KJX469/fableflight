@@ -284,7 +284,7 @@ impl Menu {
 
 // ---- shared look and widgets for the start screen and the in-flight menu
 
-use crate::i18n::tr;
+use crate::i18n::tr_en;
 use crate::padui::{self, Hint};
 use egui::{Color32, RichText, Stroke};
 
@@ -492,7 +492,7 @@ pub fn seg<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, text: &st
 
 /// an on or off switch.
 pub fn switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let t = if *on { crate::t!("On", "Activé") } else { crate::t!("Off", "Désactivé") };
+    let t = if *on { crate::t!("menu.on") } else { crate::t!("menu.off") };
     toggle(ui, on, t)
 }
 
@@ -567,7 +567,7 @@ impl Page {
     /// The name shown on its tab, in the interface language (`name` stays
     /// English: the command line's `--pause-menu` goes by it).
     pub fn label(self) -> &'static str {
-        crate::i18n::tr(self.name())
+        crate::i18n::tr_en(self.name())
     }
 
     /// on the flight panel (Tab), not the pause menu
@@ -948,9 +948,9 @@ pub fn key_cap(ui: &mut egui::Ui, keys: &str) -> egui::Response {
 
 /// One `keys … action` row of the controls list.
 pub fn key_row(ui: &mut egui::Ui, keys: &'static str, what: &'static str) {
-    key_cap(ui, tr(keys));
+    key_cap(ui, tr_en(keys));
     // Truncate the description so a long one can't spill into the next column.
-    ui.add(egui::Label::new(RichText::new(tr(what)).font(body()).color(TEXT)).truncate());
+    ui.add(egui::Label::new(RichText::new(tr_en(what)).font(body()).color(TEXT)).truncate());
     ui.end_row();
 }
 
@@ -986,7 +986,7 @@ pub const PAD_MENUS: &[(&str, &[(&str, &str)])] = &[
 pub fn controls_list(ui: &mut egui::Ui) {
     if padui::active() {
         ui.columns(2, |cols| {
-            heading(&mut cols[0], tr("GAMEPAD · FLYING"));
+            heading(&mut cols[0], tr_en("GAMEPAD · FLYING"));
             egui::Grid::new("pad_fly").num_columns(2).min_row_height(23.0).spacing([10.0, 3.0]).show(&mut cols[0], |ui| {
                 // (as Settings › Controls › Gamepad has it)
                 for (k, w) in crate::padmap::flying_rows() {
@@ -994,10 +994,10 @@ pub fn controls_list(ui: &mut egui::Ui) {
                 }
             });
             for (title, rows) in PAD_MENUS {
-                heading(&mut cols[1], tr(title));
+                heading(&mut cols[1], tr_en(title));
                 egui::Grid::new(("pad", *title)).num_columns(2).min_row_height(23.0).spacing([10.0, 3.0]).show(&mut cols[1], |ui| {
                     for (k, w) in rows.iter() {
-                        pad_row(ui, k, tr(w));
+                        pad_row(ui, k, tr_en(w));
                     }
                 });
                 cols[1].add_space(4.0);
@@ -1012,7 +1012,7 @@ pub fn controls_list(ui: &mut egui::Ui) {
             ui.set_max_width(col_w);
             let range = if c == 0 { 0..count } else { count..CONTROLS.len() };
             for (title, rows) in &CONTROLS[range] {
-                heading(ui, tr(title));
+                heading(ui, tr_en(title));
                 egui::Grid::new(("keys", *title))
                     .num_columns(2)
                     .min_row_height(19.0)
@@ -1041,7 +1041,7 @@ pub fn heading_compass(ui: &mut egui::Ui, heading: &mut f64) {
             }
         }
     }
-    response.on_hover_text(t!("Click or drag to choose your heading", "Cliquez ou glissez pour choisir le cap"));
+    response.on_hover_text(t!("menu.click_or_drag_to_choose"));
     let painter = ui.painter();
     painter.circle_filled(center, 39.0, Color32::from_rgb(20, 26, 33));
     painter.circle_stroke(center, 39.0, egui::Stroke::new(1.0, DIM));
@@ -1055,7 +1055,7 @@ pub fn heading_compass(ui: &mut egui::Ui, heading: &mut f64) {
         ("N", egui::vec2(0.0, -49.0)),
         ("E", egui::vec2(49.0, 0.0)),
         ("S", egui::vec2(0.0, 49.0)),
-        (t!("W", "O"), egui::vec2(-49.0, 0.0)),
+        (t!("menu.w"), egui::vec2(-49.0, 0.0)),
     ] {
         painter.text(center + offset, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), if label == "N" { ACCENT } else { TEXT });
     }

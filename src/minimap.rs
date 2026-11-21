@@ -181,7 +181,7 @@ fn tile_offset(x: f64, center: f64, n: f64) -> f64 {
 
 fn distance_label(meters: f64, lang: crate::i18n::Lang) -> String {
     let text = if meters >= 1000.0 { format!("{:.1} km", meters / 1000.0) } else { format!("{meters:.0} m") };
-    if lang == crate::i18n::Lang::Fr { text.replace('.', ",") } else { text }
+    text.replace('.', lang.text("number.decimal_point"))
 }
 
 impl Minimap {
@@ -459,9 +459,9 @@ impl Minimap {
                 }
                 if !supported || drawn == 0 {
                     painter.text(rect.center() + Vec2::new(0.0, 32.0), egui::Align2::CENTER_CENTER,
-                        if !supported { crate::t!("Map unavailable near poles", "Carte indisponible aux pôles") }
-                        else if if self.plan { self.map_pending.is_some() } else { self.pending.is_some() } { crate::t!("Loading map…", "Chargement…") }
-                        else { crate::t!("Imagery unavailable", "Images indisponibles") }, egui::FontId::proportional(12.0), Color32::WHITE);
+                        if !supported { crate::t!("minimap.map_unavailable_near_poles") }
+                        else if if self.plan { self.map_pending.is_some() } else { self.pending.is_some() } { crate::t!("minimap.loading_map") }
+                        else { crate::t!("minimap.imagery_unavailable") }, egui::FontId::proportional(12.0), Color32::WHITE);
                 }
                 // the aircraft.
                 let arrow = [Vec2::new(0.0, -12.0), Vec2::new(8.5, 9.0), Vec2::new(0.0, 4.5), Vec2::new(-8.5, 9.0)];
@@ -489,7 +489,7 @@ impl Minimap {
                 let knob = rect.right_top() + Vec2::new(-12.0, 12.0);
                 let resize = ui.interact(egui::Rect::from_center_size(knob, Vec2::splat(18.0)), egui::Id::unique("minimap_resize"), egui::Sense::drag())
                     .on_hover_cursor(egui::CursorIcon::ResizeNeSw)
-                    .on_hover_text(crate::t!("Drag to resize the map", "Glisser pour redimensionner la carte"));
+                    .on_hover_text(crate::t!("minimap.drag_to_resize_the_map"));
                 if resize.drag_started() { self.resize_start = diameter; }
                 if resize.dragged() {
                     let d = resize.total_drag_delta().unwrap_or_default();
@@ -512,9 +512,9 @@ mod tests {
     use super::*;
     #[test]
     fn scale_uses_localized_decimal_separator() {
-        assert_eq!(distance_label(1500.0, crate::i18n::Lang::Fr), "1,5 km");
-        assert_eq!(distance_label(1500.0, crate::i18n::Lang::En), "1.5 km");
-        assert_eq!(distance_label(250.0, crate::i18n::Lang::Fr), "250 m");
+        assert_eq!(distance_label(1500.0, crate::i18n::Lang::parse("fr").unwrap()), "1,5 km");
+        assert_eq!(distance_label(1500.0, crate::i18n::Lang::EN), "1.5 km");
+        assert_eq!(distance_label(250.0, crate::i18n::Lang::parse("fr").unwrap()), "250 m");
     }
     #[test]
     fn heading_up_keeps_aircraft_up_and_rotates_east_up() {

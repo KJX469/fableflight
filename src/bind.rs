@@ -41,12 +41,12 @@ impl AxisAct {
     pub fn label(self) -> &'static str {
         use crate::i18n::t;
         match self {
-            AxisAct::Pitch => t!("Pitch", "Profondeur"),
-            AxisAct::Roll => t!("Roll", "Roulis"),
-            AxisAct::Yaw => t!("Rudder", "Palonnier"),
-            AxisAct::Throttle => t!("Throttle", "Gaz"),
-            AxisAct::BrakeLeft => t!("Left toe brake", "Frein gauche"),
-            AxisAct::BrakeRight => t!("Right toe brake", "Frein droit"),
+            AxisAct::Pitch => t!("bind.pitch"),
+            AxisAct::Roll => t!("bind.roll"),
+            AxisAct::Yaw => t!("bind.rudder"),
+            AxisAct::Throttle => t!("bind.throttle"),
+            AxisAct::BrakeLeft => t!("bind.left_toe_brake"),
+            AxisAct::BrakeRight => t!("bind.right_toe_brake"),
         }
     }
 
@@ -54,12 +54,12 @@ impl AxisAct {
     pub fn how(self) -> &'static str {
         use crate::i18n::t;
         match self {
-            AxisAct::Pitch => t!("Pull the stick back, nose up, all the way.", "Tirez le manche à fond vers vous (cabrer)."),
-            AxisAct::Roll => t!("Push the stick all the way right.", "Poussez le manche à fond vers la droite."),
-            AxisAct::Yaw => t!("Push the right rudder pedal all the way.", "Enfoncez à fond la pédale de droite."),
-            AxisAct::Throttle => t!("Push the throttle all the way forward.", "Poussez la manette des gaz à fond."),
-            AxisAct::BrakeLeft => t!("Press the left toe brake all the way.", "Appuyez à fond sur le frein gauche."),
-            AxisAct::BrakeRight => t!("Press the right toe brake all the way.", "Appuyez à fond sur le frein droit."),
+            AxisAct::Pitch => t!("bind.pull_the_stick_back_nose"),
+            AxisAct::Roll => t!("bind.push_the_stick_all_the"),
+            AxisAct::Yaw => t!("bind.push_the_right_rudder_pedal"),
+            AxisAct::Throttle => t!("bind.push_the_throttle_all_the"),
+            AxisAct::BrakeLeft => t!("bind.press_the_left_toe_brake"),
+            AxisAct::BrakeRight => t!("bind.press_the_right_toe_brake"),
         }
     }
 
@@ -86,81 +86,80 @@ pub struct Action {
     pub id: &'static str,
     pub key: KeyCode,
     pub keyboard: bool,
-    en: &'static str,
-    fr: &'static str,
 }
 
 impl Action {
+    /// What it does, from the `action.<id>` key of the language files.
     pub fn label(&self) -> &'static str {
-        if crate::i18n::is_fr() { self.fr } else { self.en }
+        crate::i18n::tr(&format!("action.{}", self.id))
     }
 }
 
-const fn act(id: &'static str, key: KeyCode, en: &'static str, fr: &'static str) -> Action {
-    Action { id, key, keyboard: true, en, fr }
+const fn act(id: &'static str, key: KeyCode) -> Action {
+    Action { id, key, keyboard: true }
 }
 
 pub const ACTIONS: &[Action] = &[
-    act("pitch_down", KeyCode::KeyW, "Pitch down", "Piquer"),
-    act("pitch_up", KeyCode::KeyS, "Pitch up", "Cabrer"),
-    act("roll_left", KeyCode::KeyA, "Roll left", "Roulis à gauche"),
-    act("roll_right", KeyCode::KeyD, "Roll right", "Roulis à droite"),
-    act("rudder_left", KeyCode::KeyQ, "Rudder left", "Palonnier à gauche"),
-    act("rudder_right", KeyCode::KeyE, "Rudder right", "Palonnier à droite"),
-    act("throttle_up", KeyCode::ShiftLeft, "Throttle up", "Plus de gaz"),
-    act("throttle_down", KeyCode::ControlLeft, "Throttle down", "Moins de gaz"),
-    act("trim_down", KeyCode::Numpad7, "Trim nose down", "Trim à piquer"),
-    act("trim_up", KeyCode::Numpad1, "Trim nose up", "Trim à cabrer"),
-    act("brakes", KeyCode::KeyB, "Wheel brakes", "Freins de roues"),
-    act("parking_brake", KeyCode::Period, "Parking brake", "Frein de parc"),
-    act("flaps_down", KeyCode::KeyF, "Flaps down a notch", "Volets : sortir d'un cran"),
-    act("flaps_up", KeyCode::KeyV, "Flaps up a notch", "Volets : rentrer d'un cran"),
-    act("gear", KeyCode::KeyL, "Landing gear", "Train d'atterrissage"),
-    act("speedbrake", KeyCode::Slash, "Speedbrake", "Aérofreins"),
-    act("canopy", KeyCode::Digit6, "Canopy open / shut", "Verrière : ouvrir / fermer"),
-    act("reversers", KeyCode::KeyZ, "Thrust reversers (hold)", "Inverseurs de poussée (maintenir)"),
-    act("boost", KeyCode::Space, "Boost / afterburner", "Boost / postcombustion"),
-    act("engines", KeyCode::Digit1, "Rocket: which engines burn", "Fusée : choix des moteurs allumés"),
-    act("stage", KeyCode::Backspace, "Rocket: drop the booster", "Fusée : larguer le booster"),
-    act("autoland", KeyCode::Digit2, "Rocket: the ship lands itself", "Fusée : atterrissage automatique du vaisseau"),
-    act("master_arm", KeyCode::Digit3, "Master arm", "Armement maître"),
-    act("target_lock", KeyCode::Digit4, "Lock / cycle target", "Verrouiller / changer de cible"),
-    act("fire_missile", KeyCode::Digit5, "Fire missile", "Tirer un missile"),
-    act("engine_auto", KeyCode::F4, "Start / stop the engine", "Démarrer / couper le moteur"),
-    act("master", KeyCode::Insert, "Battery master switch", "Batterie (interrupteur général)"),
-    act("ignition", KeyCode::KeyI, "Magnetos (jets: fuel controls)", "Magnétos (jets : robinets carburant)"),
-    act("starter", KeyCode::KeyO, "Starter", "Démarreur"),
-    act("mixture_rich", KeyCode::PageUp, "Mixture richer", "Mélange plus riche"),
-    act("mixture_lean", KeyCode::PageDown, "Mixture leaner", "Mélange plus pauvre"),
-    act("obs_left", KeyCode::BracketLeft, "OBS course left", "OBS : course à gauche"),
-    act("obs_right", KeyCode::BracketRight, "OBS course right", "OBS : course à droite"),
-    act("baro_qnh", KeyCode::KeyX, "Altimeter to the QNH", "Caler l'altimètre au QNH"),
-    act("ap", KeyCode::F5, "Autopilot on / off", "Pilote automatique : engager / couper"),
-    act("ap_hdg", KeyCode::Digit7, "Autopilot: heading mode", "Pilote automatique : mode cap (HDG)"),
-    act("ap_nav", KeyCode::Digit8, "Autopilot: follow NAV 1", "Pilote automatique : suivre la NAV 1"),
-    act("ap_apr", KeyCode::Digit9, "Autopilot: ILS approach", "Pilote automatique : approche ILS"),
-    act("ap_alt", KeyCode::Digit0, "Autopilot: hold the altitude", "Pilote automatique : tenue d'altitude"),
-    act("ap_hdg_left", KeyCode::Minus, "Heading bug left", "Consigne de cap à gauche"),
-    act("ap_hdg_right", KeyCode::Equal, "Heading bug right", "Consigne de cap à droite"),
-    act("ap_alt_down", KeyCode::Semicolon, "Altitude preselect down", "Altitude présélectionnée : moins"),
-    act("ap_alt_up", KeyCode::Quote, "Altitude preselect up", "Altitude présélectionnée : plus"),
-    act("heading_sync", KeyCode::KeyK, "Heading indicator to compass", "Recaler le conservateur de cap"),
-    act("camera", KeyCode::KeyC, "Chase / cockpit camera", "Caméra extérieure / cockpit"),
-    act("tail_view", KeyCode::F6, "Toggle fixed rear view", "Activer / quitter la vue arrière fixe"),
-    act("hud", KeyCode::KeyH, "Hide / show the HUD", "Masquer / afficher le HUD"),
-    act("minimap", KeyCode::Backquote, "Hide / show the minimap", "Masquer / afficher la mini-carte"),
-    act("goto", KeyCode::KeyG, "Go to a place", "Aller à un lieu"),
-    act("respawn", KeyCode::KeyR, "Respawn in the air", "Réapparaître en vol"),
-    act("pause", KeyCode::KeyP, "Pause without the menu", "Pause sans le menu"),
-    act("sound", KeyCode::KeyU, "Sound on / off", "Son activé / coupé"),
-    act("time_forward", KeyCode::KeyT, "Time of day forward", "Avancer l'heure"),
-    act("time_back", KeyCode::KeyY, "Time of day back", "Reculer l'heure"),
-    act("clouds_more", KeyCode::KeyN, "More clouds", "Plus de nuages"),
-    act("clouds_less", KeyCode::KeyM, "Fewer clouds", "Moins de nuages"),
-    act("taa", KeyCode::F2, "Anti-aliasing on / off", "Anticrénelage activé / désactivé"),
-    act("screenshot", KeyCode::F12, "Screenshot", "Capture d'écran"),
-    Action { id: "pause_menu", key: KeyCode::Escape, keyboard: false, en: "Pause menu", fr: "Menu pause" },
-    Action { id: "flight_panel", key: KeyCode::Tab, keyboard: false, en: "Flight panel", fr: "Panneau de vol" },
+    act("pitch_down", KeyCode::KeyW),
+    act("pitch_up", KeyCode::KeyS),
+    act("roll_left", KeyCode::KeyA),
+    act("roll_right", KeyCode::KeyD),
+    act("rudder_left", KeyCode::KeyQ),
+    act("rudder_right", KeyCode::KeyE),
+    act("throttle_up", KeyCode::ShiftLeft),
+    act("throttle_down", KeyCode::ControlLeft),
+    act("trim_down", KeyCode::Numpad7),
+    act("trim_up", KeyCode::Numpad1),
+    act("brakes", KeyCode::KeyB),
+    act("parking_brake", KeyCode::Period),
+    act("flaps_down", KeyCode::KeyF),
+    act("flaps_up", KeyCode::KeyV),
+    act("gear", KeyCode::KeyL),
+    act("speedbrake", KeyCode::Slash),
+    act("canopy", KeyCode::Digit6),
+    act("reversers", KeyCode::KeyZ),
+    act("boost", KeyCode::Space),
+    act("engines", KeyCode::Digit1),
+    act("stage", KeyCode::Backspace),
+    act("autoland", KeyCode::Digit2),
+    act("master_arm", KeyCode::Digit3),
+    act("target_lock", KeyCode::Digit4),
+    act("fire_missile", KeyCode::Digit5),
+    act("engine_auto", KeyCode::F4),
+    act("master", KeyCode::Insert),
+    act("ignition", KeyCode::KeyI),
+    act("starter", KeyCode::KeyO),
+    act("mixture_rich", KeyCode::PageUp),
+    act("mixture_lean", KeyCode::PageDown),
+    act("obs_left", KeyCode::BracketLeft),
+    act("obs_right", KeyCode::BracketRight),
+    act("baro_qnh", KeyCode::KeyX),
+    act("ap", KeyCode::F5),
+    act("ap_hdg", KeyCode::Digit7),
+    act("ap_nav", KeyCode::Digit8),
+    act("ap_apr", KeyCode::Digit9),
+    act("ap_alt", KeyCode::Digit0),
+    act("ap_hdg_left", KeyCode::Minus),
+    act("ap_hdg_right", KeyCode::Equal),
+    act("ap_alt_down", KeyCode::Semicolon),
+    act("ap_alt_up", KeyCode::Quote),
+    act("heading_sync", KeyCode::KeyK),
+    act("camera", KeyCode::KeyC),
+    act("tail_view", KeyCode::F6),
+    act("hud", KeyCode::KeyH),
+    act("minimap", KeyCode::Backquote),
+    act("goto", KeyCode::KeyG),
+    act("respawn", KeyCode::KeyR),
+    act("pause", KeyCode::KeyP),
+    act("sound", KeyCode::KeyU),
+    act("time_forward", KeyCode::KeyT),
+    act("time_back", KeyCode::KeyY),
+    act("clouds_more", KeyCode::KeyN),
+    act("clouds_less", KeyCode::KeyM),
+    act("taa", KeyCode::F2),
+    act("screenshot", KeyCode::F12),
+    Action { id: "pause_menu", key: KeyCode::Escape, keyboard: false },
+    Action { id: "flight_panel", key: KeyCode::Tab, keyboard: false },
 ];
 
 fn action(id: &str) -> Option<&'static Action> {
@@ -353,11 +352,11 @@ impl Bindings {
 
     /// What a binding reads as, for the bindings page.
     pub fn describe_axis(&self, a: AxisAct) -> Option<String> {
-        self.axes.get(&a).map(|b| crate::i18n::t!("{} · axis {}", "{} · axe {}", short(&b.name), axis_name(b.code)))
+        self.axes.get(&a).map(|b| crate::i18n::t!("bind.axis", short(&b.name), axis_name(b.code)))
     }
 
     pub fn describe_button(&self, id: &str) -> Option<String> {
-        self.buttons.get(id).map(|b| crate::i18n::t!("{} · button {}", "{} · bouton {}", short(&b.name), button_name(b.code)))
+        self.buttons.get(id).map(|b| crate::i18n::t!("bind.button", short(&b.name), button_name(b.code)))
     }
 
     // ------------------------------------------------------------ the file
@@ -458,8 +457,8 @@ const BTN_TOP2: u32 = BTN + 0x124;
 
 /// A ready-made set of bindings for a kind of device.
 pub struct Preset {
-    en: &'static str,
-    fr: &'static str,
+    /// its name's key in the language files
+    key: &'static str,
     /// lower-case pieces of a device name it is put on by itself (none: only by hand)
     names: &'static [&'static str],
     /// (axis, code, sign, dead zone)
@@ -470,7 +469,7 @@ pub struct Preset {
 
 impl Preset {
     pub fn label(&self) -> &'static str {
-        if crate::i18n::is_fr() { self.fr } else { self.en }
+        crate::i18n::tr(self.key)
     }
 }
 
@@ -478,8 +477,7 @@ pub const PRESETS: &[Preset] = &[
     // Measured on the stick itself: Y pitch, X roll (reversed), the twist (Z)
     // rudder, the throttle wheel on the base on Rz.
     Preset {
-        en: "Turtle Beach VelocityOne Flightstick",
-        fr: "Turtle Beach VelocityOne Flightstick",
+        key: "preset.velocityone",
         names: &["velocityone flightstick"],
         axes: &[(AxisAct::Pitch, ABS_Y, 1.0, 0.05), (AxisAct::Roll, ABS_X, -1.0, 0.05), (AxisAct::Yaw, ABS_Z, 1.0, 0.08), (AxisAct::Throttle, ABS_RZ, 1.0, 0.02)],
         buttons: &[("brakes", BTN_TRIGGER), ("camera", BTN_THUMB), ("flaps_down", BTN_THUMB2), ("flaps_up", BTN_TOP), ("gear", BTN_TOP2)],
@@ -488,8 +486,7 @@ pub const PRESETS: &[Preset] = &[
     // the like): X roll, Y pitch, the twist on Rz, a throttle that reads
     // lowest pushed forward.
     Preset {
-        en: "Standard joystick (X/Y, twist, throttle)",
-        fr: "Joystick standard (X/Y, torsion, manette des gaz)",
+        key: "preset.joystick",
         names: &[],
         axes: &[(AxisAct::Pitch, ABS_Y, 1.0, 0.05), (AxisAct::Roll, ABS_X, 1.0, 0.05), (AxisAct::Yaw, ABS_RZ, 1.0, 0.08), (AxisAct::Throttle, ABS_THROTTLE, -1.0, 0.02)],
         buttons: &[("brakes", BTN_TRIGGER), ("camera", BTN_THUMB), ("flaps_down", BTN_THUMB2), ("flaps_up", BTN_TOP), ("gear", BTN_TOP2)],
@@ -497,8 +494,7 @@ pub const PRESETS: &[Preset] = &[
     // Rudder pedals (Logitech/Saitek, Thrustmaster TFRP…): rudder on Rz,
     // the toe brakes on X and Y.
     Preset {
-        en: "Rudder pedals (rudder, toe brakes)",
-        fr: "Palonnier (direction, freins aux pieds)",
+        key: "preset.pedals",
         names: &["rudder", "pedal"],
         axes: &[(AxisAct::Yaw, ABS_RZ, 1.0, 0.03), (AxisAct::BrakeLeft, ABS_X, 1.0, 0.05), (AxisAct::BrakeRight, ABS_Y, 1.0, 0.05)],
         buttons: &[],
@@ -609,21 +605,20 @@ pub fn bindable(k: KeyCode) -> bool {
 /// A key's name for the bindings page: "W", "Left Shift", "Num 7"…
 pub fn key_name(k: KeyCode) -> String {
     let s = format!("{k:?}");
-    let fr = crate::i18n::is_fr();
     if let Some(c) = s.strip_prefix("Key").or_else(|| s.strip_prefix("Digit")) {
         return c.to_string();
     }
     if let Some(c) = s.strip_prefix("Numpad") {
-        return format!("{} {c}", if fr { "Pavé num." } else { "Num" });
+        return format!("{} {c}", crate::i18n::tr("key.numpad"));
     }
     let named = match k {
-        KeyCode::ShiftLeft => if fr { "Maj gauche" } else { "Left Shift" },
-        KeyCode::ShiftRight => if fr { "Maj droite" } else { "Right Shift" },
-        KeyCode::ControlLeft => if fr { "Ctrl gauche" } else { "Left Ctrl" },
-        KeyCode::ControlRight => if fr { "Ctrl droite" } else { "Right Ctrl" },
+        KeyCode::ShiftLeft => crate::i18n::tr("key.left_shift"),
+        KeyCode::ShiftRight => crate::i18n::tr("key.right_shift"),
+        KeyCode::ControlLeft => crate::i18n::tr("key.left_ctrl"),
+        KeyCode::ControlRight => crate::i18n::tr("key.right_ctrl"),
         KeyCode::AltLeft => "Alt",
         KeyCode::AltRight => "Alt Gr",
-        KeyCode::Space => if fr { "Espace" } else { "Space" },
+        KeyCode::Space => crate::i18n::tr("key.space"),
         KeyCode::Period => ".",
         KeyCode::Comma => ",",
         KeyCode::Slash => "/",
@@ -632,14 +627,14 @@ pub fn key_name(k: KeyCode) -> String {
         KeyCode::Minus => "-",
         KeyCode::Equal => "=",
         KeyCode::Backquote => "`",
-        KeyCode::IntlBackslash => return crate::i18n::tr("ISO (beside Left Shift)").to_string(),
+        KeyCode::IntlBackslash => return crate::i18n::tr("key.iso").to_string(),
         KeyCode::ArrowUp => "↑",
         KeyCode::ArrowDown => "↓",
         KeyCode::ArrowLeft => "←",
         KeyCode::ArrowRight => "→",
-        KeyCode::PageUp => if fr { "Page préc." } else { "Page Up" },
-        KeyCode::PageDown => if fr { "Page suiv." } else { "Page Down" },
-        KeyCode::Escape => if fr { "Échap" } else { "Esc" },
+        KeyCode::PageUp => crate::i18n::tr("key.page_up"),
+        KeyCode::PageDown => crate::i18n::tr("key.page_down"),
+        KeyCode::Escape => crate::i18n::tr("key.esc"),
         _ => "",
     };
     if named.is_empty() { s } else { named.to_string() }

@@ -413,16 +413,20 @@ pub struct Hole {
 /// speeds they are good for, the two flap roles.)
 #[derive(Clone)]
 pub struct Lever {
-    /// what it is called, and each notch (English, French)
-    pub name: [&'static str; 2],
-    pub notches: &'static [[&'static str; 2]],
+    /// the keys (in the language files) of what it is called and of each notch
+    pub name: &'static str,
+    pub notches: &'static [&'static str],
     /// the pieces with the left and the right flap role, as the damage messages name them
     pub parts: [&'static str; 2],
 }
 
 impl Lever {
     pub fn notch(&self, k: u8) -> &'static str {
-        self.notches.get(k as usize).map_or("", |n| n[crate::i18n::is_fr() as usize])
+        self.notches.get(k as usize).map_or("", |n| crate::i18n::tr(n))
+    }
+
+    pub fn label(&self) -> &'static str {
+        crate::i18n::tr(self.name)
     }
 }
 

@@ -39,13 +39,13 @@ impl Failures {
     pub fn label(i: usize) -> &'static str {
         use crate::i18n::t;
         match i {
-            0 => t!("Engine failure", "Panne moteur"),
-            1 => t!("Alternator (generators)", "Alternateur (génératrices)"),
-            2 => t!("Battery flat", "Batterie à plat"),
-            3 => t!("Vacuum pump (attitude and heading gyros)", "Pompe à vide (horizon et conservateur de cap)"),
-            4 => t!("Pitot tube blocked (airspeed)", "Tube Pitot bouché (anémomètre)"),
-            5 => t!("Static port blocked (altimeter, VSI)", "Prise statique bouchée (altimètre, variomètre)"),
-            _ => t!("Fuel leak", "Fuite de carburant"),
+            0 => t!("systems.engine_failure"),
+            1 => t!("systems.alternator_generators"),
+            2 => t!("systems.battery_flat"),
+            3 => t!("systems.vacuum_pump_attitude_and_heading"),
+            4 => t!("systems.pitot_tube_blocked_airspeed"),
+            5 => t!("systems.static_port_blocked_altimeter_vsi"),
+            _ => t!("systems.fuel_leak"),
         }
     }
 

@@ -75,7 +75,7 @@ impl Guide {
         }
         if let Some(at) = project(self.center(250.0)) {
             painter.text(at + Vec2::new(0.0, -24.0), egui::Align2::CENTER_BOTTOM,
-                crate::t!("Visual approach {} · 3°", "Approche visuelle {} · 3°", self.name),
+                crate::t!("approach.visual_approach_3", self.name),
                 egui::FontId::proportional(13.0), Color32::from_rgb(255, 145, 50));
         }
     }

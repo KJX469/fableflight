@@ -386,7 +386,7 @@ impl Drop for Directory {
 fn read_list(urls: &[String], get: impl Fn(&str) -> Result<Vec<u8>, String>, cache: Option<&std::path::Path>) -> (Option<(Vec<ServerEntry>, bool)>, Option<String>) {
     let mut error = None;
     for u in urls {
-        match get(u).and_then(|d| parse_servers(&d, u).ok_or_else(|| "unreadable list".to_string())) {
+        match get(u).and_then(|d| parse_servers(&d, u).ok_or_else(|| crate::i18n::tr("mp.unreadable_list").to_string())) {
             Ok(mut list) => {
                 if let Some(c) = cache {
                     let _ = std::fs::write(c, cache_json(&list));
@@ -408,7 +408,7 @@ fn read_list(urls: &[String], get: impl Fn(&str) -> Result<Vec<u8>, String>, cac
             }
             (Some((list, true)), error)
         }
-        _ => (None, error.or_else(|| Some("no server list".into()))),
+        _ => (None, error.or_else(|| Some(crate::i18n::tr("mp.no_server_list").into()))),
     }
 }
 

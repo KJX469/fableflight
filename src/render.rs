@@ -28,6 +28,9 @@ const MAX_FALL: usize = 4096;
 /// trees and undergrowth close enough to the camera for their leaf cards
 pub const MAX_NEAR: usize = 20000;
 const BLOOM_MIPS: u32 = 6;
+/// post.wgsl's AGX_EXPOSURE: the tonemap puts the scene at `G.time.z` times
+/// this, which is the exposure the upscalers are given.
+pub const AGX_EXPOSURE: f32 = 1.6;
 pub const MAX_PARTICLES: u32 = 1 << 16;
 /// Smoke volume around the effects anchor: cells along east, north, up; cell
 /// size in metres; height of the bottom of the grid above the anchor.
@@ -864,6 +867,7 @@ struct Targets {
     aux: wgpu::TextureView,
     amb: wgpu::TextureView,
     depth: wgpu::TextureView,
+    depth_tex: wgpu::Texture,
     hdr: wgpu::TextureView,
     hdr_tex: wgpu::Texture,
     /// `hdr` as it was before the glass: what the windows refract
@@ -1088,6 +1092,10 @@ pub struct Renderer {
     /// the same for the anti-aliased frame history
     taa_flip: usize,
     taa_hist_ok: bool,
+    /// upscaling below 100% render resolution (upscale.rs)
+    pub up: crate::upscale::Upscale,
+    /// the GPU drawing (for the upscaler's suggestion, graphics.rs)
+    pub gpu: wgpu::AdapterInfo,
     pub meshes: Vec<MeshGpu>,
     pub egui: egui_wgpu::Renderer,
 }
@@ -1591,9 +1599,29 @@ impl Renderer {
             max_samplers_per_shader_stage: al.max_samplers_per_shader_stage.max(defaults.max_samplers_per_shader_stage).min(32),
             ..defaults
         };
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor { label: None, required_features, required_limits, memory_hints: MEMORY_HINTS, ..Default::default() })
-            .await?;
+        // AMD's FSR 4 runtime needs extensions wgpu does not turn on (fsr4.rs):
+        // the device is opened through wgpu-hal with them when it may be used,
+        // and the usual way otherwise or if that fails.
+        let mut fsr4_device = false;
+        let opened = if crate::fsr4::rt::wanted(&info) {
+            let desc = wgpu::DeviceDescriptor { label: None, required_features: required_features | crate::fsr4::rt::features(&adapter), required_limits: required_limits.clone(), memory_hints: MEMORY_HINTS, ..Default::default() };
+            match crate::fsr4::rt::open_device(&adapter, &desc) {
+                Ok(dq) => {
+                    fsr4_device = true;
+                    Some(dq)
+                }
+                Err(e) => {
+                    log::warn!("device for FSR 4: {e}; opening it without");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let (device, queue) = match opened {
+            Some(dq) => dq,
+            None => adapter.request_device(&wgpu::DeviceDescriptor { label: None, required_features, required_limits, memory_hints: MEMORY_HINTS, ..Default::default() }).await?,
+        };
         let gpu_error: Arc<parking_lot::Mutex<Option<String>>> = Arc::new(parking_lot::Mutex::new(None));
         let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
@@ -2398,6 +2426,8 @@ impl Renderer {
         let fluid = crate::fluid::FluidGpu::new(d, &l0, common, &vol_acc);
 
         let egui = egui_wgpu::Renderer::new(d, out_format(&config), egui_wgpu::RendererOptions::default());
+        let mut up = crate::upscale::Upscale::new(d, &pl(&l_post), &m_post, out_format(&config));
+        up.fsr4_device = fsr4_device;
         let targets = Self::make_targets(d, &config, (config.width, config.height), &l_dres, &l_ao, &l_composite, &l_cloud, &l_cloud_storm, &l_cloud_rain, &l_cloud_apply, &l_cloud_temporal, &l_post, &l_pdraw, &l_glass, &psim_ub, &pbuf, &black);
         let fluid_t = fluid.draw_targets(d, &targets.depth, config.width, config.height);
         // The transmittance and multi-scatter tables depend only on the planet
@@ -2422,7 +2452,7 @@ impl Renderer {
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_composite, l_cloud, l_cloud_storm, l_cloud_rain, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, gclouds_tex, snow_tex, snow_track_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_tess, p_terrain_cells, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, p_obj, p_obj_shadow, p_obj_solid, p_obj_shadow_solid, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_glass, p_composite, p_composite_edge, p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit,
-            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, meshes: Vec::new(), egui, instance, window, gpu_error, device_lost, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
+            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, up, gpu: info.clone(), meshes: Vec::new(), egui, instance, window, gpu_error, device_lost, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
         })
     }
 
@@ -2452,7 +2482,8 @@ impl Renderer {
         let ao = view(&make_tex(d, "ao", w, h, 1, 1, AMB, rt));
         let color = view(&make_tex(d, "color", w, h, 1, 1, HDR, rt));
         let aux = view(&make_tex(d, "aux", w, h, 1, 1, HDR, rt));
-        let depth = view(&make_tex(d, "depth", w, h, 1, 1, DEPTH, rt));
+        let depth_tex = make_tex(d, "depth", w, h, 1, 1, DEPTH, rt);
+        let depth = view(&depth_tex);
         let hdr_tex = make_tex(d, "hdr", w, h, 1, 1, HDR, rt | wgpu::TextureUsages::COPY_SRC);
         let hdr = view(&hdr_tex);
         let scene_tex = make_tex(d, "scene behind glass", w, h, 1, 1, HDR, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
@@ -2498,7 +2529,7 @@ impl Renderer {
             bg_final: [&hdr, &taa[0], &taa[1]].map(|src| post(src, &bloom[0])),
             taa,
             bg_blit: post(&ldr, black),
-            color, aux, amb, depth, hdr, cloud, cloud_dist, cloud_raw, cloud_dist_raw, cloud_cls_data, cloud_cls_depth, cloud_hist, bloom, ldr_tex, ldr,
+            color, aux, amb, depth, depth_tex, hdr, cloud, cloud_dist, cloud_raw, cloud_dist_raw, cloud_cls_data, cloud_cls_depth, cloud_hist, bloom, ldr_tex, ldr,
         }
     }
 
@@ -2532,6 +2563,31 @@ impl Renderer {
         let (w, h) = self.render_size();
         self.targets = Self::make_targets(&self.device, &self.config, (w, h), &self.l_dres, &self.l_ao, &self.l_composite, &self.l_cloud, &self.l_cloud_storm, &self.l_cloud_rain, &self.l_cloud_apply, &self.l_cloud_temporal, &self.l_post, &self.l_pdraw, &self.l_glass, &self.psim_ub, &self.pbuf, &self.black);
         self.fluid_t = self.fluid.draw_targets(&self.device, &self.targets.depth, w, h);
+        self.rebuild_upscale();
+    }
+
+    /// Remakes what the upscaler in use needs for the current targets.
+    fn rebuild_upscale(&mut self) {
+        let t = &self.targets;
+        let i = crate::upscale::Inputs {
+            render: (t.hdr_tex.width(), t.hdr_tex.height()),
+            display: (self.config.width, self.config.height),
+            hdr: &t.hdr,
+            taa: [&t.taa[0], &t.taa[1]],
+            depth: &t.depth,
+            bloom: &t.bloom[0],
+            black: &self.black,
+            l_post: &self.l_post,
+        };
+        self.up.rebuild(&self.device, &i);
+    }
+
+    /// The upscaler asked for (graphics settings); `upscale::active` decides
+    /// which runs at the render resolution.
+    pub fn set_upscaler(&mut self, u: crate::graphics::Upscaler) {
+        if self.up.set(u, self.scale) {
+            self.rebuild_upscale();
+        }
     }
 
     /// Render resolution as a share of the window's (graphics settings).
@@ -2540,8 +2596,11 @@ impl Renderer {
         if s != self.scale {
             let old = self.render_size();
             self.scale = s;
+            let up_changed = self.up.rescale(s);
             if self.render_size() != old {
                 self.remake_targets();
+            } else if up_changed {
+                self.rebuild_upscale();
             }
         }
     }
@@ -2801,6 +2860,10 @@ impl Renderer {
     }
 
     pub fn render(&mut self, mut f: Frame) {
+        if self.up.stale {
+            // (AMD's runtime failed last frame: FSR 3.1 takes over)
+            self.rebuild_upscale();
+        }
         if self.is_device_lost() {
             std::thread::sleep(std::time::Duration::from_millis(30));
             return;
@@ -3776,13 +3839,51 @@ impl Renderer {
             }
         }
         mark(&mut enc, "glass");
-        // The finished frame: `hdr` itself, or blended into the frames before it.
-        let src = if taa {
+        // The finished frame: `hdr` itself, or blended into the frames before
+        // it (temporal AA), or upscaled from it by FSR 3.1 (upscale.rs).
+        let mode = self.up.active();
+        let mut fsr_parity = None;
+        let src = if mode.temporal() && self.up.t.is_some() {
+            // (the temporal upscaler takes the temporal AA's place)
+            self.taa_hist_ok = false;
+            if let Some(ut) = &self.up.t {
+                full(&mut enc, &ut.motion, true, &self.up.p_motion, &ut.bg_motion);
+            }
+            let reset = !self.up.hist_ok || f.g.cam_delta[3] < 0.5;
+            self.up.hist_ok = true;
+            let (rw, rh) = (t.hdr_tex.width() as f32, t.hdr_tex.height() as f32);
+            let jitter = [f.g.taa[0] * rw, f.g.taa[1] * rh];
+            let exposure = f.g.time[2] * AGX_EXPOSURE;
+            if mode == crate::graphics::Upscaler::Fsr4 {
+                // AMD's runtime records into a command buffer of its own, so
+                // what is recorded so far goes first (fsr4.rs).
+                let ut = self.up.t.as_ref().expect("upscale targets");
+                if let Some(f4) = self.up.fsr4.as_mut() {
+                    f4.prepare(q, &mut enc, &self.up.p_touch, exposure);
+                    let done = std::mem::replace(&mut enc, self.device.create_command_encoder(&Default::default()));
+                    q.submit([done.finish()]);
+                    let images = crate::fsr4::rt::Images { color: &t.hdr_tex, depth: &t.depth_tex, motion: &ut.motion_tex, exposure: &f4.exposure, output: &f4.output };
+                    // (G.misc.w is 2 tan(fov / 2) / height)
+                    let fov_y = 2.0 * (f.g.misc[3] * rh * 0.5).atan();
+                    let fr = crate::fsr4::rt::Frame { jitter, near: f.g.misc[0], fov_y, dt: f.g.time[1], reset };
+                    if let Err(e) = f4.rt.run(&self.device, q, &images, &fr) {
+                        self.up.fsr4_failed(e);
+                    }
+                }
+            } else if let Some(fsr) = self.up.fsr3.as_mut() {
+                let frame = crate::fsr3::Frame { jitter, near: f.g.misc[0], exposure, dt: f.g.time[1], reset };
+                fsr_parity = fsr.dispatch(q, &mut enc, &frame, &mut mark);
+            }
+            0
+        } else if taa {
+            self.up.hist_ok = false;
             full(&mut enc, &t.taa[self.taa_flip], true, &self.p_taa, &t.bg_taa[self.taa_flip]);
             1 + self.taa_flip
         } else {
+            self.up.hist_ok = false;
             0
         };
+        mark(&mut enc, "aa+upscale");
         for i in 0..BLOOM_MIPS as usize {
             full(&mut enc, &t.bloom[i], true, &self.p_down, if i == 0 { &t.bg_down0[src] } else { &t.bg_down[i - 1] });
         }
@@ -3794,7 +3895,15 @@ impl Renderer {
         // and for screenshots, which read `ldr` back.
         let direct = sview.as_ref().filter(|_| f.shot.is_none() && direct_out(&self.config));
         let out = direct.unwrap_or(&t.ldr);
-        full(&mut enc, out, true, if taa { &self.p_final_taa } else { &self.p_final }, &t.bg_final[src]);
+        let fsr3_final = if mode == crate::graphics::Upscaler::Fsr4 { self.up.fsr4.as_ref().and_then(|f| f.bg_final.as_ref()) } else { fsr_parity.and_then(|p| self.up.fsr3.as_ref()?.bg_final(p)) };
+        match (&self.up.t, fsr3_final) {
+            (Some(_), Some(bg)) => full(&mut enc, out, true, &self.up.p_final_fsr3, bg),
+            (Some(ut), None) if mode == crate::graphics::Upscaler::Fsr1 => {
+                full(&mut enc, &ut.up, true, &self.up.p_easu, &ut.bg_easu[src]);
+                full(&mut enc, out, true, &self.up.p_final_fsr1, &ut.bg_final_fsr1);
+            }
+            _ => full(&mut enc, out, true, if taa { &self.p_final_taa } else { &self.p_final }, &t.bg_final[src]),
+        }
 
         let egui_jobs = f.egui.map(|(jobs, delta, ppp)| {
             let sd = egui_wgpu::ScreenDescriptor { size_in_pixels: [self.config.width, self.config.height], pixels_per_point: ppp };
