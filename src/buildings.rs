@@ -662,13 +662,22 @@ fn mixc(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     [0, 1, 2].map(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).clamp(0.0, 255.0) as u8)
 }
 
-const PAL_NA: &[[u8; 3]] = &[[226, 222, 212], [205, 196, 178], [188, 190, 186], [214, 205, 172], [160, 175, 186], [172, 182, 160], [222, 208, 160], [150, 92, 74], [196, 170, 146], [236, 232, 226], [140, 150, 160], [206, 178, 170]];
+// Wall colours (sRGB). Real facades are darker than they look in memory:
+// red brick reflects about a fifth of the light, concrete a third, limestone
+// under a half, only fresh white paint three quarters or more.
+const PAL_NA: &[[u8; 3]] = &[[216, 212, 202], [205, 196, 178], [188, 190, 186], [214, 205, 172], [160, 175, 186], [172, 182, 160], [222, 208, 160], [150, 92, 74], [196, 170, 146], [226, 222, 214], [140, 150, 160], [206, 178, 170]];
+// North American town houses and walk-ups: mostly red brick and brownstone
+// (New York, Boston, Philadelphia, Baltimore, Chicago), some limestone,
+// now and then painted.
+const PAL_NA_TOWN: &[[u8; 3]] = &[[152, 84, 64], [128, 70, 54], [170, 100, 76], [112, 76, 62], [134, 92, 74], [100, 60, 48], [186, 170, 146], [204, 192, 170], [160, 150, 140], [176, 112, 86]];
 const PAL_MED: &[[u8; 3]] = &[[236, 230, 214], [226, 206, 168], [214, 170, 132], [222, 190, 160], [240, 236, 228], [204, 180, 140], [228, 214, 190]];
 const PAL_NEUR: &[[u8; 3]] = &[[150, 86, 66], [168, 104, 78], [196, 170, 120], [226, 222, 210], [170, 168, 160], [122, 80, 62], [206, 196, 176], [188, 150, 110]];
 const PAL_ARID: &[[u8; 3]] = &[[214, 196, 164], [228, 218, 198], [190, 184, 172], [222, 196, 176], [200, 180, 150], [236, 230, 218]];
 const PAL_TROPIC: &[[u8; 3]] = &[[186, 184, 176], [200, 214, 220], [208, 222, 196], [226, 200, 190], [226, 216, 180], [170, 150, 126], [232, 228, 216]];
 const PAL_EASIA: &[[u8; 3]] = &[[206, 204, 196], [226, 222, 212], [190, 176, 156], [160, 160, 158], [214, 200, 178], [176, 150, 130]];
-const PAL_OFFICE: &[[u8; 3]] = &[[196, 192, 184], [170, 168, 164], [210, 200, 180], [128, 126, 124], [150, 110, 90], [222, 220, 214], [176, 160, 140]];
+// Offices and mid-rises: limestone, precast and poured concrete, brick and
+// terracotta on the older ones, granite.
+const PAL_OFFICE: &[[u8; 3]] = &[[184, 178, 168], [160, 158, 154], [196, 186, 166], [118, 116, 114], [150, 104, 84], [206, 204, 198], [166, 148, 128], [124, 86, 68], [96, 96, 100]];
 const PAL_GLASS: &[[u8; 3]] = &[[110, 140, 165], [95, 125, 135], [120, 150, 150], [70, 85, 100], [140, 120, 95], [130, 160, 185], [60, 70, 80]];
 const PAL_SHED: &[[u8; 3]] = &[[190, 192, 190], [168, 180, 188], [206, 200, 180], [150, 164, 150], [212, 212, 208], [140, 144, 150], [176, 150, 130]];
 
@@ -826,9 +835,10 @@ fn style(cx: &Ctx, b: &crate::sources::BuildingPoly, area: f32, hl: f32, hw: f32
     let lum = (img[0] as f32 + img[1] as f32 + img[2] as f32) / 3.0;
     let palette = wall_palette(reg);
     let mut wall = pick(palette, r(3));
-    // Poorer streets fade toward bare render and concrete; rich ones stay crisp.
+    // Poorer streets fade toward bare render and concrete; rich ones stay
+    // crisp, toward clean pale stone.
     wall = mixc(wall, [150, 146, 138], (0.45 - wealth).max(0.0) * 0.9);
-    wall = mixc(wall, [240, 238, 232], (wealth - 0.7).max(0.0) * 0.5);
+    wall = mixc(wall, [214, 210, 200], (wealth - 0.7).max(0.0) * 0.5);
     let (mut roof_mat, mut roof_col) = roof_stuff(reg, wealth, r(4));
     let complex = nverts > 8 || rect < 0.72;
     let pitch = match reg {
@@ -919,8 +929,7 @@ fn style(cx: &Ctx, b: &crate::sources::BuildingPoly, area: f32, hl: f32, hw: f32
         wall = pick(if facade == 3 { PAL_GLASS } else if facade == 6 { PAL_NEUR } else { PAL_OFFICE }, r(3));
     }
     if kind == Kind::Row && reg == Region::NAm {
-        // Painted town houses.
-        wall = pick(PAL_NA, r(3));
+        wall = pick(PAL_NA_TOWN, r(3));
     }
     // A tagged colour always wins; otherwise nudge toward what the roof looks like from above.
     if let Some(c) = b.colour {
@@ -1051,7 +1060,7 @@ pub const HELIPAD: u8 = 16;
 /// skylights, aircraft warning lights.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-fn roof_clutter(cx: &Ctx, m: &mut Mesh, sh: &Shape, ring: &[Vec2], top: f32, st: &Style, seed: u32, height: f32, helipad: bool, avoid: &[Vec<Vec2>]) {
+fn roof_clutter(cx: &Ctx, m: &mut Mesh, sh: &Shape, ring: &[Vec2], top: f32, st: &Style, seed: u32, height: f32, helipad: bool, crown: bool, avoid: &[Vec<Vec2>]) {
     let area = sh.hl * sh.hw * 4.0;
     let want = match st.kind {
         Kind::Tower => 3 + (area / 500.0) as usize,
@@ -1094,7 +1103,7 @@ fn roof_clutter(cx: &Ctx, m: &mut Mesh, sh: &Shape, ring: &[Vec2], top: f32, st:
         n_box += 1;
         if big {
             m.boxm(cx, false, c, sh.u * hx, sh.v * hy, top - 0.1, top + hz, kcol(mixc(st.wall, [150, 150, 150], 0.5), K_PLAIN), sty(P_STAIR), None);
-            if st.kind == Kind::Tower && height > 110.0 && r(6) < 0.4 {
+            if crown && st.kind == Kind::Tower && height > 110.0 && r(6) < 0.4 {
                 // Mast.
                 let mh = height * (0.12 + r(7) * 0.15);
                 m.boxm(cx, false, c, sh.u * 0.35, sh.v * 0.35, top + hz, top + hz + mh, kcol([120, 122, 126], K_PLAIN), sty(P_PLAIN), None);
@@ -1105,8 +1114,8 @@ fn roof_clutter(cx: &Ctx, m: &mut Mesh, sh: &Shape, ring: &[Vec2], top: f32, st:
             m.boxm(cx, true, c, sh.u * hx, sh.v * hy, top - 0.1, top + hz, kcol(col, K_PLAIN), sty(P_HVAC), None);
         }
     }
-    // Warning lights on the corners of anything tall.
-    if height > 70.0 {
+    // Warning lights on the corners of anything tall (its top part only).
+    if crown && height > 70.0 {
         if let Some(inner) = inset(ring, 0.5) {
             let step = (inner.len() / 4).max(1);
             for p in inner.iter().step_by(step).take(4) {
@@ -1416,6 +1425,13 @@ struct Rel {
     root: usize,
     /// one of several parts of a structure
     multi: bool,
+    /// the structure's highest part: the only one that carries a mast and
+    /// aircraft warning lights, so a tower mapped as twenty parts still has
+    /// one crown of red lights, not twenty
+    crown: bool,
+    /// the colour the whole structure wears: the main footprint's tagged
+    /// colour, else that of the biggest part with one
+    colour: Option<[u8; 3]>,
     /// height of the whole structure
     top: f32,
     /// share of the roof that another part sits on or rises through
@@ -1460,22 +1476,66 @@ fn relate(unit_m: f32, bs: &[crate::sources::BuildingPoly]) -> Vec<Rel> {
         }
     }
     let share = |i: usize, j: usize| pts[i].iter().filter(|p| inside_poly(**p, &bs[j])).count() as f32 / pts[i].len() as f32;
+    let perim = |i: usize| {
+        let r = &bs[i].rings[0];
+        (0..r.len()).map(|k| (r[(k + 1) % r.len()][0] - r[k][0]).hypot(r[(k + 1) % r.len()][1] - r[k][1])).sum::<f32>() * unit_m
+    };
+    // Metres of i's outline that run along j's wall: points stepped along each
+    // edge and nudged just outside i that land inside j. Parts mapped side by
+    // side (a tower split into slabs, a podium wrapped round a core) share
+    // walls without overlapping, so the share of area above never sees them.
+    let contact = |i: usize, j: usize| {
+        let r = &bs[i].rings[0];
+        let s = crate::mvt::signed_area(r).signum();
+        let (step, nudge) = (1.5 / unit_m, 0.5 / unit_m);
+        let mut len = 0.0;
+        for k in 0..r.len() {
+            let (a, b) = (r[k], r[(k + 1) % r.len()]);
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let l = d[0].hypot(d[1]);
+            if l < 1e-6 {
+                continue;
+            }
+            let nrm = [d[1] / l * s * nudge, -d[0] / l * s * nudge];
+            let cnt = (l / step).ceil().max(1.0) as usize;
+            for t in 0..cnt {
+                let f = (t as f32 + 0.5) / cnt as f32;
+                if inside_poly([a[0] + d[0] * f + nrm[0], a[1] + d[1] * f + nrm[1]], &bs[j]) {
+                    len += l / cnt as f32;
+                }
+            }
+        }
+        len * unit_m
+    };
+    // touch: (i, j, share of the smaller outline that runs along the other).
+    // Only asked of tall or raised parts: low terraced houses share party
+    // walls too, and each of them is a building of its own.
+    let mut touch: Vec<(usize, usize, f32)> = Vec::new();
+    let pad = 0.6 / unit_m;
     // nb[i]: (j, share of i inside j) for every footprint touching i.
     let mut nb: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
     let mut ord: Vec<usize> = (0..n).collect();
     ord.sort_by(|a, b| bbox[*a].0[0].total_cmp(&bbox[*b].0[0]));
     for (k, &i) in ord.iter().enumerate() {
         for &j in &ord[k + 1..] {
-            if bbox[j].0[0] > bbox[i].1[0] {
+            if bbox[j].0[0] > bbox[i].1[0] + pad {
                 break;
             }
-            if bbox[j].0[1] > bbox[i].1[1] || bbox[j].1[1] < bbox[i].0[1] {
+            if bbox[j].0[1] > bbox[i].1[1] + pad || bbox[j].1[1] < bbox[i].0[1] - pad {
                 continue;
             }
             let (fij, fji) = (share(i, j), share(j, i));
             if fij > 0.0 || fji > 0.0 {
                 nb[i].push((j, fij));
                 nb[j].push((i, fji));
+            }
+            if keep[i] && keep[j] && (bs[i].height.max(bs[j].height) >= 40.0 || bs[i].min_height > 0.5 || bs[j].min_height > 0.5) {
+                let (pi, pj) = (perim(i), perim(j));
+                let (a, b, p) = if pi <= pj { (i, j, pi) } else { (j, i, pj) };
+                let c = contact(a, b) / p.max(1.0);
+                if c >= 0.2 {
+                    touch.push((i, j, c));
+                }
             }
         }
     }
@@ -1556,10 +1616,20 @@ fn relate(unit_m: f32, bs: &[crate::sources::BuildingPoly]) -> Vec<Rel> {
             }
         }
     }
+    // Parts standing wall to wall, a good stretch of the smaller one's outline.
+    for &(i, j, _) in &touch {
+        let ratio = area[i].min(area[j]) / area[i].max(area[j]);
+        if keep[i] && keep[j] && ratio >= 0.1 && lo[j] <= hi[i] + 1.5 && lo[i] <= hi[j] + 1.5 {
+            let (a, b) = (find(&mut up, i), find(&mut up, j));
+            up[a] = b;
+        }
+    }
     // Root: the biggest footprint standing on the ground.
     let mut best: Vec<Option<usize>> = vec![None; n];
     let mut count = vec![0; n];
     let mut top = vec![0f32; n];
+    let mut crown: Vec<Option<usize>> = vec![None; n];
+    let mut tagged: Vec<Option<usize>> = vec![None; n];
     let better = |a: usize, b: usize| ((lo[a] <= 0.5) as u8, area[a]) > ((lo[b] <= 0.5) as u8, area[b]);
     for i in 0..n {
         if !keep[i] {
@@ -1571,6 +1641,12 @@ fn relate(unit_m: f32, bs: &[crate::sources::BuildingPoly]) -> Vec<Rel> {
         if best[g].is_none_or(|b| better(i, b)) {
             best[g] = Some(i);
         }
+        if crown[g].is_none_or(|c| (hi[i], area[i]) > (hi[c], area[c])) {
+            crown[g] = Some(i);
+        }
+        if bs[i].colour.is_some() && tagged[g].is_none_or(|t| area[i] > area[t]) {
+            tagged[g] = Some(i);
+        }
     }
 
     (0..n)
@@ -1578,7 +1654,9 @@ fn relate(unit_m: f32, bs: &[crate::sources::BuildingPoly]) -> Vec<Rel> {
             let g = find(&mut up, i);
             let above: Vec<usize> = if keep[i] { nb[i].iter().filter(|&&(j, fij)| keep[j] && fij > 0.0 && lo[j] <= hi[i] + 1.0 && hi[j] > hi[i] + 0.3).map(|e| e.0).collect() } else { Vec::new() };
             let capped = if above.is_empty() { 0.0 } else { pts[i].iter().filter(|p| above.iter().any(|&j| inside_poly(**p, &bs[j]))).count() as f32 / pts[i].len() as f32 };
-            Rel { keep: keep[i], lo: lo[i], hi: hi[i], root: best[g].unwrap_or(i), multi: keep[i] && count[g] > 1, top: top[g].max(hi[i]), capped, above }
+            let root = best[g].unwrap_or(i);
+            let colour = bs[root].colour.or(tagged[g].and_then(|t| bs[t].colour)).or(bs[i].colour);
+            Rel { keep: keep[i], lo: lo[i], hi: hi[i], root, multi: keep[i] && count[g] > 1, crown: crown[g].is_none_or(|c| c == i), colour, top: top[g].max(hi[i]), capped, above }
         })
         .collect()
 }
@@ -1644,13 +1722,12 @@ fn building(cx: &Ctx, m: &mut Mesh, all: &[crate::sources::BuildingPoly], rels: 
     let (st, seed, gref, gtop) = if rel.multi {
         let rb = &all[rel.root];
         let (rr, rcen, rgmin, rgmax) = site(cx, rb)?;
-        let whole = crate::sources::BuildingPoly { rings: Vec::new(), height: rel.top, min_height: rb.min_height, colour: rb.colour };
+        // One colour for the whole: parts tagged in different colours (or
+        // half tagged, half not) read as separate buildings jammed together.
+        let whole = crate::sources::BuildingPoly { rings: Vec::new(), height: rel.top, min_height: rb.min_height, colour: rel.colour };
         let (mut st, _, rseed) = own_style(cx, &whole, &rr, rcen, rel.root, hoods, landuse);
-        if let Some(c) = src.colour {
-            st.wall = c;
-        }
         // A tagged wall colour is a painted or clad wall, not a curtain of glass that would hide it.
-        if st.facade == 3 && (src.colour.is_some() || rb.colour.is_some()) {
+        if st.facade == 3 && rel.colour.is_some() {
             st.facade = 2;
         }
         // Only the main footprint, with nothing on it, keeps a pitched roof.
@@ -1732,7 +1809,7 @@ fn building(cx: &Ctx, m: &mut Mesh, all: &[crate::sources::BuildingPoly], rels: 
             z0 = *zt - 0.2;
         }
         let last = &tiers[tiers.len() - 1].0;
-        roof_clutter(cx, m, &sh, last, top, &st, seed, height, helipad, &avoid);
+        roof_clutter(cx, m, &sh, last, top, &st, seed, height, helipad, rel.crown, &avoid);
     } else {
         for r in &sh.rings {
             walls(cx, m, Lvl(0), &sh, r, base, top, &st.roof, &creases, wall, wsty, if flat { st.parapet } else { 0.0 });
@@ -1755,7 +1832,7 @@ fn building(cx: &Ctx, m: &mut Mesh, all: &[crate::sources::BuildingPoly], rels: 
                     m.poly(true, &[(ia, [0.0, 0.0]), (ib, [1.0, 0.0]), (cx.pos_m(inner[j], top), [1.0, 1.0]), (cx.pos_m(inner[i], top), [0.0, 1.0])], pc, psty, None);
                 }
             }
-            roof_clutter(cx, m, &sh, &sh.rings[0], top, &st, seed, height, helipad, &avoid);
+            roof_clutter(cx, m, &sh, &sh.rings[0], top, &st, seed, height, helipad, rel.crown, &avoid);
         }
         if !flat && matches!(st.kind, Kind::House | Kind::Row | Kind::Shed) && sh.rings.len() == 1 {
             let over = if st.kind == Kind::Shed { 0.25 } else { 0.35 + 0.3 * hash(seed, 24) };
@@ -2305,6 +2382,46 @@ mod tests {
             }
         }
         assert!(bound[cell_of(Vec3::new(500.0, 0.0, 300.0))][3] < 0.0);
+    }
+
+    fn rect(x0: f32, y0: f32, x1: f32, y1: f32, height: f32, min_height: f32, colour: Option<[u8; 3]>) -> crate::sources::BuildingPoly {
+        crate::sources::BuildingPoly { rings: vec![vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]], height, min_height, colour }
+    }
+
+    /// A tower mapped as slabs standing wall to wall, with a crown part on
+    /// top, is one structure: one look, one colour, one set of red lights.
+    #[test]
+    fn side_by_side_parts_are_one_structure() {
+        let bs = [
+            rect(0.0, 0.0, 20.0, 30.0, 150.0, 0.0, None),
+            rect(20.0, 0.0, 40.0, 30.0, 180.0, 0.0, Some([200, 40, 40])),
+            rect(40.0, 0.0, 55.0, 30.0, 120.0, 0.0, None),
+            rect(25.0, 10.0, 35.0, 20.0, 230.0, 180.0, None),
+        ];
+        let rels = relate(1.0, &bs);
+        assert!(rels.iter().all(|r| r.keep && r.multi));
+        assert!(rels.iter().all(|r| r.root == rels[0].root && r.top == 230.0));
+        assert_eq!(rels.iter().filter(|r| r.crown).count(), 1);
+        assert!(rels[3].crown);
+        assert!(rels.iter().all(|r| r.colour == Some([200, 40, 40])));
+    }
+
+    /// Low terraced houses share party walls too, but each is its own
+    /// building with its own lights and colour.
+    #[test]
+    fn terraced_houses_stay_apart() {
+        let bs = [rect(0.0, 0.0, 6.0, 10.0, 12.0, 0.0, None), rect(6.0, 0.0, 12.0, 10.0, 14.0, 0.0, Some([150, 80, 60])), rect(12.0, 0.0, 18.0, 10.0, 12.0, 0.0, None)];
+        let rels = relate(1.0, &bs);
+        assert!(rels.iter().all(|r| r.keep && !r.multi && r.crown));
+        assert_eq!(rels[0].colour, None);
+    }
+
+    /// Separate towers a street apart stay separate.
+    #[test]
+    fn towers_across_a_street_stay_apart() {
+        let bs = [rect(0.0, 0.0, 30.0, 30.0, 200.0, 0.0, None), rect(45.0, 0.0, 75.0, 30.0, 200.0, 0.0, None)];
+        let rels = relate(1.0, &bs);
+        assert!(rels.iter().all(|r| !r.multi && r.crown));
     }
 
     #[test]

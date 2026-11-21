@@ -87,6 +87,11 @@
     let p = -G.planet.xyz + rd * gnd.x;
     let mu = dot(normalize(p), G.sun_dir.xyz);
     c += sc.T * vec3f(0.03, 0.06, 0.09) * sun_trans(0.0, mu) * max(mu, 0.0) * G.sun_dir.w / PI;
+  } else {
+    // Airglow and scattered starlight, matching sky.wgsl so night reflections
+    // see the deep blue night sky rather than black.
+    let night = 1.0 - smoothstep(-0.2, 0.05, dot(G.up.xyz, G.sun_dir.xyz));
+    c += vec3f(0.0004, 0.0008, 0.0019) * night * (1.0 - 0.4 * max(sin(el), 0.0));
   }
   return vec4f(c, 1.0);
 }

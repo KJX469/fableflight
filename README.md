@@ -23,11 +23,11 @@ Explore the skies with real-world weather, live air traffic, and an immersive op
 </div>
 
 ## Download
-Download the [latest release](https://github.com/Rolandjg/fableflight/releases/latest)
+Download the [latest release](https://github.com/Rolandjg/fableflight/releases/latest), unpack it, and run **`fableflight-launcher`** (`fableflight-launcher.exe` on Windows).
 
 ## Compiling
 
-Requires **Rust 1.85+** (edition 2024). Note that the Cargo crate and main simulator binary are named `fablegame` (and the optional AI copilot bridge binary is `fableflight-mcp`), while the application is Fable Flight.
+Requires **Rust 1.85+** (edition 2024). Note that the Cargo crate and main simulator binary are named `fablegame` (the optional AI copilot bridge binary is `fableflight-mcp`, and the launcher is `fableflight-launcher`), while the application is Fable Flight.
 
 ### Platform prerequisites
 
@@ -48,7 +48,7 @@ Requires **Rust 1.85+** (edition 2024). Note that the Cargo crate and main simul
 cargo run --release
 ```
 
-Or build the release binaries (`target/release/fablegame` and `target/release/fableflight-mcp`) with:
+Or build the release binaries (`target/release/fablegame`, `target/release/fableflight-mcp` and `target/release/fableflight-launcher`) with:
 
 ```sh
 cargo build --release --locked
@@ -113,6 +113,7 @@ When using optional Google Maps imagery/3D tiles, prefer setting the `FABLE_GOOG
 - **Offline / slow network:** Launch with `--offline` to fly using only cached tiles and built-in data.
 - **Linux gamepads not detected:** Ensure your user has read access to `/dev/input/event*` (usually the `input` group) and `libudev` is installed.
 - **Invalid command-line flags:** Run `fablegame --help` to see all supported options.
+- **The game stops while starting from the launcher:** the launcher shows the game's last log lines, and the full log of the last run is in the cache folder as `last-run.log` (Home → Open the last game log).
 
 ## Multiplayer
 

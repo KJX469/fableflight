@@ -61,10 +61,11 @@ fn finish(scene: vec3f, in: FsIn) -> vec4f {
   let uv = in.uv;
   var c = scene;
   let bloom = textureSampleLevel(t_bloom, s_clamp, uv, 0.0).rgb;
-  // Lights bloom more at night, when the eye is dark-adapted.
+  // Lights bloom more at night, when the eye is dark-adapted (judged by the
+  // exposure before it closes down for city lights, which bloom as much).
   // (The start screen's globe, against black space, only a touch: a bright
   // planet would otherwise wear a wide milky halo.)
-  c = mix(c, bloom, mix(0.035, 0.06, smoothstep(1.0, 9.0, G.time.z)) * mix(1.0, 0.3, globe_k()));
+  c = mix(c, bloom, mix(0.035, 0.06, smoothstep(1.0, 7.5, G.time.z * exp2(G.misc.y))) * mix(1.0, 0.3, globe_k()));
   c *= G.time.z;
   // Gentle vignette.
   let q = in.uv - 0.5;

@@ -1785,6 +1785,7 @@ impl Renderer {
             .await?;
         let info = adapter.get_info();
         log::info!("GPU: {} ({:?})", info.name, info.device_type);
+        crate::progress::step("gpu");
         let integrated = info.device_type == wgpu::DeviceType::IntegratedGpu;
         let samples = samples.unwrap_or(if !integrated { 4 } else if info.vendor == 0x8086 { 1 } else { 2 });
         // Intel integrated GPUs hang (i915 "GPU HANG ... context reset", then a lost
@@ -2261,6 +2262,7 @@ impl Renderer {
         const A_LIGHT: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Float32, 4 => Unorm8x4, 5 => Uint8x4];
         const A_BOLT: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
 
+        crate::progress::step("shaders");
         let (
             (p_cshadow_in, p_cshadow_out, p_cshadow_in_plain, p_cshadow_out_plain, p_cshadow_mix, p_composite, p_composite_edge, p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_temporal, p_cloud_apply),
             (p_terrain, p_terrain_tess, p_terrain_cells, p_build, p_build_whole, p_build_shadow, p_photo, p_skin, p_photo_shadow, p_photo_shadow_fast, p_photo_mask, p_water_top, p_shore_cover),
@@ -2319,6 +2321,7 @@ impl Renderer {
                 let p_cloud_temporal = full("cloud temporal", &pl(&l_cloud_temporal), &m_cloud, "fs_temporal", HDR, None);
                 let over = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::SrcAlpha, operation: wgpu::BlendOperation::Add };
                 let p_cloud_apply = full("cloud apply", &pl(&l_cloud_apply), &m_cloud, "fs_apply", HDR, Some(wgpu::BlendState { color: over, alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } }));
+                crate::progress::step("shaders-part");
                 (p_cshadow_in, p_cshadow_out, p_cshadow_in_plain, p_cshadow_out_plain, p_cshadow_mix, p_composite, p_composite_edge, p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_temporal, p_cloud_apply)
             });
 
@@ -2367,6 +2370,7 @@ impl Renderer {
                     multiview_mask: None,
                     cache: None,
                 });
+                crate::progress::step("shaders-part");
                 (p_terrain, p_terrain_tess, p_terrain_cells, p_build, p_build_whole, p_build_shadow, p_photo, p_skin, p_photo_shadow, p_photo_shadow_fast, p_photo_mask, p_water_top, p_shore_cover)
             });
 
@@ -2443,6 +2447,7 @@ impl Renderer {
                 let p_card = geom("leaf cards", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 3);
                 let p_inst = geom("inst", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 0);
                 let p_inst_shadow = geom("inst shadow", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 1);
+                crate::progress::step("shaders-part");
                 (p_road, p_field, p_lights, p_lamp_top, p_rain, p_bolt, p_veil, p_tree, imp, p_tree_near, p_tree_shadow, p_tree_shadow_fixed, p_card, p_inst, p_inst_shadow)
             });
 
@@ -2484,6 +2489,7 @@ impl Renderer {
                 multiview_mask: None,
                 cache: None,
             });
+            crate::progress::step("shaders-part");
             (
                 t_cloud.join().unwrap(),
                 t_world.join().unwrap(),
@@ -2491,6 +2497,7 @@ impl Renderer {
                 (p_trans, p_ms, p_sky, p_gtao, p_ao_blur, p_taa, p_down, p_up, p_final, p_final_taa, p_blit, p_particles, p_psim, p_vol, p_dres),
             )
         });
+        crate::progress::step("shaders-done");
         let obj_gen_rx = {
             let (tx, rx) = crossbeam_channel::bounded(2);
             let (d, l0, l_obj, l_casc, l_glass, m) = (d.clone(), l0.clone(), l_obj.clone(), l_casc.clone(), l_glass.clone(), m_obj.clone());

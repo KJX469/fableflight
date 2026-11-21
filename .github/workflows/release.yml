@@ -5,7 +5,9 @@
 # Cargo.toml.
 #
 # Every asset is embedded in the binary (include_bytes!), so each archive holds
-# only the two executables, the README and the licence.
+# only the executables (the game, the copilot bridge and the launcher), the
+# README and the licence. The launcher's updater (src/bin/fableflight-launcher/
+# update.rs) relies on this layout and on SHA256SUMS.txt.
 name: Release
 
 on:
@@ -95,12 +97,12 @@ jobs:
           mkdir "$dir"
           bin="target/${{ matrix.target }}/release"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cp "$bin/fablegame.exe" "$bin/fableflight-mcp.exe" "$dir/"
+            cp "$bin/fablegame.exe" "$bin/fableflight-mcp.exe" "$bin/fableflight-launcher.exe" "$dir/"
             cp README.md LICENSE "$dir/"
             7z a "$dir.zip" "$dir" > /dev/null
             echo "ASSET=$dir.zip" >> "$GITHUB_ENV"
           else
-            cp "$bin/fablegame" "$bin/fableflight-mcp" "$dir/"
+            cp "$bin/fablegame" "$bin/fableflight-mcp" "$bin/fableflight-launcher" "$dir/"
             cp README.md LICENSE "$dir/"
             tar czf "$dir.tar.gz" "$dir"
             echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"

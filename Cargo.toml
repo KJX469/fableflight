@@ -15,6 +15,9 @@ earcutr = "0.5.0"
 egui = "0.37.0"
 egui-wgpu = "0.37.0"
 egui-winit = "0.37.0"
+# the launcher's window (src/bin/fableflight-launcher); the same egui and wgpu
+# as the game, so it adds little to the build
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "wayland", "x11", "links", "clipboard"] }
 ab_glyph = "0.2.32"
 env_logger = "0.11.11"
 flate2 = "1.1.11"

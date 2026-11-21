@@ -15,7 +15,7 @@ struct Globals {
   light_col: vec4f,
   vol_o: vec4f,      // explosion volume corner relative to camera, w cell size
   vol_u: vec4f,      // volume up axis, w = 1 while it holds smoke
-  misc: vec4f,       // near plane, city glow 0..1, water quality, pixel angle
+  misc: vec4f,       // near plane, stops the night exposure is closed down for city lights, water quality, pixel angle
   csm: vec4f,        // world size of a shadow texel in each cascade, w = shadows on
   scorch: array<vec4f, 8>,
   crater: array<vec4f, 8>,  // xyz relative to camera, w radius
@@ -2394,11 +2394,11 @@ fn light_at_nv(P: vec3f) -> Light {
   let mum = dot(upn, G.moon.xyz);
   let night = 1.0 - smoothstep(-0.12, 0.02, mu);
   amb += vec3f(0.30, 0.45, 0.85) * 0.16 * smoothstep(-0.1, 0.35, mum) * G.moon.w * mix(1.0, 0.7, G.cloud.x);
-  amb += vec3f(0.0016, 0.0024, 0.0048) * night;
+  amb += vec3f(0.0011, 0.0021, 0.0052) * night;
   // The towns' light sent back down by the haze and the cloud base above.
   var cup = vec3f(0.0);
   if (glow_on()) { cup = city_up(P, 600.0) * (GLOW_GAIN / PI); }
-  amb += cup * (0.012 + 0.05 * clamp(G.cloud.x, 0.0, 1.0));
+  amb += cup * (0.0025 + 0.032 * clamp(G.cloud.x, 0.0, 1.0));
   var sun_s = sun;
   if (G.nimbo[0].w > 0.0) {
     // Under the rain deck: only the flat grey light diffusing through it (the
@@ -2421,7 +2421,7 @@ fn light_at_nv(P: vec3f) -> Light {
 fn env_reflect(P: vec3f, R: vec3f, upn: vec3f, clouds: bool) -> vec3f {
   let ru = dot(R, upn);
   var sky = sky_lut(normalize(R + upn * max(0.015 - ru, 0.0)));
-  if (clouds && ru > 0.02) {
+  if (clouds && ru > 0.02 && G.cloud.x > 0.001 && G.lite.y > 0.5) {
     let pp = P - G.planet.xyz;
     let h = length(pp) - G.planet.w;
     let mid = G.cloud.y + 400.0;
