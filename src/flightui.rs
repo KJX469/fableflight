@@ -1026,7 +1026,14 @@ pub struct Radial {
     pub since: f64,
     /// the item under the pointer or the pad's focus.
     pub hover: Option<usize>,
+    /// the item the gamepad points at (d-pad round the ring, or the right stick).
+    pub pad: Option<usize>,
+    /// A pressed: pick the pad's item on the next frame.
+    pub pick: bool,
 }
+
+/// how many items the flight menu has.
+pub const RADIAL_N: usize = 7;
 
 /// ring radii: the hub, the ring's inside and outside.
 const HUB_R: f32 = 58.0;
@@ -1068,7 +1075,7 @@ impl Game {
         } else if self.info_open {
             self.info_open = false;
         } else {
-            self.radial = Radial { open: true, since: self.real, hover: None };
+            self.radial = Radial { open: true, since: self.real, ..Default::default() };
             self.pad_home = true;
             // the menu takes the mouse: a look drag in progress stops here.
             self.drag = false;
@@ -1086,7 +1093,7 @@ impl Game {
         None
     }
 
-    fn radial_items(&self) -> [(Icon, &'static str, Bar, bool); 7] {
+    fn radial_items(&self) -> [(Icon, &'static str, Bar, bool); RADIAL_N] {
         let page = |p: Page| self.info_open && self.info_page == p;
         [
             (Icon::Flight, t!("flight.flight"), Bar::Page(Page::Flight), page(Page::Flight)),
@@ -1137,24 +1144,24 @@ impl Game {
                     hover = Some(((a + step * 0.5) / step) as usize % n);
                 }
             }
-            // the pad: one focusable spot per icon, the first picked out when it opens.
-            let mut focused = None;
+            // one clickable spot per icon. The gamepad picks its item
+            // directly (Radial::pad), not through egui's focus.
             for (i, (_, label, _, _)) in items.iter().enumerate() {
                 let at = c + vec2(mid(i).cos(), mid(i).sin()) * (r0 + r1) * 0.5;
                 let r = ui.interact(Rect::from_center_size(at, vec2(44.0, 44.0)), ui.scope_id().with(("radial", i)), Sense::click());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, *label));
-                if i == 0 {
-                    self.pad_home_focus(&r);
-                }
-                if r.has_focus() {
-                    focused = Some(i);
-                }
                 if r.clicked() {
                     pick = Some(i);
                 }
             }
-            let hover = focused.or(hover);
+            let hover = if crate::padui::active() { self.radial.pad.or(hover) } else { hover };
             self.radial.hover = hover;
+            if std::mem::take(&mut self.radial.pick) {
+                match hover {
+                    Some(i) => pick = Some(i),
+                    None => close = true,
+                }
+            }
             if back.clicked() {
                 match hover {
                     Some(i) => pick = Some(i),

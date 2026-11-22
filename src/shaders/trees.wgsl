@@ -19,6 +19,8 @@ struct VOut {
   @location(2) col: vec4f,
   @location(3) L: vec3f,
   @location(4) mat: vec3f,   // kind of bark, openness to the sky, height up the tree
+  @location(5) sun: vec4f,   // sunlight reaching the vertex, w = ground snow cover
+  @location(6) amb: vec3f,   // skylight reaching the vertex
 };
 struct CVOut {
   @builtin(position) clip: vec4f,
@@ -28,7 +30,7 @@ struct CVOut {
   @location(3) uv: vec4f,    // along, across, seed, style
   @location(4) aux: vec4f,   // aspect, two shape parameters, openness to the sky
   @location(5) grow: f32,
-  @location(6) sun: vec3f,   // sunlight and skylight reaching the spray
+  @location(6) sun: vec4f,   // sunlight reaching the spray, w = ground snow cover
   @location(7) amb: vec3f,
 };
 struct GOut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f32 };
@@ -44,7 +46,7 @@ const CUT_RANGE = CARD_RANGE;
 fn cut_k(d: f32) -> f32 { return 1.0 - smoothstep(CUT_RANGE * 0.9, CUT_RANGE, d); }
 
 // Distances at which a tree changes to its next simpler model, moved by up
-// to LOD_JITTER for each tree. Must match LOD_DIST and LOD_JITTER in trees.rs.
+// to LOD_JITTER for each tree. Must match LOD_JITTER in trees.rs.
 const LOD_JITTER = 0.12;
 // A tree's own factor on those distances. Must match `tree_jit` in trees.rs.
 fn tree_jit(ia: vec4f) -> f32 {
@@ -115,39 +117,80 @@ fn tree_world(pos: vec3f, nrm: vec3f, leaf: f32, ia: vec4f, ib: vec4f, far: f32,
   return o;
 }
 
+// Lean position-only transform for depth-only shadow passes (no normal rotation
+// or flex; `coarse` skips 5 cm leaf flutter in cascade 1 where texels are ~0.7 m).
+fn tree_world_shadow(pos: vec3f, leaf: f32, ia: vec4f, ib: vec4f, far: f32, coarse: bool) -> vec3f {
+  let base = ia.xyz + T.offset.xyz;
+  let upn = normalize(base - G.planet.xyz);
+  let e = normalize(cross(vec3f(0.0, 0.0, 1.0), upn));
+  let n = cross(upn, e);
+  let cy = cos(ib.z);
+  let sy = sin(ib.z);
+  let d = length(base);
+  var fade = 1.0 - smoothstep(2700.0, 3200.0, d);
+  if (!coarse && far < 250.0) { fade = 1.0 - smoothstep(far * 0.7, far, d); }
+  let sc = vec3f(ib.w, 1.0, ib.w) * ia.w * fade;
+  var lp = vec3f(pos.x * cy - pos.z * sy, pos.y, pos.x * sy + pos.z * cy) * sc;
+  let th = length(ib.xy);
+  if (th < 0.01) {
+    let ph = ia.x * 0.07 + ia.z * 0.05;
+    let t = G.time.x;
+    let bend = lp.y * lp.y * 0.0009;
+    lp.x += (sin(t * 1.1 + ph) + 0.5 * sin(t * 2.7 + ph * 1.7)) * bend;
+    lp.z += cos(t * 0.9 + ph * 1.3) * bend;
+    if (!coarse) {
+      let fl = leaf * 0.05 * min(lp.y * 0.1, 1.0);
+      lp += vec3f(sin(t * 3.1 + lp.y * 1.9 + ph), 0.0, cos(t * 2.6 + lp.x * 2.3 + ph)) * fl;
+    }
+  } else {
+    let d2 = ib.xy / th;
+    let ax = vec3f(d2.y, 0.0, -d2.x);
+    let c = cos(th);
+    let s = sin(th);
+    lp = lp * c + cross(ax, lp) * s + ax * dot(ax, lp) * (1.0 - c);
+  }
+  return base + e * lp.x + upn * lp.y + n * lp.z;
+}
+
 fn solid_vertex(pos: vec3f, nrm: vec3f, col: vec4f, ia: vec4f, ib: vec4f, tint: vec4f, uv: vec4f, aux: vec4f) -> VOut {
   var o: VOut;
   o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
-  if (other_lod(uv.x, ia, tint.a * 255.0)) { return o; }
+  let far = tint.a * 255.0;
+  if (other_lod(uv.x, ia, far)) { return o; }
   let leaf = step(0.5, col.a);
   // Close up the foliage masses draw in to become the shaded inside of the
   // crown, and the leaf cards carry the outside.
   // Right next to the camera they draw in further still, out of its way.
   let d = length(ia.xyz + T.offset.xyz);
   let k = near_k(d) * (1.0 + 1.0 * (1.0 - smoothstep(12.0, 45.0, d))) * leaf;
-  let w = tree_world(pos + aux.xyz * k, nrm, leaf, ia, ib, tint.a * 255.0, vec2f(0.0));
+  let w = tree_world(pos + aux.xyz * k, nrm, leaf, ia, ib, far, vec2f(0.0));
   // The tint is the canopy colour seen from above: bark only takes its brightness.
   let tn = mix(vec3f(dot(tint.rgb, vec3f(1.0 / 3.0))), tint.rgb, leaf);
-  return VOut(G.view_proj * vec4f(w.P, 1.0), w.P, w.N, vec4f(col.rgb * tn * 2.0, leaf), w.L + ia.xyz * 0.37, vec3f(uv.w, aux.w, w.L.y));
+  let l = light_at(w.P);
+  let sn = select(0.0, snow_at(w.P, l.upn, l.upn, 0.0), snow_on());
+  return VOut(G.view_proj * vec4f(w.P, 1.0), w.P, w.N, vec4f(col.rgb * tn * 2.0, leaf), w.L + ia.xyz * 0.37, vec3f(uv.w, aux.w, w.L.y), vec4f(l.sun, sn), l.amb);
 }
 @vertex fn vs(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f, @location(7) aux: vec4f) -> VOut {
   return solid_vertex(pos, nrm, col, ia, ib, tint, uv, aux);
 }
 // Trees close enough not to be impostors, and undergrowth.
 @vertex fn vs_near(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f, @location(7) aux: vec4f) -> VOut {
-  var o = solid_vertex(pos, nrm, col, ia, ib, tint, uv, aux);
-  if (imp_far(ia, tint.a * 255.0)) { o.clip = vec4f(2.0, 2.0, 0.0, 1.0); }
-  return o;
+  if (imp_far(ia, tint.a * 255.0)) {
+    var o: VOut;
+    o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
+    return o;
+  }
+  return solid_vertex(pos, nrm, col, ia, ib, tint, uv, aux);
 }
 @vertex fn vs_shadow(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f) -> @builtin(position) vec4f {
   if (other_lod(uv.x, ia, tint.a * 255.0) || photo_shadow_gone(ia.xyz + T.offset.xyz)) { return vec4f(2.0, 2.0, 0.0, 1.0); }
-  return CS.vp * vec4f(tree_world(pos, nrm, step(0.5, col.a), ia, ib, tint.a * 255.0, vec2f(0.0)).P, 1.0);
+  return CS.vp * vec4f(tree_world_shadow(pos, step(0.5, col.a), ia, ib, tint.a * 255.0, false), 1.0);
 }
 // Whole batches drawn with the one model they are given (the second cascade).
 @vertex fn vs_shadow_fixed(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f) -> @builtin(position) vec4f {
   // (a tree under the 3D tiles' mesh casts nothing: the mesh's own tree does)
   if (photo_shadow_gone(ia.xyz + T.offset.xyz)) { return vec4f(2.0, 2.0, 0.0, 1.0); }
-  return CS.vp * vec4f(tree_world(pos, nrm, step(0.5, col.a), ia, ib, tint.a * 255.0, vec2f(0.0)).P, 1.0);
+  return CS.vp * vec4f(tree_world_shadow(pos, step(0.5, col.a), ia, ib, tint.a * 255.0, true), 1.0);
 }
 
 // The solid crown stands in for a cloud of leaves. Toward its outline it thins
@@ -164,19 +207,22 @@ fn crown_cover(cl: f32, fw: f32, facing: f32, amount: f32) -> f32 {
   return mix(sharp, 1.0 - 0.9 * cut, smoothstep(0.12, 0.45, fw)) * step(0.001, amount) + (1.0 - step(0.001, amount));
 }
 @vertex fn vs_card(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f, @location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @location(6) uv: vec4f, @location(7) aux: vec4f) -> CVOut {
+  var o: CVOut;
+  o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
   let far = tint.a * 255.0;
+  if (imp_far(ia, far)) { return o; }
   // Sprays come out one by one as a tree gets closer; undergrowth grows as a whole.
   // Further off, the sprays are a little smaller (as baked into the impostors).
   let d = length(ia.xyz + T.offset.xyz);
   var grow = clamp((near_k(d) * mix(1.25, SPRAY_FAR, smoothstep(35.0, 100.0, d)) - uv.z) * 4.0, 0.0, 1.0);
   if (far < 250.0) { grow = 1.0; }
-  if (imp_far(ia, far)) { grow = 0.0; }
+  if (grow <= 0.0) { return o; }
   let w = tree_world(pos, nrm, 1.0, ia, ib, far, vec2f(0.05 * uv.x, uv.z));
-  var clip = G.view_proj * vec4f(w.P, 1.0);
-  if (grow <= 0.0) { clip = vec4f(2.0, 2.0, 0.0, 1.0); }
-  // Light varies slowly across a spray, so it is worked out here rather than per pixel.
+  let clip = G.view_proj * vec4f(w.P, 1.0);
+  // Light and snow line vary slowly across a spray, so work them out here rather than per pixel.
   let l = light_at(w.P);
-  return CVOut(clip, w.P, w.N, vec4f(col.rgb * tint.rgb * 2.0, col.a), uv, aux, grow, l.sun, l.amb);
+  let sn = select(0.0, snow_at(w.P, l.upn, l.upn, 0.0), snow_on());
+  return CVOut(clip, w.P, w.N, vec4f(col.rgb * tint.rgb * 2.0, col.a), uv, aux, grow, vec4f(l.sun, sn), l.amb);
 }
 
 // ------------------------------------------------------------ foliage light
@@ -202,15 +248,21 @@ fn sun_depth(P: vec3f) -> f32 {
 // a little light through, filtered green, and a leaf lit from behind glows.
 // `ao` is openness to the sky, `dense` (0..1) how tightly packed the foliage
 // is here.
-fn foliage(P: vec3f, N: vec3f, V: vec3f, albedo: vec3f, ao: f32, dense: f32, l: Light, sh: f32, glint: f32) -> vec3f {
+// Sun and sky on leaves, taking pre-fetched shadow `sh` and crown optical
+// thickness `depth` (-1 if unavailable, >= 0 from fused shadow lookup).
+fn foliage_d(P: vec3f, N: vec3f, V: vec3f, albedo: vec3f, ao: f32, dense: f32, l: Light, sh: f32, depth: f32, glint: f32, far_only: bool) -> vec3f {
   let sun = G.sun_dir.xyz;
   let ndl = dot(N, sun);
+  let sun_on = (l.sun.x + l.sun.y + l.sun.z) > 0.0;
   // Sunlight that has come through the crown instead of straight from the
   // sky: the further it travelled through leaves, the dimmer and greener.
-  let depth = sun_depth(P);
-  var through = vec3f(0.1, 0.16, 0.03) * ao;
-  if (depth >= 0.0) { through = exp(-depth * (0.2 + 0.3 * dense) * vec3f(1.15, 0.6, 2.4)); }
-  let arrive = mix(through, vec3f(1.0), sh);
+  // In full sunlight (sh >= 1) `through` has zero weight.
+  var arrive = vec3f(1.0);
+  if (sun_on && sh < 0.999) {
+    var through = vec3f(0.1, 0.16, 0.03) * ao;
+    if (depth >= 0.0) { through = exp(-depth * (0.2 + 0.3 * dense) * vec3f(1.15, 0.6, 2.4)); }
+    arrive = mix(through, vec3f(1.0), sh);
+  }
   // The lit side: soft wrap, since the leaves face every which way.
   let wrap = max(ndl * 0.6 + 0.4, 0.0);
   // The far side: light passing through the leaf itself, strongest when
@@ -225,14 +277,78 @@ fn foliage(P: vec3f, N: vec3f, V: vec3f, albedo: vec3f, ao: f32, dense: f32, l: 
   let mu = max(dot(l.upn, sun), 0.0);
   let bounce = vec3f(0.09, 0.11, 0.05) * (l.sun * mu * 0.8 / PI + l.amb) * (0.5 - 0.5 * up);
   // A waxy glint off the top of the leaf.
-  let H = normalize(sun - V);
-  let gloss = pow(max(dot(N, H), 0.0), 40.0) * glint * sh;
+  var gloss = 0.0;
+  if (!far_only && glint > 0.0 && sh > 0.0 && sun_on) {
+    let H = normalize(sun - V);
+    gloss = pow(max(dot(N, H), 0.0), 40.0) * glint * sh;
+  }
   // Leaves are shiny: at a glancing angle they take on the sky's sheen.
   let fres = pow(1.0 - abs(dot(N, V)), 5.0);
   let sheen = l.amb * (0.012 + 0.25 * fres) * ao * max(0.3 + 0.7 * up, 0.0);
   let moon = moon_light(l.upn, 0.0) * max(dot(N, G.moon.xyz) * 0.6 + 0.4, 0.0) * ao;
+  // Beyond 550 m aircraft landing-light beams are negligible; keep fire light only.
+  let pl = select(point_light(P, N), fire_light(P, N), far_only);
   g_amb = albedo * (l.amb * sky + bounce) * ao + sheen;
-  return albedo * ((l.sun * arrive * (wrap + back * vec3f(1.15, 1.25, 0.4)) + moon) / PI + l.amb * sky * ao + bounce * ao + point_light(P, N)) + l.sun * gloss + sheen;
+  return albedo * ((l.sun * arrive * (wrap + back * vec3f(1.15, 1.25, 0.4)) + moon) / PI + l.amb * sky * ao + bounce * ao + pl) + l.sun * gloss + sheen;
+}
+
+fn foliage(P: vec3f, N: vec3f, V: vec3f, albedo: vec3f, ao: f32, dense: f32, l: Light, sh: f32, glint: f32) -> vec3f {
+  let depth = select(-1.0, sun_depth(P), (l.sun.x + l.sun.y + l.sun.z) > 0.0 && sh < 0.999);
+  return foliage_d(P, N, V, albedo, ao, dense, l, sh, depth, glint, false);
+}
+
+// Cascade-adaptive shadow + fused crown sun-depth for impostors.
+// Cascade 0 (<= 260 m) uses a 4-tap bilinear tent kernel (same footprint as 3x3
+// PCF at 2.25x fewer compares); cascades 1 & 2 (73 cm and 4.15 m texels) use
+// 1 hardware 2x2 bilinear PCF tap. When shadowed in cascade 0/1, reads sun-depth
+// directly from the already-projected cascade UV (no second matrix multiply).
+fn shadow_imp(P: vec3f, N: vec3f, c_start: i32, far_only: bool) -> vec2f {
+  if (G.csm.w <= 0.0) { return vec2f(1.0, -1.0); }
+  let cmask = u32(G.lite.w);
+  var sh_w = 1.0;
+  var depth = -1.0;
+  if ((cmask >> u32(c_start)) != 0u) {
+    let dim = vec2f(textureDimensions(t_shadow));
+    let texel = 1.0 / dim.x;
+    var acc = 0.0;
+    var rem = 1.0;
+    for (var c = c_start; c < 3; c++) {
+      if ((cmask & (1u << u32(c))) == 0u) { continue; }
+      let tex = G.csm[c];
+      let m = G.shadow_vp[c];
+      let q = m * vec4f(P + N * tex * 1.8 + G.sun_dir.xyz * tex * 0.8, 1.0);
+      let uv = q.xy * vec2f(0.5, -0.5) + 0.5;
+      let e = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+      if (e <= 0.0 || q.z <= 0.0 || q.z >= 1.0) { continue; }
+      var sh = 0.0;
+      if (!far_only && c == 0) {
+        let d = 0.55 * texel;
+        sh = 0.25 * (
+          textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f(-d, -d), c, q.z - 0.00003) +
+          textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f( d, -d), c, q.z - 0.00003) +
+          textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f(-d,  d), c, q.z - 0.00003) +
+          textureSampleCompareLevel(t_shadow, s_shadow, uv + vec2f( d,  d), c, q.z - 0.00003)
+        );
+      } else {
+        sh = textureSampleCompareLevel(t_shadow, s_shadow, uv, c, q.z - 0.00003);
+      }
+      if (depth < 0.0 && c < 2 && sh < 0.999) {
+        let z = textureLoad(t_shadow, vec2i(uv * dim), c, 0);
+        let per_m = length(vec3f(m[0][2], m[1][2], m[2][2]));
+        let bias_m = tex * (0.8 + dot(N, G.sun_dir.xyz) * 1.8);
+        depth = max((q.z - z) / per_m + bias_m, 0.0);
+      }
+      let w = smoothstep(0.0, 0.07, e);
+      acc += rem * w * sh;
+      rem *= 1.0 - w;
+      if (rem < 0.01) { break; }
+    }
+    sh_w = acc + rem;
+  }
+  if (!far_only) {
+    sh_w *= plane_shadow(P, N);
+  }
+  return vec2f(sh_w, depth);
 }
 
 // One filtered tap of the finest shadow cascade that covers a point: leaf cards
@@ -249,7 +365,7 @@ fn shadow_fast(P: vec3f, N: vec3f) -> f32 {
   return 1.0;
 }
 
-struct Solid { c: vec4f, n: vec4f, cover: f32, amb: f32 };
+struct Solid { c: vec4f, n: vec4f, mask: u32, amb: f32 };
 fn solid_frag(in: VOut, cut: bool) -> Solid {
   let V = normalize(in.P);
   var N = normalize(in.N);
@@ -271,14 +387,23 @@ fn solid_frag(in: VOut, cut: bool) -> Solid {
   let fwm = abs(dcm.x) + abs(dcm.y);
   let dpx = dpdx(in.P);
   let dpy = dpdy(in.P);
+  let upn = normalize(in.P - G.planet.xyz);
+  let l = Light(in.sun.xyz, in.amb, upn, 0.0);
+  let sun_on = (in.sun.x + in.sun.y + in.sun.z) > 0.0;
   if (leaf > 0.5) {
-    var a = 1.0;
+    var mask = 15u;
     if (cut) {
       var Ng = cross(dpx, dpy);
       Ng = Ng / max(length(Ng), 1e-12);
       let facing = abs(dot(normalize(N + Ng * sign(dot(Ng, N))), V));
       // Close up the leaf cards make the outline, so the crown under them thins less.
-      a = crown_cover(cl, fw, facing, (1.0 - 0.4 * near_k(dist)) * cut_k(dist));
+      let a = crown_cover(cl, fw, facing, (1.0 - 0.4 * near_k(dist)) * cut_k(dist));
+      let cnt = min(u32(a * 4.0 + ign(in.clip.xy)), 4u);
+      // Early-out before extra noise, snow, shadow map, and foliage lighting.
+      if (cnt == 0u) { return Solid(vec4f(0.0), vec4f(0.0), 0u, 0.0); }
+      let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
+      let bits = (1u << cnt) - 1u;
+      mask = ((bits << rot) | (bits >> (4u - rot))) & 15u;
     }
     // Darker inside the canopy than at its sunlit surface, and darker still
     // when the camera is in there looking at the back of it.
@@ -303,9 +428,12 @@ fn solid_frag(in: VOut, cut: bool) -> Solid {
     let gap = mix(1.0, 0.6 + 0.4 * smoothstep(0.3, 0.7, cm), mid);
     let ao = in.mat.y * (0.55 + 0.45 * smoothstep(0.3, 0.75, clump)) * inside * gap;
     // Snow caught on the top of the crown (snow.rs).
-    albedo = mix(albedo, SNOW_ALBEDO * inside, snow_top(in.P, N, 0.35, 0.9) * 0.6 * (0.4 + 0.6 * clump));
-    let c = foliage(in.P, N, V, albedo, ao, clump, light_at(in.P), shadow_at(in.P, N), 0.0);
-    return Solid(vec4f(c, 1.0), vec4f(N, 0.0), a, amb_share(c));
+    if (in.sun.w > 0.0) {
+      albedo = mix(albedo, SNOW_ALBEDO * inside, in.sun.w * smoothstep(0.35, 0.9, dot(N, upn)) * 0.6 * (0.4 + 0.6 * clump));
+    }
+    let sh = select(1.0, shadow_at(in.P, N), sun_on);
+    let c = foliage(in.P, N, V, albedo, ao, clump, l, sh, 0.0);
+    return Solid(vec4f(c, 1.0), vec4f(N, 0.0), mask, amb_share(c));
   }
   // Bark: furrows running up the trunk.
   let nb = textureSampleLevel(t_noise, s_repeat, in.L * vec3f(1.7, 0.21, 1.7), 0.0);
@@ -326,12 +454,12 @@ fn solid_frag(in: VOut, cut: bool) -> Solid {
     let mk = textureSampleLevel(t_noise, s_repeat, in.L * vec3f(0.8, 3.3, 0.8), 0.0).g;
     albedo = mix(albedo, vec3f(0.03, 0.028, 0.025), smoothstep(0.6, 0.68, mk) * detail);
   }
-  let l = light_at(in.P);
   let ndl = max(dot(N, G.sun_dir.xyz), 0.0);
-  let sky = 0.5 + 0.5 * dot(N, l.upn);
+  let sky = 0.5 + 0.5 * dot(N, upn);
+  let sh = select(1.0, shadow_at(in.P, N), sun_on && ndl > 0.0);
   g_amb = albedo * l.amb * sky * in.mat.y;
-  let c = albedo * (l.sun * ndl * shadow_at(in.P, N) / PI + l.amb * sky * in.mat.y + point_light(in.P, N));
-  return Solid(vec4f(c, 1.0), vec4f(N, 0.0), 1.0, amb_share(c));
+  let c = albedo * (l.sun * ndl * sh / PI + l.amb * sky * in.mat.y + point_light(in.P, N));
+  return Solid(vec4f(c, 1.0), vec4f(N, 0.0), 15u, amb_share(c));
 }
 @fragment fn fs(in: VOut) -> GOut {
   // Inside the 3D tiles zone the mesh stands in for this (tiles3d.rs).
@@ -345,11 +473,8 @@ fn solid_frag(in: VOut, cut: bool) -> Solid {
 @fragment fn fs_cut(in: VOut) -> COut {
   if (photo_hides(in.P, in.clip.xy)) { discard; }
   let o = solid_frag(in, true);
-  let cnt = min(u32(o.cover * 4.0 + ign(in.clip.xy)), 4u);
-  if (cnt == 0u) { discard; }
-  let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
-  let bits = (1u << cnt) - 1u;
-  return COut(o.c, o.n, o.amb, ((bits << rot) | (bits >> (4u - rot))) & 15u);
+  if (o.mask == 0u) { discard; }
+  return COut(o.c, o.n, o.amb, o.mask);
 }
 
 // --------------------------------------------------------------- leaf cards
@@ -384,7 +509,8 @@ fn sprig(p: vec2f, n: f32, aspect: f32, width: f32, lobes: f32, seed: f32, grow:
     let a = dot(f, dir) / len + 0.5;
     let b = (f.y * dir.x - f.x * dir.y) / len;
     // Pointed at both ends, a little fuller toward the stalk; lobed for oaks and maples.
-    let prof = 4.0 * a * (1.0 - a) * (1.0 - lobes * abs(sin(a * 12.0 + h1 * 6.0)));
+    var prof = 4.0 * a * (1.0 - a);
+    if (lobes > 0.0) { prof *= 1.0 - lobes * abs(sin(a * 12.0 + h1 * 6.0)); }
     let half = 0.5 * width * prof * mix(1.2, 0.8, a);
     let d = (half - abs(b)) * len / n;
     if (d > o.x) { o = vec3f(d, h1, abs(b) / max(half, 0.0001)); }
@@ -428,19 +554,21 @@ fn blades(uv: vec2f, seed: f32, grow: f32) -> vec4f {
 }
 
 @fragment fn fs_card(in: CVOut) -> COut {
-  if (photo_hides(in.P, in.clip.xy)) { discard; }
   let aspect = in.aux.x;
   let p = vec2f(in.uv.x, in.uv.y * aspect);
-  // Size of a pixel in card lengths, and the card's true facing.
+  // Size of a pixel in card lengths, and the card's true facing (before any discard).
   let px = max(length(vec2f(dpdx(p.x), dpdy(p.x))), length(vec2f(dpdx(p.y), dpdy(p.y)))) + 1e-6;
   var Ng = normalize(cross(dpdx(in.P), dpdy(in.P)));
+  if (photo_hides(in.P, in.clip.xy)) { discard; }
+  let tiny = smoothstep(0.7, 1.3, px * in.col.a) * step(in.uv.w, 0.5) + smoothstep(0.1, 0.2, px) * step(0.5, in.uv.w);
+  // When distant sprigs use the spray envelope alone for coverage, discard empty corners before the 3x3 loop.
+  if (in.uv.w < 0.5 && tiny >= 0.999 && (spray_env(p.x, aspect) * in.grow - abs(p.y)) / px + 0.5 <= 0.0) { discard; }
   var m: vec4f;
   if (in.uv.w < 0.5) { m = sprig(p, in.col.a, aspect, in.aux.y, in.aux.z, in.uv.z, in.grow); }
   else if (in.uv.w < 1.5) { m = pinnate(p, in.col.a, aspect, in.aux.y, in.aux.z, in.grow, px); }
   else { m = blades(in.uv.xy, in.uv.z, in.grow); }
   // Coverage: the leaves themselves, or once they are smaller than a pixel,
   // the outline of the spray as a whole.
-  let tiny = smoothstep(0.7, 1.3, px * in.col.a) * step(in.uv.w, 0.5) + smoothstep(0.1, 0.2, px) * step(0.5, in.uv.w);
   let a = clamp(mix(m.x, m.w, tiny) / px + 0.5, 0.0, 1.0);
   // Spread it over the multisamples (alpha itself has to stay 1 for the composite).
   let cnt = min(u32(a * 4.0 + ign(in.clip.xy)), 4u);
@@ -464,9 +592,13 @@ fn blades(uv: vec2f, seed: f32, grow: f32) -> vec4f {
   // Shade mostly as part of the crown, a little as the leaf's own tilted face.
   let tilt = vec3f(tone, fract(tone * 7.13), fract(tone * 13.7)) - 0.5;
   let N = normalize(normalize(in.N) * 0.7 + Ng * 0.3 + tilt * 0.35);
-  albedo = mix(albedo, SNOW_ALBEDO, snow_top(in.P, N, 0.35, 0.9) * 0.6 * max(tone, 0.0));
-  let l = Light(in.sun, in.amb, normalize(in.P - G.planet.xyz), 0.0);
-  let c = foliage(in.P, N, V, albedo * (1.0 - 0.2 * tiny), in.aux.w, 0.35, l, shadow_fast(in.P, N), 0.006);
+  let upn = normalize(in.P - G.planet.xyz);
+  if (in.sun.w > 0.0 && tone > 0.0) {
+    albedo = mix(albedo, SNOW_ALBEDO, in.sun.w * smoothstep(0.35, 0.9, dot(N, upn)) * 0.6 * tone);
+  }
+  let l = Light(in.sun.xyz, in.amb, upn, 0.0);
+  let sh = select(1.0, shadow_fast(in.P, N), (in.sun.x + in.sun.y + in.sun.z) > 0.0);
+  let c = foliage(in.P, N, V, albedo * (1.0 - 0.2 * tiny), in.aux.w, 0.35, l, sh, 0.006);
   return COut(vec4f(c, 1.0), vec4f(N, 0.0), amb_share(c), mask);
 }
 
@@ -479,7 +611,10 @@ fn blades(uv: vec2f, seed: f32, grow: f32) -> vec4f {
 const IMP_N = 8u;          // must match N in impostor.rs
 const IMP_FRAMES = 64u;    // IMP_N * IMP_N
 const IMP_PAD = 0.94;      // part of a picture's width the bounding sphere fills
-struct ImpBounds { b: array<vec4f, 40> };   // per model: centre, radius
+struct ImpBounds {
+  b: array<vec4f, 40>,    // per model: bounding sphere centre, radius
+  ext: array<vec4f, 40>,  // per model: tight AABB half-extents (hx, hy, hz, 0)
+};
 @group(2) @binding(1) var<uniform> IB: ImpBounds;
 @group(2) @binding(2) var t_imp_a: texture_2d_array<f32>;   // albedo, coverage
 @group(2) @binding(3) var t_imp_n: texture_2d_array<f32>;   // normal (picture x, y), depth, openness
@@ -636,26 +771,27 @@ struct IOut {
   @location(0) Q: vec3f,                            // on the plane through the tree's centre
   @location(1) uva: vec4f,                          // where the pixel falls in pictures 0 and 1 (-1..1)
   @location(2) uvb: vec2f,                          // ... and in picture 2
-  @location(3) @interpolate(flat) w: vec3f,         // their weights
-  @location(4) @interpolate(flat) cells: vec4u,     // the three pictures, model
-  @location(5) @interpolate(flat) ex: vec4f,        // model axes in the world; w = metres per unit of stored depth
-  @location(6) @interpolate(flat) ey: vec3f,
-  @location(7) @interpolate(flat) ez: vec3f,
-  @location(8) @interpolate(flat) tint: vec4f,
+  @location(3) @interpolate(flat) w: vec4f,         // sorted view weights (desc), w = distance fade
+  @location(4) @interpolate(flat) cells: vec4u,     // the three pictures (sorted), model
+  @location(5) @interpolate(flat) ex: vec4f,        // model x axis in world; w = metres per unit of stored depth
+  @location(6) @interpolate(flat) ey: vec4f,        // model y axis (upn) in world; w = ground snow cover at C
+  @location(7) @interpolate(flat) tint: vec4f,      // rgb tint, w = ball shading blend
   // How far a pixel's place in each picture moves per unit of stored depth
   // (-1 back .. 1 front of the bounding sphere), along the view ray.
-  @location(9) @interpolate(flat) ka: vec4f,
-  @location(10) @interpolate(flat) kb: vec2f,
-  @location(11) @interpolate(flat) C: vec3f,          // centre of the bounding sphere
+  @location(8) @interpolate(flat) ka: vec4f,
+  @location(9) @interpolate(flat) kb: vec4f,        // k[2].xy, z = mip lod, w = half-texel clamp
+  @location(10) @interpolate(flat) C: vec3f,        // centre of the bounding sphere
+  @location(11) @interpolate(flat) sun: vec3f,      // sunlight at C
+  @location(12) @interpolate(flat) amb: vec3f,      // skylight at C
 };
-@vertex fn vs_imp(@location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @builtin(vertex_index) vi: u32) -> IOut {
+fn imp_vert(ia: vec4f, ib: vec4f, tint: vec4f, vi: u32, need_k: bool) -> IOut {
   var o: IOut;
   o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
   let base = ia.xyz + T.offset.xyz;
   let d = length(base);
-  if (ia.w <= 0.0 || d / tree_jit(ia) < IMP_DIST * tree_imp_k() || d > tree_far()) { return o; }
+  let tf = tree_far();
+  if (ia.w <= 0.0 || d / tree_jit(ia) < IMP_DIST * tree_imp_k() || d > tf) { return o; }
   let layer = vi / 4u;
-  let corner = vec2f(f32(vi & 1u), f32((vi >> 1u) & 1u)) * 2.0 - 1.0;
   let b = IB.b[layer];
   // The tree's axes, as tree_world stands and turns it.
   let upn = normalize(base - G.planet.xyz);
@@ -670,6 +806,11 @@ struct IOut {
   let sc = vec3f(ib.w, 1.0, ib.w) * s;
   let C = base + ex * (b.x * sc.x) + ey * (b.y * sc.y) + ez * (b.z * sc.z);
   let R = b.w * s * max(ib.w, 1.0);
+  // Conservative clip-space frustum reject before lighting and view projections.
+  let cclip = G.view_proj * vec4f(C, 1.0);
+  let r0 = length(vec3f(G.view_proj[0][0], G.view_proj[1][0], G.view_proj[2][0])) + 1.0;
+  let r1 = length(vec3f(G.view_proj[0][1], G.view_proj[1][1], G.view_proj[2][1])) + 1.0;
+  if (cclip.w < -R || abs(cclip.x) > cclip.w + R * r0 || abs(cclip.y) > cclip.w + R * r1) { return o; }
   let dc = length(C);
   let V = C / dc;
   // Which pictures: the direction to the camera in the tree's own frame.
@@ -685,134 +826,396 @@ struct IOut {
     cs[0] = c0 + vec2u(1u, 1u);
     w = vec3f(fr.x + fr.y - 1.0, 1.0 - fr.y, 1.0 - fr.x);
   }
-  // The quad: square to the view, through the centre, covering the bounding sphere.
-  var up = ey - V * dot(ey, V);
-  if (dot(up, up) < 1e-4) { up = ez - V * dot(ez, V); }
-  up = normalize(up);
-  let rt = cross(V, up);
-  let Q = C + (rt * corner.x + up * corner.y) * R;
-  // Where the ray through this corner crosses each picture's plane, in model units.
-  let q = Q - C;
-  let qm = vec3f(dot(q, ex) / sc.x, dot(q, ey) / sc.y, dot(q, ez) / sc.z);
-  let vm = vec3f(dot(V, ex) / sc.x, dot(V, ey) / sc.y, dot(V, ez) / sc.z);
-  var uv: array<vec2f, 3>;
-  var k: array<vec2f, 3>;
-  let span = b.w / IMP_PAD;
-  for (var i = 0; i < 3; i++) {
-    let f = frame_of(cs[i]);
-    var den = dot(vm, f.F);
-    den = select(min(den, -1e-4), max(den, 1e-4), den > 0.0);
-    let h = qm - vm * (dot(qm, f.F) / den);
-    uv[i] = vec2f(dot(h, f.r), dot(h, f.u)) / span;
-    k[i] = vec2f(dot(vm, f.r), dot(vm, f.u)) * (b.w / (den * span));
-  }
-  // Drawn half its radius in front of its centre, so slopes behind it do not cut into it.
-  let push = (dc - 0.5 * R) / dc;
-  o.clip = G.view_proj * vec4f(Q * push, 1.0);
-  o.Q = Q;
-  o.uva = vec4f(uv[0], uv[1]);
-  o.uvb = uv[2];
-  o.w = w;
-  o.cells = vec4u(cs[0].y * IMP_N + cs[0].x, cs[1].y * IMP_N + cs[1].x, cs[2].y * IMP_N + cs[2].x, layer);
-  o.ex = vec4f(ex, b.w * s);
-  o.ey = ey;
-  o.ez = ez;
-  o.tint = tint;
-  o.C = C;
-  o.ka = vec4f(k[0], k[1]);
-  o.kb = k[2];
-  return o;
-}
-@fragment fn fs_imp(in: IOut) -> COut {
-  if (photo_hides(in.Q, in.clip.xy)) { discard; }
-  // The farthest trees dissolve away (how far: the graphics settings).
-  let tf = tree_far();
-  if (ign(in.clip.xy) >= 1.0 - smoothstep(tf * 0.8, tf, length(in.C))) { discard; }
-  // Mip level from how big a picture is on screen, a little on the sharp
-  // side (the temporal filter takes out the shimmer).
-  // (pixels per side of a picture: impostor.rs, less on an integrated GPU)
-  let cell = f32(textureDimensions(t_imp_a).x) / f32(IMP_N);
-  let lod = clamp(log2(max(length(dpdx(in.uva.xy)), length(dpdy(in.uva.xy))) * 0.5 * cell) - 0.5, 0.0, f32(textureNumLevels(t_imp_a) - 1u));
-  // Keep the filter inside the picture: half a texel of the coarser level.
-  let half = 0.5 * exp2(ceil(lod)) / cell;
-  // Mostly the nearest picture alone: blends of three are softer, since
-  // leaves do not line up exactly between views. They cross-fade only near
-  // the hand-over from one picture to the next.
-  var ww = pow(in.w, vec3f(12.0));
+  // Mostly the nearest picture alone: blends of three are softer, since leaves
+  // do not line up exactly between views. Low preset takes only the nearest.
+  var ww = pow(w, vec3f(12.0));
   ww /= ww.x + ww.y + ww.z;
-  // low preset takes the nearest picture alone, without the depth search.
-  let lowq = G.quality.x > 1.5;
-  if (lowq) {
+  if (G.quality.x > 1.5) {
     let m = max(ww.x, max(ww.y, ww.z));
     ww = select(vec3f(0.0), vec3f(1.0), ww >= vec3f(m));
     ww /= ww.x + ww.y + ww.z;
   }
-  let uvs = array<vec2f, 3>(in.uva.xy, in.uva.zw, in.uvb);
-  let ks = array<vec2f, 3>(in.ka.xy, in.ka.zw, in.kb);
+  // Sort the three views descending by weight so dominant view is always slot 0.
+  if (ww.y > ww.x) {
+    let tw = ww.x; ww.x = ww.y; ww.y = tw;
+    let tc = cs[0]; cs[0] = cs[1]; cs[1] = tc;
+  }
+  if (ww.z > ww.y) {
+    let tw = ww.y; ww.y = ww.z; ww.z = tw;
+    let tc = cs[1]; cs[1] = cs[2]; cs[2] = tc;
+  }
+  if (ww.y > ww.x) {
+    let tw = ww.x; ww.x = ww.y; ww.y = tw;
+    let tc = cs[0]; cs[0] = cs[1]; cs[1] = tc;
+  }
+  // The quad: square to the view, through the centre, tightly sized to the
+  // perspective-projected 3D AABB of the tree (eliminates empty air pixels).
+  var up = ey - V * dot(ey, V);
+  if (dot(up, up) < 1e-4) { up = ez - V * dot(ez, V); }
+  up = normalize(up);
+  let rt = cross(V, up);
+  let h = IB.ext[layer].xyz * sc;
+  let hx_v = ex * h.x;
+  let hy_v = ey * h.y;
+  let hz_v = ez * h.z;
+  let d_dep = abs(dot(hx_v, V)) + abs(dot(hy_v, V)) + abs(dot(hz_v, V));
+  let persp = dc / max(dc - d_dep, 1.0);
+  let half_u = min((abs(dot(hx_v, rt)) + abs(dot(hy_v, rt)) + abs(dot(hz_v, rt))) * persp, R);
+  let half_v = min((abs(dot(hx_v, up)) + abs(dot(hy_v, up)) + abs(dot(hz_v, up))) * persp, R);
+  let corner = vec2f(f32(vi & 1u), f32((vi >> 1u) & 1u)) * 2.0 - 1.0;
+  let Q = C + rt * (corner.x * half_u) + up * (corner.y * half_v);
+  // Where the ray through this corner crosses each active picture's plane, in model units.
+  let q = Q - C;
+  let qm = vec3f(dot(q, ex) / sc.x, dot(q, ey) / sc.y, dot(q, ez) / sc.z);
+  let vm = vec3f(dot(V, ex) / sc.x, dot(V, ey) / sc.y, dot(V, ez) / sc.z);
+  var uv = array<vec2f, 3>(vec2f(0.0), vec2f(0.0), vec2f(0.0));
+  var k = array<vec2f, 3>(vec2f(0.0), vec2f(0.0), vec2f(0.0));
+  let span = b.w / IMP_PAD;
+  for (var i = 0; i < 3; i++) {
+    if (i > 0 && ww[i] < 0.002) { break; }
+    let f = frame_of(cs[i]);
+    var den = dot(vm, f.F);
+    den = select(min(den, -1e-4), max(den, 1e-4), den > 0.0);
+    let hit = qm - vm * (dot(qm, f.F) / den);
+    uv[i] = vec2f(dot(hit, f.r), dot(hit, f.u)) / span;
+    if (need_k) {
+      k[i] = vec2f(dot(vm, f.r), dot(vm, f.u)) * (b.w / (den * span));
+    }
+  }
+  // Drawn half its radius in front of its centre, so slopes behind it do not cut into it.
+  let push = (dc - 0.5 * R) / dc;
+  let cell_px = IB.ext[0].w;
+  let max_lod = IB.ext[1].w;
+  let z_cam = max(cclip.w, 1.0);
+  let du_px = max((z_cam * z_cam / dc) / max(sc.x, 1e-4), z_cam / max(sc.y, 1e-4)) * G.misc.w / max(span, 1e-4);
+  let lod = clamp(log2(du_px * 0.5 * cell_px) - 0.5, 0.0, max_lod);
+  let half = 0.5 * exp2(ceil(lod)) / cell_px;
+  let l = light_at(C);
+  let sn = select(0.0, snow_at(C, ey, ey, 0.0), snow_on());
+  let fade = 1.0 - smoothstep(tf * 0.8, tf, dc);
+  let ball = smoothstep(200.0, 700.0, dc);
+  o.clip = G.view_proj * vec4f(Q * push, 1.0);
+  o.Q = Q;
+  o.uva = vec4f(uv[0], uv[1]);
+  o.uvb = uv[2];
+  o.w = vec4f(ww, fade);
+  o.cells = vec4u(cs[0].y * IMP_N + cs[0].x, cs[1].y * IMP_N + cs[1].x, cs[2].y * IMP_N + cs[2].x, layer);
+  o.ex = vec4f(ex, b.w * s);
+  o.ey = vec4f(ey, sn);
+  o.tint = vec4f(tint.rgb, ball);
+  o.C = C;
+  o.ka = vec4f(k[0], k[1]);
+  o.kb = vec4f(k[2], lod, half);
+  o.sun = l.sun;
+  o.amb = l.amb;
+  return o;
+}
+@vertex fn vs_imp(@location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @builtin(vertex_index) vi: u32) -> IOut {
+  return imp_vert(ia, ib, tint, vi, true);
+}
+fn imp_finish(Q: vec3f, C: vec3f, ex: vec4f, ey_sn: vec4f, tint_ball: vec4f, sun: vec3f, amb: vec3f, acc: vec4f, nm: vec3f, dep: f32, open: f32, mask: u32, far_only: bool) -> COut {
+  let inv = 1.0 / max(acc.a, 1e-4);
+  let ao = open * inv;
+  let leaf = smoothstep(0.015, 0.035, ao);
+  let ey = ey_sn.xyz;
+  let ez = cross(ey, ex.xyz);
+  let nmod = normalize(nm + vec3f(0.0, 1e-6, 0.0));
+  var N = normalize(ex.xyz * nmod.x + ey * nmod.y + ez * nmod.z);
+  let V = normalize(Q);
+  let P = Q - V * ((dep * inv * 2.0 - 1.0) * ex.w);
+  // Far off, where single leaves are lost, a crown shades as one rough ball.
+  let ball = tint_ball.w * leaf;
+  if (ball > 0.0) {
+    N = normalize(N + normalize(P - C + ey * (0.25 * ex.w)) * (0.8 * ball));
+  }
+  let tn = mix(vec3f(dot(tint_ball.rgb, vec3f(1.0 / 3.0))), tint_ball.rgb, leaf);
+  var albedo = acc.rgb * inv * tn * 2.0;
+  if (ey_sn.w > 0.0 && leaf > 0.0) {
+    albedo = mix(albedo, SNOW_ALBEDO, ey_sn.w * smoothstep(0.35, 0.9, dot(N, ey)) * 0.55 * leaf);
+  }
+  let l = Light(sun, amb, ey, 0.0);
+  let sun_on = (sun.x + sun.y + sun.z) > 0.0;
+  var sd = vec2f(1.0, -1.0);
+  if (sun_on) { sd = shadow_imp(P, N, 0, far_only); }
+  var c: vec3f;
+  if (leaf > 0.5) {
+    c = foliage_d(P, N, V, albedo, ao, 0.45, l, sd.x, sd.y, 0.0, far_only);
+  } else {
+    let ndl = max(dot(N, G.sun_dir.xyz), 0.0);
+    let sky = 0.5 + 0.5 * dot(N, ey);
+    let pl = select(point_light(P, N), fire_light(P, N), far_only);
+    g_amb = albedo * l.amb * sky;
+    c = albedo * (l.sun * ndl * sd.x / PI + l.amb * sky + pl);
+  }
+  return COut(vec4f(c, 1.0), vec4f(N, 0.0), amb_share(c), mask);
+}
+
+fn imp_frag_core(in: IOut) -> COut {
+  // The farthest trees dissolve away (how far: the graphics settings).
+  if (in.w.w < 1.0 && ign(in.clip.xy) >= in.w.w) { discard; }
+  // Analytic mip level and half-texel clamp hoisted to vs_imp (zero dpdx/dpdy/log2/exp2 in FS).
+  let cell = IB.ext[0].w;
+  let lod = in.kb.z;
+  let half = in.kb.w;
+  let mip_scale = exp2(-lod);
+  let lowq = G.quality.x > 1.5;
   let layer = in.cells.w;
   var acc = vec4f(0.0);
   var nm = vec3f(0.0);
   var dep = 0.0;
   var open = 0.0;
-  for (var i = 0; i < 3; i++) {
-    let wi = ww[i];
-    if (wi < 0.002) { continue; }
-    let cid = in.cells[i];
+  var mask = 0u;
+  if (in.w.y < 0.002) {
+    let cid = in.cells.x;
     let c = vec2u(cid % IMP_N, cid / IMP_N);
-    // The picture was taken from a slightly different direction: find where
-    // this pixel's ray meets the surface in it, from the depth stored there.
-    var u = uvs[i];
-    for (var it = 0; it < select(2, 0, lowq); it++) {
+    var u = in.uva.xy;
+    let shift_px = length(in.ka.xy) * 0.5 * cell * mip_scale;
+    let nit = select(select(2, 1, shift_px < 1.5), 0, lowq || shift_px < 0.35);
+    for (var it = 0; it < nit; it++) {
       let l = vec2f(0.5 + 0.5 * u.x, 0.5 - 0.5 * u.y);
       let a0 = (vec2f(c) + clamp(l, vec2f(half), vec2f(1.0 - half))) / f32(IMP_N);
       let A0 = textureSampleLevel(t_imp_a, s_clamp, a0, layer, lod + 1.0);
       if (A0.a < 0.05) { break; }
       let D0 = textureSampleLevel(t_imp_n, s_clamp, a0, layer, lod + 1.0).z / A0.a;
-      u = uvs[i] + ks[i] * (D0 * 2.0 - 1.0);
+      u = in.uva.xy + in.ka.xy * (D0 * 2.0 - 1.0);
     }
     let loc0 = vec2f(0.5 + 0.5 * u.x, 0.5 - 0.5 * u.y);
-    if (any(loc0 < vec2f(0.0)) || any(loc0 > vec2f(1.0))) { continue; }
+    if (any(loc0 < vec2f(0.0)) || any(loc0 > vec2f(1.0))) { discard; }
     let auv = (vec2f(c) + clamp(loc0, vec2f(half), vec2f(1.0 - half))) / f32(IMP_N);
     let A = textureSampleLevel(t_imp_a, s_clamp, auv, layer, lod);
-    if (A.a < 0.002) { continue; }
+    let cnt = min(u32(A.a * 4.0 + ign(in.clip.xy)), 4u);
+    if (cnt == 0u || A.a < 0.002) { discard; }
+    let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
+    let bits = (1u << cnt) - 1u;
+    mask = ((bits << rot) | (bits >> (4u - rot))) & 15u;
     let Nn = textureSampleLevel(t_imp_n, s_clamp, auv, layer, lod);
     let f = frame_of(c);
     let nv = Nn.xy / A.a * 2.0 - 1.0;
-    nm += (nv.x * f.r + nv.y * f.u + sqrt(max(1.0 - dot(nv, nv), 0.0)) * f.F) * (wi * A.a);
-    acc += A * wi;
-    dep += Nn.z * wi;
-    open += Nn.w * wi;
+    nm = nv.x * f.r + nv.y * f.u + sqrt(max(1.0 - dot(nv, nv), 0.0)) * f.F;
+    acc = A;
+    dep = Nn.z;
+    open = Nn.w;
+  } else {
+    let uvs = array<vec2f, 3>(in.uva.xy, in.uva.zw, in.uvb);
+    let ks = array<vec2f, 3>(in.ka.xy, in.ka.zw, in.kb.xy);
+    for (var i = 0; i < 3; i++) {
+      let wi = in.w[i];
+      if (wi < 0.002) { break; }
+      let cid = in.cells[i];
+      let c = vec2u(cid % IMP_N, cid / IMP_N);
+      var u = uvs[i];
+      let shift_px = length(ks[i]) * 0.5 * cell * mip_scale;
+      let nit = select(select(2, 1, shift_px < 1.5), 0, lowq || shift_px < 0.35);
+      for (var it = 0; it < nit; it++) {
+        let l = vec2f(0.5 + 0.5 * u.x, 0.5 - 0.5 * u.y);
+        let a0 = (vec2f(c) + clamp(l, vec2f(half), vec2f(1.0 - half))) / f32(IMP_N);
+        let A0 = textureSampleLevel(t_imp_a, s_clamp, a0, layer, lod + 1.0);
+        if (A0.a < 0.05) { break; }
+        let D0 = textureSampleLevel(t_imp_n, s_clamp, a0, layer, lod + 1.0).z / A0.a;
+        u = uvs[i] + ks[i] * (D0 * 2.0 - 1.0);
+      }
+      let loc0 = vec2f(0.5 + 0.5 * u.x, 0.5 - 0.5 * u.y);
+      if (any(loc0 < vec2f(0.0)) || any(loc0 > vec2f(1.0))) { continue; }
+      let auv = (vec2f(c) + clamp(loc0, vec2f(half), vec2f(1.0 - half))) / f32(IMP_N);
+      let A = textureSampleLevel(t_imp_a, s_clamp, auv, layer, lod);
+      if (A.a < 0.002) { continue; }
+      let Nn = textureSampleLevel(t_imp_n, s_clamp, auv, layer, lod);
+      let f = frame_of(c);
+      let nv = Nn.xy / A.a * 2.0 - 1.0;
+      nm += (nv.x * f.r + nv.y * f.u + sqrt(max(1.0 - dot(nv, nv), 0.0)) * f.F) * (wi * A.a);
+      acc += A * wi;
+      dep += Nn.z * wi;
+      open += Nn.w * wi;
+    }
+    let cnt = min(u32(acc.a * 4.0 + ign(in.clip.xy)), 4u);
+    if (cnt == 0u) { discard; }
+    let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
+    let bits = (1u << cnt) - 1u;
+    mask = ((bits << rot) | (bits >> (4u - rot))) & 15u;
   }
-  let cover = acc.a;
-  let cnt = min(u32(cover * 4.0 + ign(in.clip.xy)), 4u);
-  if (cnt == 0u) { discard; }
+  return imp_finish(in.Q, in.C, in.ex, in.ey, in.tint, in.sun, in.amb, acc, nm, dep, open, mask, false);
+}
+
+@fragment fn fs_imp(in: IOut) -> COut {
+  return imp_frag_core(in);
+}
+
+@fragment fn fs_imp_photo(in: IOut) -> COut {
+  if (photo_hides(in.Q, in.clip.xy)) { discard; }
+  return imp_frag_core(in);
+}
+
+// Lean impostor path for distant rings (>= 550 m, outside the 3D tiles zone):
+// single nearest hemisphere view (already used for ~75% of angles, with ball
+// shading and mip >= 2 making view seams invisible), world-space picture basis
+// precomputed in VS, analytic mip level and half-texel clamp in VS, zero loops,
+// zero dpdx/dpdy/log2/exp2, zero photo_hides, zero plane_shadow/spot_light.
+struct IOutFar {
+  @builtin(position) clip: vec4f,
+  @location(0) Q: vec3f,
+  @location(1) loc: vec2f,                          // picture-local uv (0..1)
+  @location(2) @interpolate(flat) wr: vec4f,        // world-space picture right axis, w = b.w * s
+  @location(3) @interpolate(flat) wu: vec4f,        // world-space picture up axis, w = ground snow cover
+  @location(4) @interpolate(flat) wf: vec4f,        // world-space picture forward axis, w = ball blend
+  @location(5) @interpolate(flat) tint: vec4f,      // rgb tint, w = distance fade
+  @location(6) @interpolate(flat) C: vec4f,         // bounding sphere centre, w = mip lod
+  @location(7) @interpolate(flat) sun: vec4f,       // sunlight at C, w = half-texel clamp
+  @location(8) @interpolate(flat) amb: vec3f,       // skylight at C
+  @location(9) @interpolate(flat) cl: vec3u,        // picture grid coord (cx, cy), model layer
+};
+@vertex fn vs_imp_far(@location(3) ia: vec4f, @location(4) ib: vec4f, @location(5) tint: vec4f, @builtin(vertex_index) vi: u32) -> IOutFar {
+  var o: IOutFar;
+  o.clip = vec4f(2.0, 2.0, 0.0, 1.0);
+  let base = ia.xyz + T.offset.xyz;
+  let d = length(base);
+  let tf = tree_far();
+  if (ia.w <= 0.0 || d / tree_jit(ia) < IMP_DIST * tree_imp_k() || d > tf) { return o; }
+  let layer = vi / 4u;
+  let b = IB.b[layer];
+  let upn = normalize(base - G.planet.xyz);
+  let e = normalize(cross(vec3f(0.0, 0.0, 1.0), upn));
+  let nn = cross(upn, e);
+  let cy = cos(ib.z);
+  let sy = sin(ib.z);
+  let ex = e * cy + nn * sy;
+  let ez = nn * cy - e * sy;
+  let ey = upn;
+  let s = ia.w * (1.0 - smoothstep(2700.0, 3200.0, d));
+  let sc = vec3f(ib.w, 1.0, ib.w) * s;
+  let C = base + ex * (b.x * sc.x) + ey * (b.y * sc.y) + ez * (b.z * sc.z);
+  let R = b.w * s * max(ib.w, 1.0);
+  let cclip = G.view_proj * vec4f(C, 1.0);
+  let r0 = length(vec3f(G.view_proj[0][0], G.view_proj[1][0], G.view_proj[2][0])) + 1.0;
+  let r1 = length(vec3f(G.view_proj[0][1], G.view_proj[1][1], G.view_proj[2][1])) + 1.0;
+  if (cclip.w < -R || abs(cclip.x) > cclip.w + R * r0 || abs(cclip.y) > cclip.w + R * r1) { return o; }
+  let dc = length(C);
+  let V = C / dc;
+  var lv = -vec3f(dot(V, ex), dot(V, ey), dot(V, ez));
+  lv.y = max(lv.y, 0.0);
+  lv = normalize(lv + vec3f(0.0, 1e-4, 0.0));
+  let g = (hemi_enc(lv) * 0.5 + 0.5) * f32(IMP_N - 1u);
+  let c0 = min(vec2u(max(floor(g), vec2f(0.0))), vec2u(IMP_N - 2u));
+  let fr = clamp(g - vec2f(c0), vec2f(0.0), vec2f(1.0));
+  var c = c0;
+  var w0 = 1.0 - fr.x - fr.y;
+  var w1 = fr.x;
+  var w2 = fr.y;
+  if (fr.x + fr.y > 1.0) {
+    c = c0 + vec2u(1u, 1u);
+    w0 = fr.x + fr.y - 1.0;
+    w1 = 1.0 - fr.y;
+    w2 = 1.0 - fr.x;
+  }
+  if (w1 > w0 && w1 >= w2) { c = c0 + vec2u(1u, 0u); }
+  else if (w2 > w0 && w2 > w1) { c = c0 + vec2u(0u, 1u); }
+  let f = frame_of(c);
+  // Pre-transform picture basis into world space once per vertex (zero frame_of in FS).
+  let wr = ex * f.r.x + ey * f.r.y + ez * f.r.z;
+  let wu = ex * f.u.x + ey * f.u.y + ez * f.u.z;
+  let wf = ex * f.F.x + ey * f.F.y + ez * f.F.z;
+  var up = ey - V * dot(ey, V);
+  if (dot(up, up) < 1e-4) { up = ez - V * dot(ez, V); }
+  up = normalize(up);
+  let rt = cross(V, up);
+  let h = IB.ext[layer].xyz * sc;
+  let hx_v = ex * h.x;
+  let hy_v = ey * h.y;
+  let hz_v = ez * h.z;
+  let d_dep = abs(dot(hx_v, V)) + abs(dot(hy_v, V)) + abs(dot(hz_v, V));
+  let persp = dc / max(dc - d_dep, 1.0);
+  let half_u = min((abs(dot(hx_v, rt)) + abs(dot(hy_v, rt)) + abs(dot(hz_v, rt))) * persp, R);
+  let half_v = min((abs(dot(hx_v, up)) + abs(dot(hy_v, up)) + abs(dot(hz_v, up))) * persp, R);
+  let corner = vec2f(f32(vi & 1u), f32((vi >> 1u) & 1u)) * 2.0 - 1.0;
+  let Q = C + rt * (corner.x * half_u) + up * (corner.y * half_v);
+  let q = Q - C;
+  let qm = vec3f(dot(q, ex) / sc.x, dot(q, ey) / sc.y, dot(q, ez) / sc.z);
+  let vm = vec3f(dot(V, ex) / sc.x, dot(V, ey) / sc.y, dot(V, ez) / sc.z);
+  let span = b.w / IMP_PAD;
+  var den = dot(vm, f.F);
+  den = select(min(den, -1e-4), max(den, 1e-4), den > 0.0);
+  let hit = qm - vm * (dot(qm, f.F) / den);
+  let uv = vec2f(dot(hit, f.r), dot(hit, f.u)) / span;
+  let loc = vec2f(0.5 + 0.5 * uv.x, 0.5 - 0.5 * uv.y);
+  // Analytic mip level for the flat billboard quad (replaces per-pixel dpdx/dpdy/log2/exp2).
+  // Matches max(length(dpdx(uv)), length(dpdy(uv))) accounting for rectilinear perspective.
+  let cell_px = IB.ext[0].w;
+  let max_lod = IB.ext[1].w;
+  let z_cam = max(cclip.w, 1.0);
+  let du_px = max((z_cam * z_cam / dc) / max(sc.x, 1e-4), z_cam / max(sc.y, 1e-4)) * G.misc.w / max(span, 1e-4);
+  let lod = clamp(log2(du_px * 0.5 * cell_px) - 0.5, 0.0, max_lod);
+  let half = 0.5 * exp2(ceil(lod)) / cell_px;
+  let push = (dc - 0.5 * R) / dc;
+  let l = light_at(C);
+  let sn = select(0.0, snow_at(C, ey, ey, 0.0), snow_on());
+  let fade = 1.0 - smoothstep(tf * 0.8, tf, dc);
+  let ball = smoothstep(200.0, 700.0, dc);
+  // Pre-test cascade 1 bounds once per vertex so distant trees (> 1500 m) skip
+  // cascade 1 projection and sun_depth lookup in fs_imp_far.
+  let q1 = G.shadow_vp[1] * vec4f(C, 1.0);
+  let sx1 = length(vec3f(G.shadow_vp[1][0][0], G.shadow_vp[1][1][0], G.shadow_vp[1][2][0]));
+  let sy1 = length(vec3f(G.shadow_vp[1][0][1], G.shadow_vp[1][1][1], G.shadow_vp[1][2][1]));
+  let sz1 = length(vec3f(G.shadow_vp[1][0][2], G.shadow_vp[1][1][2], G.shadow_vp[1][2][2]));
+  let mxy1 = (R + G.csm.y * 3.0) * max(sx1, sy1);
+  let mz1 = (R + G.csm.y * 3.0) * sz1;
+  let in_c1 = abs(q1.x) <= 1.0 + mxy1 && abs(q1.y) <= 1.0 + mxy1 && q1.z > -mz1 && q1.z < 1.0 + mz1;
+  o.clip = G.view_proj * vec4f(Q * push, 1.0);
+  o.Q = Q;
+  o.loc = loc;
+  o.wr = vec4f(wr, b.w * s);
+  o.wu = vec4f(wu, sn);
+  o.wf = vec4f(wf, ball);
+  o.tint = vec4f(tint.rgb, fade);
+  o.C = vec4f(C, lod);
+  o.sun = vec4f(l.sun, half);
+  o.amb = l.amb;
+  o.cl = vec3u(c.x, c.y, layer | select(0u, 64u, in_c1));
+  return o;
+}
+@fragment fn fs_imp_far(in: IOutFar) -> COut {
+  if (in.tint.w < 1.0 && ign(in.clip.xy) >= in.tint.w) { discard; }
+  if (any(in.loc < vec2f(0.0)) || any(in.loc > vec2f(1.0))) { discard; }
+  let half = in.sun.w;
+  let lod = in.C.w;
+  let layer = in.cl.z & 63u;
+  let c_start = select(2, 1, (in.cl.z & 64u) != 0u);
+  let auv = (vec2f(in.cl.xy) + clamp(in.loc, vec2f(half), vec2f(1.0 - half))) / f32(IMP_N);
+  let A = textureSampleLevel(t_imp_a, s_clamp, auv, layer, lod);
+  let cnt = min(u32(A.a * 4.0 + ign(in.clip.xy)), 4u);
+  if (cnt == 0u || A.a < 0.002) { discard; }
   let rot = u32(ign(in.clip.yx + 31.0) * 4.0) & 3u;
   let bits = (1u << cnt) - 1u;
   let mask = ((bits << rot) | (bits >> (4u - rot))) & 15u;
 
-  let inv = 1.0 / max(cover, 1e-4);
-  let ao = open * inv;
+  let Nn = textureSampleLevel(t_imp_n, s_clamp, auv, layer, lod);
+  let inv = 1.0 / max(A.a, 1e-4);
+  let ao = Nn.w * inv;
   let leaf = smoothstep(0.015, 0.035, ao);
-  let nmod = normalize(nm + vec3f(0.0, 1e-6, 0.0));
-  var N = normalize(in.ex.xyz * nmod.x + in.ey * nmod.y + in.ez * nmod.z);
+  let nv = Nn.xy * inv * 2.0 - 1.0;
+  var N = normalize(in.wr.xyz * nv.x + in.wu.xyz * nv.y + in.wf.xyz * sqrt(max(1.0 - dot(nv, nv), 0.0)));
   let V = normalize(in.Q);
-  let P = in.Q - V * ((dep * inv * 2.0 - 1.0) * in.ex.w);
-  // Far off, where single leaves are lost, a crown shades as one rough ball.
-  let ball = smoothstep(200.0, 700.0, length(in.Q)) * leaf;
-  N = normalize(N + normalize(P - in.C + in.ey * (0.25 * in.ex.w)) * (0.8 * ball));
+  let P = in.Q - V * ((Nn.z * inv * 2.0 - 1.0) * in.wr.w);
+  let ey = G.up.xyz;
+  let ball = in.wf.w * leaf;
+  if (ball > 0.0) {
+    N = normalize(N + normalize(P - in.C.xyz + ey * (0.25 * in.wr.w)) * (0.8 * ball));
+  }
   let tn = mix(vec3f(dot(in.tint.rgb, vec3f(1.0 / 3.0))), in.tint.rgb, leaf);
-  var albedo = acc.rgb * inv * tn * 2.0;
-  albedo = mix(albedo, SNOW_ALBEDO, snow_top(P, N, 0.35, 0.9) * 0.55 * leaf);
-  let l = light_at(P);
-  let sh = shadow_at(P, N);
+  var albedo = A.rgb * inv * tn * 2.0;
+  if (in.wu.w > 0.0 && leaf > 0.0) {
+    albedo = mix(albedo, SNOW_ALBEDO, in.wu.w * smoothstep(0.35, 0.9, dot(N, ey)) * 0.55 * leaf);
+  }
+  let l = Light(in.sun.xyz, in.amb, ey, 0.0);
+  let sun_on = (in.sun.x + in.sun.y + in.sun.z) > 0.0;
+  var sd = vec2f(1.0, -1.0);
+  if (sun_on) { sd = shadow_imp(P, N, c_start, true); }
   var c: vec3f;
   if (leaf > 0.5) {
-    c = foliage(P, N, V, albedo, ao, 0.45, l, sh, 0.0);
+    c = foliage_d(P, N, V, albedo, ao, 0.45, l, sd.x, sd.y, 0.0, true);
   } else {
     let ndl = max(dot(N, G.sun_dir.xyz), 0.0);
-    let sky = 0.5 + 0.5 * dot(N, l.upn);
+    let sky = 0.5 + 0.5 * dot(N, ey);
     g_amb = albedo * l.amb * sky;
-    c = albedo * (l.sun * ndl * sh / PI + l.amb * sky + point_light(P, N));
+    c = albedo * (l.sun * ndl * sd.x / PI + l.amb * sky + fire_light(P, N));
   }
   return COut(vec4f(c, 1.0), vec4f(N, 0.0), amb_share(c), mask);
 }

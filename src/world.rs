@@ -5,7 +5,7 @@ use crate::cars::{self, Car};
 use crate::geo::{self, TileId};
 use crate::render::{BuildGpu, DetailDraw, Inst, NearDraw, Renderer, TessCells, TileGpu, TreeDraw, TreeInst, MAX_NEAR};
 use crate::roads::RoadNet;
-use crate::trees::{lod_span, tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_DIST, LODS, LOD_DIST, LOD_JITTER, TREE_SPECIES, VARIANTS};
+use crate::trees::{tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_DIST, LODS, LOD_JITTER, TREE_SPECIES, VARIANTS};
 use crate::weapons::{Target, TargetKey};
 use crate::sources::{Job, JobResult, Loader, DATA_ZOOM, GRID, GV};
 use glam::{DMat4, DVec3, DVec4, Vec3};
@@ -178,7 +178,7 @@ const TESS_N: u32 = 16;
 /// any is in doubt the larger patch is taken, which costs time but changes
 /// nothing on screen. `p`: the grid vertices, `o`: the tile's offset from the
 /// camera and `cell` its grid spacing, as in the tile's uniform.
-fn tess_cells(p: &[[f32; 3]], o: Vec3, cell: f32, b: [f32; 4], out: &mut [Vec<u32>; 5]) {
+fn tess_cells(p: &[[f32; 3]], o: Vec3, cell: f32, b: [f32; 4], fr: Option<&Frustum>, out: &mut [Vec<u32>; 5]) {
     let w = cell as f64;
     // terrain.wgsl `tess_level` at distance d.
     let level = |d: f64| {
@@ -191,6 +191,14 @@ fn tess_cells(p: &[[f32; 3]], o: Vec3, cell: f32, b: [f32; 4], out: &mut [Vec<u3
         for ci in x0..(x0 + b[2] as usize).min(GRID) {
             let i00 = cj * GV + ci;
             let (c00, c10, c01, c11) = (at(i00), at(i00 + 1), at(i00 + GV), at(i00 + GV + 1));
+            // Skip cells completely outside the view frustum (pad radius for relief, waves and craters).
+            if let Some(fr) = fr {
+                let mid = (c00 + c10 + c01 + c11) * 0.25;
+                let r2 = (c00 - mid).length_squared().max((c10 - mid).length_squared()).max((c01 - mid).length_squared()).max((c11 - mid).length_squared());
+                if !fr.sphere(mid.as_dvec3(), r2.sqrt() as f64 + 20.0) {
+                    continue;
+                }
+            }
             // The edges' midpoints, then the inside's (the shader's order of operations).
             let mids = [(c00 + c10) * 0.5, (c01 + c11) * 0.5, (c00 + c01) * 0.5, (c10 + c11) * 0.5, (c00 + c11) * 0.5];
             let (mut lo, mut hi) = (TESS_N, 1);
@@ -1597,10 +1605,11 @@ impl World {
     }
 
     /// Terrain tiles and detail tiles to draw. `focus` and `casc` (radius of
-    /// each shadow cascade) decide what has to be rendered into the shadow maps.
+    /// each shadow cascade) decide what has to be rendered into the shadow maps,
+    /// with `casc_vp` tightening tree shadow culling to each cascade's ortho box.
     /// Also the tessellated cells of the terrain tiles, by the patch they are
     /// drawn with (`tess_cells`).
-    pub fn draw_lists(&self, cam: DVec3, focus: DVec3, casc: [f32; 3]) -> (Vec<(&TileGpu, [f32; 12])>, TessCells, Vec<DetailDraw<'_>>, Vec<TreeInst>) {
+    pub fn draw_lists(&self, cam: DVec3, focus: DVec3, casc: [f32; 3], casc_vp: &[[[f32; 4]; 4]; 3]) -> (Vec<(&TileGpu, [f32; 12])>, TessCells, Vec<DetailDraw<'_>>, Vec<TreeInst>) {
         let mut drawn = Vec::with_capacity(self.draw.len());
         let (clat, clon, calt) = geo::pos_to_lla(cam);
         let agl = calt - self.ground(clat, clon).map(|g| g.h).unwrap_or(0.0);
@@ -1621,8 +1630,9 @@ impl World {
         for (i, (t, u)) in drawn.iter().enumerate() {
             // (render.rs draws a block tessellated only if it has cells both ways)
             if u[10] >= 1.0 && u[11] >= 1.0 {
-                tess_cells(&t.grid, Vec3::new(u[0], u[1], u[2]), u[3], [u[8], u[9], u[10], u[11]], &mut by_n);
-                for (k, cells) in by_n.iter_mut().enumerate() {
+                tess_cells(&t.grid, Vec3::new(u[0], u[1], u[2]), u[3], [u[8], u[9], u[10], u[11]], self.frustum.as_ref(), &mut by_n);
+                // Highest subdivision (nearest cells) first so early-Z hides farther cells behind ridges.
+                for (k, cells) in by_n.iter_mut().enumerate().rev() {
                     if !cells.is_empty() {
                         tess.groups.push((i as u32, k as u32, tess.cells.len() as u32, cells.len() as u32));
                         tess.cells.append(cells);
@@ -1634,6 +1644,15 @@ impl World {
         let mut details = Vec::with_capacity(self.draw_b.len());
         let mut near_inst: Vec<TreeInst> = Vec::new();
         let mut tb = TreeBatcher::new();
+        let casc_box: [(glam::Mat4, f32, f32); 2] = std::array::from_fn(|c| {
+            let m = glam::Mat4::from_cols_array_2d(&casc_vp[c]);
+            (m, m.row(0).truncate().length(), m.row(1).truncate().length())
+        });
+        let in_casc = |c: usize, p: Vec3, r: f32| {
+            let (m, sx, sy) = casc_box[c];
+            let q = m * p.extend(1.0);
+            q.x.abs() <= 1.0 + r * sx && q.y.abs() <= 1.0 + r * sy
+        };
         for (id, view) in self.draw_b.iter().zip(&self.in_view) {
             let Some(BSlot::Ready(b)) = self.builds.get(id) else { continue };
             let Some(g) = &b.gpu else { continue };
@@ -1651,53 +1670,49 @@ impl World {
             if dist < self.tree_far + 100.0 && g.trees.is_some() {
                 for ch in &b.chunks {
                     let cp = b.center + ch.center.as_dvec3();
-                    let dc = (cp - cam).length() as f32;
+                    let rel = (cp - cam).as_vec3();
+                    let dc = rel.length();
                     if dc - ch.radius > self.tree_far {
                         continue;
                     }
                     let seen = self.frustum.as_ref().map(|f| f.sphere(cp - cam, ch.radius as f64 + 25.0)).unwrap_or(true);
                     let fd = (cp - focus).length() as f32 - ch.radius;
-                    // The nearest cascade gets each tree's own model; the next one,
-                    // with texels most of a metre across, one simple model for the
-                    // whole chunk (no per-tree choice, so whole runs batch together).
-                    let cm = (fd < casc[0] * 1.45) as u8;
-                    let in_c1 = fd < casc[1] * 1.45;
+                    // Exact orthographic XY box test per shadow cascade cuts ~39% of out-of-box chunks.
+                    let sr = ch.radius + 10.0;
+                    let cm = (fd < casc[0] * 1.5 && in_casc(0, rel, sr)) as u8;
+                    let in_c1 = fd < casc[1] * 1.5 && in_casc(1, rel, sr);
                     if !seen && cm == 0 && !in_c1 {
                         continue;
                     }
                     if in_c1 {
-                        let lod = LOD_DIST.iter().filter(|d| dc - ch.radius >= **d).count().clamp(C1_LOD, LODS - 2);
+                        // LOD 3 (20-tri icosphere) up to 850 m, area-matched LOD 4 (8-tri
+                        // octahedron) beyond 850 m where cascade 1 texels are 0.73 m wide.
+                        let lod = if dc - ch.radius >= 850.0 { LODS - 2 } else { C1_LOD };
                         for (variant, first, count) in &ch.runs {
-                            tb.push(TreeDraw { mesh: *variant as u32 * LODS as u32 + lod as u32, first: *first, count: *count, view: false, casc: 2, close: false, imp: false, fixed: true });
+                            tb.push(TreeDraw { mesh: *variant as u32 * LODS as u32 + lod as u32, first: *first, count: *count, view: false, casc: 2, close: false, imp: false, fixed: true, ring: 0 });
                         }
                     }
-                    // Every model some tree in the chunk may use: the shader keeps
-                    // each tree to the one for its own distance. In view, only
-                    // trees short of IMP_DIST are drawn as models; the simpler
-                    // ones are for the shadows.
-                    let close = dc - ch.radius < imp_dist * (1.0 + LOD_JITTER);
-                    for lod in 0..LODS - 1 {
-                        let (lo, hi) = lod_span(lod);
-                        if dc + ch.radius < lo || dc - ch.radius >= hi {
-                            continue;
-                        }
-                        let view = seen && close && lod == 0;
-                        if !view && cm == 0 {
-                            continue;
-                        }
+                    // Cascade 0 shadow models: keep full LOD 0 close to the camera (< 140 m)
+                    // so nearby ground shadows preserve exact branch/skirt silhouettes; use
+                    // LOD 1 (same 6 blobs, 4.5x fewer tris) from 140..260 m, LOD 2 beyond.
+                    if cm != 0 {
+                        let dmin = dc - ch.radius;
+                        let lod = if dmin < 140.0 { 0 } else if dmin < 260.0 { 1 } else { 2 };
                         for (variant, first, count) in &ch.runs {
-                            tb.push(TreeDraw { mesh: *variant as u32 * LODS as u32 + lod as u32, first: *first, count: *count, view, casc: cm, close: view, imp: false, fixed: false });
+                            tb.push(TreeDraw { mesh: *variant as u32 * LODS as u32 + lod as u32, first: *first, count: *count, view: false, casc: cm, close: false, imp: false, fixed: true, ring: 0 });
                         }
                     }
-                    // Further off, the trees are impostors.
+                    // Further off, the trees are impostors, bucketed into distance rings so
+                    // foreground crowns draw first and populate Hi-Z before distant ones.
                     if seen && dc + ch.radius >= imp_dist * (1.0 - LOD_JITTER) {
+                        let ring = if dc < 260.0 { 0 } else if dc < 600.0 { 1 } else if dc < 950.0 { 2 } else if dc < 1450.0 { 3 } else if dc < 2150.0 { 4 } else { 5 };
                         for (variant, first, count) in &ch.runs {
-                            tb.push(TreeDraw { mesh: *variant as u32, first: *first, count: *count, view: true, casc: 0, close: false, imp: true, fixed: false });
+                            tb.push(TreeDraw { mesh: *variant as u32, first: *first, count: *count, view: true, casc: 0, close: false, imp: true, fixed: false, ring });
                         }
                     }
                 }
             }
-            // Close to the camera: trees get their leaf cards, and the undergrowth appears.
+            // Close to the camera: near trees (solid + leaf cards) and undergrowth.
             let mut near = Vec::new();
             if dist < CARD_RANGE && near_inst.len() < MAX_NEAR {
                 let lp = -o;
@@ -1730,7 +1745,12 @@ impl World {
                         found.push((ring(uo.length_squared()) | u.var as u16, u.inst(c.center)));
                     }
                 }
-                found.truncate(MAX_NEAR - near_inst.len());
+                let cap = MAX_NEAR - near_inst.len();
+                if found.len() > cap {
+                    // Keep standing trees ahead of undergrowth if the near buffer fills up.
+                    found.sort_unstable_by_key(|f| ((f.0 & 255) as usize / VARIANTS >= TREE_SPECIES, f.0));
+                    found.truncate(cap);
+                }
                 found.sort_unstable_by_key(|f| f.0);
                 let mut i = 0;
                 while i < found.len() {
@@ -1741,11 +1761,9 @@ impl World {
                         i += 1;
                     }
                     let (mesh, count) = (var as u32 * LODS as u32, near_inst.len() as u32 - first);
-                    // Trees are already standing there as solids; undergrowth is not.
-                    if var as usize / VARIANTS >= TREE_SPECIES {
-                        near.push(NearDraw { mesh, first, count, cards: false });
-                    }
-                    near.push(NearDraw { mesh: mesh + CARDS, first, count, cards: true });
+                    let is_tree = (var as usize / VARIANTS) < TREE_SPECIES;
+                    near.push(NearDraw { mesh, first, count, cards: false, tree: is_tree });
+                    near.push(NearDraw { mesh: mesh + CARDS, first, count, cards: true, tree: is_tree });
                 }
             }
             let fade = |t: f32, secs: f32| (t / secs).clamp(0.0, 1.0);
@@ -1781,8 +1799,8 @@ impl World {
     }
 }
 
-/// Model the second shadow cascade draws trees with, at the least: some 25
-/// triangles, enough for texels most of a metre across.
+/// Model the second shadow cascade draws trees with, at the least: 20-triangle
+/// icosphere crown (no sub-texel trunk), matching full crown shadow area at 0.73 m/texel.
 const C1_LOD: usize = 3;
 
 /// Collects a tile's tree batches, joining each to the last one drawn the same
@@ -1800,11 +1818,16 @@ impl TreeBatcher {
         Self { open: vec![0; 64 * 512], touched: Vec::new(), out: Vec::new() }
     }
     fn push(&mut self, t: TreeDraw) {
-        let k = ((t.imp as usize) | (t.fixed as usize) << 1 | (t.view as usize) << 2 | (t.close as usize) << 3 | ((t.casc as usize) & 3) << 4) * 512 + (t.mesh as usize).min(511);
+        let flags = if t.imp {
+            1 | (((t.ring as usize) & 7) << 1)
+        } else {
+            ((t.fixed as usize) << 1) | ((t.view as usize) << 2) | ((t.close as usize) << 3) | (((t.casc as usize) & 3) << 4)
+        };
+        let k = flags * 512 + (t.mesh as usize).min(511);
         let o = self.open[k] as usize;
         if o > 0 {
             let p = &mut self.out[o - 1];
-            if p.mesh == t.mesh && p.first + p.count == t.first {
+            if p.mesh == t.mesh && p.ring == t.ring && p.first + p.count == t.first {
                 p.count += t.count;
                 return;
             }
