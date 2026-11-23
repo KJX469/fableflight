@@ -451,6 +451,15 @@ impl Game {
             row(ui, t!("settings.cockpit_field_of_view"), t!("settings.the_mouse_wheel_zooms_for"), |ui| {
                 ui.add(egui::Slider::new(&mut self.cockpit_fov, 35.0..=85.0).custom_formatter(|v, _| format!("{v:.0}° vertical")));
             });
+            row(ui, t!("settings.invert_cockpit_view"), t!("settings.invert_view_hint"), |ui| {
+                menu::switch(ui, &mut self.invert_look_cockpit);
+            });
+            row(ui, t!("settings.invert_outside_horizontal"), t!("settings.invert_view_hint"), |ui| {
+                menu::switch(ui, &mut self.invert_look_outside_x);
+            });
+            row(ui, t!("settings.invert_outside_vertical"), t!("settings.invert_view_hint"), |ui| {
+                menu::switch(ui, &mut self.invert_look_outside_y);
+            });
         });
     }
 
@@ -462,10 +471,13 @@ impl Game {
             });
         });
         card(ui, t!("settings.connected_devices"), |ui| self.binds_devices(ui));
-        card(ui, t!("settings.gamepad"), |ui| self.binds_pad(ui));
-        card(ui, t!("settings.joystick_axes"), |ui| self.binds_axes(ui));
-        card(ui, t!("settings.buttons_joystick_throttle_wheel"), |ui| self.binds_buttons(ui));
-        card(ui, t!("settings.keyboard"), |ui| self.binds_keys(ui));
+        // One search over every bindings table below (and the key reference).
+        let words = menu::search_box(ui, "bindings", t!("menu.search_bindings"), ui.available_width().min(460.0));
+        ui.add_space(6.0);
+        card(ui, t!("settings.gamepad"), |ui| self.binds_pad(ui, &words));
+        card(ui, t!("settings.joystick_axes"), |ui| self.binds_axes(ui, &words));
+        card(ui, t!("settings.buttons_joystick_throttle_wheel"), |ui| self.binds_buttons(ui, &words));
+        card(ui, t!("settings.keyboard"), |ui| self.binds_keys(ui, &words));
         if ui.add_enabled(self.binds.capture.is_none(), egui::Button::new(t!("settings.reset_all_bindings"))).clicked() {
             self.binds = bind::Bindings::default();
             self.keys.clear();
@@ -869,9 +881,9 @@ impl Game {
 
     /// The gamepad's flying layout (padmap.rs): the sticks and triggers,
     /// then every action, each bound from the pad itself.
-    fn binds_pad(&mut self, ui: &mut Ui) {
+    fn binds_pad(&mut self, ui: &mut Ui, words: &[String]) {
         use bind::Capture;
-        use padmap::{AxisSrc, PadAxis};
+        use padmap::{AxisSrc, PadAxis, Thumb};
         let busy = self.binds.capture.is_some();
         note(ui, t!("settings.in_the_menus_the_pad"));
         if self.pad_note.1 > self.real {
@@ -884,6 +896,9 @@ impl Game {
         bind_grid(ui, "pad_binds", |ui| {
             for a in PadAxis::ALL {
                 let src = self.binds.pad.axis(a);
+                if !menu::matches(words, &[a.label(), &src.map(|s| s.stick.spec()).unwrap_or_default()]) {
+                    continue;
+                }
                 grid_label(ui, a.label(), cw);
                 pad_cell(ui, src.map(|s| s.stick.spec()), self.binds.pad.axis_moved(a));
                 ui.horizontal(|ui| {
@@ -905,14 +920,38 @@ impl Game {
                 });
                 ui.end_row();
             }
+            // Each thumbstick's dead zone, for a pad that drifts at rest.
+            for t in Thumb::ALL {
+                let mut d = self.binds.pad.dead(t);
+                grid_label(ui, t.label(), cw);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().slider_width = 70.0;
+                    if ui.add(egui::Slider::new(&mut d, 0.0..=padmap::DEAD_MAX).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                        .on_hover_text(t!("settings.dead_zone_how_much_travel"))
+                        .changed()
+                    {
+                        self.binds.pad.set_dead(t, d);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    dead_zone_box(ui, t, d, self.pad_live);
+                    if d != t.default_dead() && ui.add_enabled(!busy, egui::Button::new(t!("settings.default"))).clicked() {
+                        self.binds.pad.set_dead(t, t.default_dead());
+                    }
+                });
+                ui.end_row();
+            }
             // (one grid for both, so the columns line up)
             for _ in 0..3 {
-                ui.add_space(4.0);
+                ui.allocate_space(vec2(0.0, 4.0));
             }
             ui.end_row();
             for &(id, _) in padmap::actions() {
                 let moved = self.binds.pad.is_moved(id);
                 let chord = self.binds.pad.chord(id);
+                if !menu::matches(words, &[padmap::label(id), id, &chord.map(|c| c.spec()).unwrap_or_default()]) {
+                    continue;
+                }
                 grid_label(ui, padmap::label(id), cw);
                 pad_cell(ui, chord.map(|c| if c == padmap::Y_ALONE { t!("settings.y_let_go").to_string() } else { c.spec() }), moved);
                 ui.horizontal(|ui| {
@@ -939,14 +978,15 @@ impl Game {
         }
     }
 
-    fn binds_axes(&mut self, ui: &mut Ui) {
+    fn binds_axes(&mut self, ui: &mut Ui, words: &[String]) {
         use bind::{AxisAct, Capture};
         let busy = self.binds.capture.is_some();
         note(ui, t!("settings.binding_then_its_live_value"));
         ui.add_space(6.0);
         let cw = ui.available_width();
         bind_grid(ui, "bind_axes", |ui| {
-            for a in AxisAct::ALL {
+            let shown: Vec<_> = AxisAct::ALL.into_iter().filter(|a| menu::matches(words, &[a.label(), &self.binds.describe_axis(*a).unwrap_or_default()])).collect();
+            for a in shown {
                 grid_label(ui, a.label(), cw);
                 binding_cell(ui, self.binds.describe_axis(a), false);
                 ui.horizontal(|ui| {
@@ -980,12 +1020,13 @@ impl Game {
         });
     }
 
-    fn binds_buttons(&mut self, ui: &mut Ui) {
+    fn binds_buttons(&mut self, ui: &mut Ui, words: &[String]) {
         use bind::{Capture, ACTIONS};
         let busy = self.binds.capture.is_some();
         let cw = ui.available_width();
         bind_grid(ui, "bind_buttons", |ui| {
-            for a in ACTIONS {
+            let shown: Vec<_> = ACTIONS.iter().filter(|a| menu::matches(words, &[a.label(), a.id, &self.binds.describe_button(a.id).unwrap_or_default()])).collect();
+            for a in shown {
                 grid_label(ui, a.label(), cw);
                 binding_cell(ui, self.binds.describe_button(a.id), false);
                 ui.horizontal(|ui| {
@@ -1002,19 +1043,22 @@ impl Game {
         });
     }
 
-    fn binds_keys(&mut self, ui: &mut Ui) {
+    fn binds_keys(&mut self, ui: &mut Ui, words: &[String]) {
         use bind::{Capture, ACTIONS};
         let busy = self.binds.capture.is_some();
         let cw = ui.available_width();
         bind_grid(ui, "bind_keys", |ui| {
             for a in ACTIONS.iter().filter(|a| a.keyboard) {
-                grid_label(ui, a.label(), cw);
                 let moved = self.binds.keys.contains_key(a.id);
                 let keys = if a.id == "tail_view" && !moved && self.binds.map_key(winit::keyboard::KeyCode::IntlBackslash) == Some(a.key) {
                     Some(i18n::tr("text.controls.f6_iso_key").to_string())
                 } else {
                     self.binds.key_of(a).map(bind::key_name)
                 };
+                if !menu::matches(words, &[a.label(), a.id, keys.as_deref().unwrap_or_default()]) {
+                    continue;
+                }
+                grid_label(ui, a.label(), cw);
                 binding_cell(ui, keys, moved);
                 ui.horizontal(|ui| {
                     if ui.add_enabled(!busy, egui::Button::new(t!("settings.change"))).clicked() {
@@ -1034,6 +1078,56 @@ impl Game {
 }
 
 /// the grid every bindings table shares, so their columns line up.
+/// Where a thumbstick (or the triggers) is now, against its dead zone: a
+/// box with the zone shaded and a dot for the stick, lit once it gets
+/// through; the triggers as two bars. Then how far off centre it reads, to
+/// see what a pad at rest drifts to.
+fn dead_zone_box(ui: &mut Ui, t: padmap::Thumb, d: f32, live: Option<padmap::Live>) {
+    let side = 56.0;
+    let (r, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+    let p = ui.painter();
+    let zone = ACCENT.gamma_multiply(0.22);
+    p.rect_filled(r, 3.0, Color32::from_black_alpha(90));
+    let v = live.map(|l| l.at(t)).unwrap_or_default();
+    let lit = live.map(|l| l.through(t, d)).unwrap_or_default();
+    if t == padmap::Thumb::Triggers {
+        // LT and RT, filling up from the bottom; the zone along the bottom.
+        let gap = 6.0;
+        let w = (side - gap * 3.0) * 0.5;
+        for (i, (v, lit)) in v.into_iter().zip(lit).enumerate() {
+            let x = r.left() + gap + i as f32 * (w + gap);
+            let bar = Rect::from_min_max(pos2(x, r.top() + 4.0), pos2(x + w, r.bottom() - 4.0));
+            p.rect_stroke(bar, 1.0, Stroke::new(1.0, DIM), egui::StrokeKind::Inside);
+            p.rect_filled(Rect::from_min_max(pos2(bar.left(), bar.bottom() - bar.height() * d), bar.max), 0.0, zone);
+            if live.is_some() {
+                let col = if lit { ACCENT } else { TEXT };
+                p.rect_filled(Rect::from_min_max(pos2(bar.left(), bar.bottom() - bar.height() * v.clamp(0.0, 1.0)), bar.max), 0.0, col.gamma_multiply(0.8));
+            }
+        }
+    } else {
+        // Each way reads nothing inside its band: a cross, shaded.
+        let (c, h) = (r.center(), side * 0.5);
+        p.rect_filled(Rect::from_center_size(c, vec2(side * d, side)), 0.0, zone);
+        p.rect_filled(Rect::from_center_size(c, vec2(side, side * d)), 0.0, zone);
+        p.line_segment([pos2(c.x, r.top()), pos2(c.x, r.bottom())], Stroke::new(1.0, DIM.gamma_multiply(0.5)));
+        p.line_segment([pos2(r.left(), c.y), pos2(r.right(), c.y)], Stroke::new(1.0, DIM.gamma_multiply(0.5)));
+        if live.is_some() {
+            let dot = pos2(c.x + v[0].clamp(-1.0, 1.0) * h, c.y - v[1].clamp(-1.0, 1.0) * h);
+            p.circle_filled(dot, 3.5, if lit[0] || lit[1] { ACCENT } else { TEXT });
+        }
+    }
+    p.rect_stroke(r, 3.0, Stroke::new(1.0, DIM), egui::StrokeKind::Inside);
+    // The reading, in the slider's terms.
+    let text = match live {
+        Some(_) => {
+            let (a, b) = if t == padmap::Thumb::Triggers { ("LT", "RT") } else { ("X", "Y") };
+            format!("{a} {:.0}%  {b} {:.0}%", v[0].abs() * 100.0, v[1].abs() * 100.0)
+        }
+        None => t!("settings.no_gamepad").to_string(),
+    };
+    ui.add_sized(vec2(96.0, side), egui::Label::new(RichText::new(text).font(menu::caption()).color(DIM)));
+}
+
 fn bind_grid(ui: &mut Ui, id: &str, body: impl FnOnce(&mut Ui)) {
     egui::Grid::new(id).num_columns(4).spacing([16.0, 6.0]).min_row_height(30.0).show(ui, body);
 }
@@ -1094,5 +1188,102 @@ mod tests {
         // `--pause-menu controls` is the key list, not the settings section.
         assert_eq!(crate::menu::Page::parse("controls"), Some(crate::menu::Page::Controls));
         assert_eq!(crate::menu::Page::parse("graphics"), None);
+    }
+
+    #[test]
+    fn controls_ui_does_not_panic() {
+        let ctx = egui::Context::default();
+        let binds = bind::Bindings::default();
+        let mut look_sens = 1.0f32;
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        card(ui, t!("settings.mouse"), |ui| {
+                            row(ui, t!("settings.mouse_look_speed"), t!("settings.dragging_to_look_around"), |ui| {
+                                ui.add(egui::Slider::new(&mut look_sens, 0.25..=3.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.2}×")));
+                            });
+                        });
+                        let _words = menu::search_box(ui, "bindings", t!("menu.search_bindings"), ui.available_width().min(460.0));
+                        ui.add_space(6.0);
+                        card(ui, t!("settings.gamepad"), |ui| {
+                            let cw = ui.available_width();
+                            bind_grid(ui, "pad_binds", |ui| {
+                                for a in padmap::PadAxis::ALL {
+                                    let src = binds.pad.axis(a);
+                                    grid_label(ui, a.label(), cw);
+                                    pad_cell(ui, src.map(|s| s.stick.spec()), binds.pad.axis_moved(a));
+                                    ui.horizontal(|ui| {
+                                        let _ = ui.button(t!("settings.change"));
+                                    });
+                                    ui.end_row();
+                                }
+                                for _ in 0..3 {
+                                    ui.allocate_space(vec2(0.0, 4.0));
+                                }
+                                ui.end_row();
+                                for &(id, _) in padmap::actions() {
+                                    let moved = binds.pad.is_moved(id);
+                                    let chord = binds.pad.chord(id);
+                                    grid_label(ui, padmap::label(id), cw);
+                                    pad_cell(ui, chord.map(|c| if c == padmap::Y_ALONE { t!("settings.y_let_go").to_string() } else { c.spec() }), moved);
+                                    ui.horizontal(|ui| {
+                                        let _ = ui.button(t!("settings.change"));
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                        card(ui, t!("settings.joystick_axes"), |ui| {
+                            let cw = ui.available_width();
+                            bind_grid(ui, "bind_axes", |ui| {
+                                for a in bind::AxisAct::ALL {
+                                    grid_label(ui, a.label(), cw);
+                                    binding_cell(ui, binds.describe_axis(a), false);
+                                    ui.horizontal(|ui| {
+                                        let _ = ui.button(t!("settings.assign"));
+                                    });
+                                    ui.horizontal(|_ui| {});
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                        card(ui, t!("settings.buttons_joystick_throttle_wheel"), |ui| {
+                            let cw = ui.available_width();
+                            bind_grid(ui, "bind_buttons", |ui| {
+                                for a in bind::ACTIONS {
+                                    grid_label(ui, a.label(), cw);
+                                    binding_cell(ui, binds.describe_button(a.id), false);
+                                    ui.horizontal(|ui| {
+                                        let _ = ui.button(t!("settings.assign"));
+                                    });
+                                    ui.label("");
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                        card(ui, t!("settings.keyboard"), |ui| {
+                            let cw = ui.available_width();
+                            bind_grid(ui, "bind_keys", |ui| {
+                                for a in bind::ACTIONS.iter().filter(|a| a.keyboard) {
+                                    grid_label(ui, a.label(), cw);
+                                    let keys = binds.key_of(a).map(bind::key_name);
+                                    binding_cell(ui, keys, false);
+                                    ui.horizontal(|ui| {
+                                        let _ = ui.button(t!("settings.change"));
+                                    });
+                                    ui.label("");
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                        card(ui, t!("settings.key_reference"), |ui| {
+                            menu::controls_list(ui);
+                        });
+                    });
+                });
+            });
+            out.textures_delta.clear();
+        }
     }
 }

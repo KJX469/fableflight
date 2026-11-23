@@ -21,6 +21,7 @@ mod fsr3;
 mod fsr4;
 mod fgmodel;
 mod fluid;
+mod dynamic;
 mod gputime;
 mod geo;
 mod globeclouds;
@@ -60,6 +61,7 @@ mod photonight;
 mod relight;
 mod rain;
 mod storm;
+mod contrails;
 mod wake;
 mod weather;
 mod weapons;
@@ -67,6 +69,7 @@ mod mvt;
 mod plane;
 mod render;
 mod single_sample;
+mod stroke_font;
 mod roads;
 mod skin;
 mod sources;
@@ -316,6 +319,9 @@ struct Args {
     /// `graphics::integrated_preset` until the graphics settings are saved)
     graphics: Option<graphics::Preset>,
     storm_quality: Option<graphics::Level>,
+    /// --dynamic FPS: dynamic quality on for this run, aiming for FPS (0: the display's)
+    dynamic: Option<u16>,
+    contrails: Option<bool>,
     render_scale: Option<f32>,
     upscaler: Option<graphics::Upscaler>,
     /// log the frame rate once a second (average and slowest frame)
@@ -422,7 +428,7 @@ struct Args {
     mcp_port: u16,
 }
 
-const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--isa-dev K] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--isa-dev K] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -469,6 +475,8 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
         taa: true,
         graphics: None,
         storm_quality: None,
+        dynamic: None,
+        contrails: None,
         render_scale: None,
         upscaler: None,
         fps_log: false,
@@ -888,9 +896,18 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
                 let s = req(flag, i)?;
                 a.graphics = Some(graphics::Preset::parse(s).ok_or_else(|| format!("{flag}: expected very-low, low, medium, high or ultra, got '{s}'"))?);
             }
+            "--dynamic" => a.dynamic = Some(req_num(flag, i)?.clamp(0.0, 240.0) as u16),
             "--storm-quality" => {
                 let s = req(flag, i)?;
                 a.storm_quality = Some(graphics::Level::parse(s).filter(|l| *l != graphics::Level::Off).ok_or_else(|| format!("{flag}: expected low, medium, high or ultra, got '{s}'"))?);
+            }
+            "--contrails" => {
+                a.contrails = Some(true);
+                used = 1;
+            }
+            "--no-contrails" => {
+                a.contrails = Some(false);
+                used = 1;
             }
             "--render-scale" => a.render_scale = Some((req_num(flag, i)? as f32).clamp(graphics::SCALE_MIN, graphics::SCALE_MAX)),
             "--upscaler" => {
@@ -1216,6 +1233,13 @@ struct Game {
     /// and what was last handed to the renderer and world
     gfx: graphics::Graphics,
     gfx_applied: Option<graphics::Graphics>,
+    /// what is drawn with: `gfx`, or below it under dynamic quality (dynamic.rs)
+    gfx_eff: graphics::Graphics,
+    dynq: dynamic::Dynamic,
+    /// storm cells were on screen last frame (dynamic quality lowers them first)
+    storms_seen: bool,
+    /// dynamic quality asked for on the command line (so it runs in --bench too)
+    dyn_cli: bool,
     /// where the aircraft was drawn last frame, relative to that frame's camera
     prev_plane: Mat4,
     /// centre and half size of the aircraft in its body frame
@@ -1278,6 +1302,8 @@ struct Game {
     /// the pad was used last, not the mouse: the middle of the cockpit view
     /// picks out the controls (see `pad_aim_at`)
     pad_aim: bool,
+    /// the pad's sticks as read now, for the dead zone boxes in Settings (None: no pad)
+    pad_live: Option<padmap::Live>,
     /// the camera look the view starts out at (right stick click goes back to it)
     cam_home: (f64, f64),
     rng: crash::Rng,
@@ -1306,6 +1332,10 @@ struct Game {
     settings_sec: settings_ui::Section,
     /// mouse-look speed (1 = default)
     look_sens: f64,
+    /// Settings › Camera: looking around turns the other way in the cockpit, outside (horizontal / vertical).
+    invert_look_cockpit: bool,
+    invert_look_outside_x: bool,
+    invert_look_outside_y: bool,
     /// the pilot's head in the cockpit view, the cockpit's vertical field of
     /// view (deg), and whether the head was in use last frame
     head: cockpit::Head,
@@ -1389,6 +1419,9 @@ struct Game {
     /// birds around the camera (birds.rs), and the setting for this run if given
     birds: birds::Birds,
     birds_level: Option<graphics::Level>,
+    /// adaptive-LOD contrail simulation and reusable GPU draw buffer (contrails.rs)
+    contrails: contrails::Contrails,
+    contrail_draw: contrails::DrawData,
     /// bird instances drawn last frame (the fps log)
     bird_insts: usize,
     /// the flown aircraft's shape for bird strikes, and which type it is of
@@ -1541,6 +1574,13 @@ impl Game {
         if let Some(l) = args.storm_quality {
             gfx.storms = l;
         }
+        if let Some(f) = args.dynamic {
+            gfx.dynamic = true;
+            gfx.dyn_fps = f;
+        }
+        if let Some(on) = args.contrails {
+            gfx.contrails = on;
+        }
         gfx.vsync &= args.vsync;
         if args.bench.is_some() {
             // the graphics test measures the GPU, not a frame limit
@@ -1558,6 +1598,9 @@ impl Game {
             gfx.apply(p);
             if let Some(l) = args.storm_quality {
                 gfx.storms = l;
+            }
+            if let Some(on) = args.contrails {
+                gfx.contrails = on;
             }
             log::info!("integrated graphics: {} preset until the graphics settings are saved", p.name());
         }
@@ -1762,15 +1805,15 @@ impl Game {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: std::collections::HashMap::new(), window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, piece_inner, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, lean_drag: None, last_cursor: None,
             minimap: minimap::Minimap::new(&prefs),
             cam_yaw: cy.to_radians(), cam_pitch: cp, cam_dist: cd, cam_mode: args.start_view.unwrap_or(prefs.cam_mode), view_before_tail: 0, cam_pos, cam_dir: -plane.forward(), cam_look: plane.pos, orbit: 0.0, cam_rise: 0.0, cam_clear_t: 0.0, cam_ang: None, cam_hold: 0.0,
-            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, prev_plane: Mat4::IDENTITY, plane_box, lamps,
+            utc: (args.hour - lon / 15.0).rem_euclid(24.0), doy: args.day.unwrap_or(doy), wx, time: 0.0, real: 0.0, last: Instant::now(), acc: 0.0, wave_off: DVec2::ZERO, shore: shore::Shore::default(), ocean_off: DVec2::ZERO, prev_cam: cam_pos, prev_vp: [[0.0; 4]; 4], gfx, gfx_applied: None, gfx_eff: gfx, dynq: dynamic::Dynamic::default(), storms_seen: false, dyn_cli: args.dynamic.is_some(), prev_plane: Mat4::IDENTITY, plane_box, lamps,
             frame: 0, fps: 60.0, fps_log: (args.fps_log, Instant::now(), 0, 0.0), paused: false, show_help: false, show_hud: !args.no_hud && prefs.show_hud, hud_cockpit: prefs.hud_cockpit, path_marker: prefs.path_marker, arcade: args.arcade || prefs.arcade, auto_trim: prefs.auto_trim, goto_open: false, goto_text: String::new(), goto_rx: None,
-            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, pad_held: Vec::new(), pad_note: (String::new(), 0.0), pad_aim: false, ap: autopilot::Autopilot::default(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
+            status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, pad_held: Vec::new(), pad_note: (String::new(), 0.0), pad_aim: false, pad_live: None, ap: autopilot::Autopilot::default(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cy.to_radians(), cp), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
-            record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, snow: args.snow.unwrap_or(prefs.snow), info_open: args.weather_panel, radial: Default::default(), info_page: if args.weather_panel { menu::Page::Weather } else { menu::Page::Flight }, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, radial_at: args.flight_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
+            record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, snow: args.snow.unwrap_or(prefs.snow), info_open: args.weather_panel, radial: Default::default(), info_page: if args.weather_panel { menu::Page::Weather } else { menu::Page::Flight }, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, radial_at: args.flight_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, invert_look_cockpit: prefs.invert_look_cockpit, invert_look_outside_x: prefs.invert_look_outside_x, invert_look_outside_y: prefs.invert_look_outside_y, head: cockpit::Head::new(cy.to_radians(), cp), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode: if args.menu.unwrap_or(true) { Mode::Menu } else { Mode::Fly }, menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), airport_note: (String::new(), -100.0), weapon_flash: None, kills: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
-            start_rx: None, loading: None, name_rx: None, last_click: -10.0, n_cars: 0, skyglow: Default::default(), snowmap: Default::default(), snowtrack: Default::default(), birds: birds::Birds::with_flocks(args.flocks.clone()), birds_level: args.birds, bird_insts: 0, bird_shape: ("", birds::Shape::default()), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, snow_field: storm::RainField::default(), cam_snow: start_snow, cam_blow: 0.0, fresh: snow::Fresh::default(), fresh_line: 0.0, storm_adapt: 0.0, city_adapt: 0.0, city_probe: None, plane, weapons,
+            start_rx: None, loading: None, name_rx: None, last_click: -10.0, n_cars: 0, skyglow: Default::default(), snowmap: Default::default(), snowtrack: Default::default(), birds: birds::Birds::with_flocks(args.flocks.clone()), birds_level: args.birds, contrails: contrails::Contrails::new(), contrail_draw: contrails::DrawData::default(), bird_insts: 0, bird_shape: ("", birds::Shape::default()), gauges: gauges::Gauges::new(&plane, secs.to_bits()), glass, lightning, rain_field: storm::RainField::default(), cam_rain: 0.0, cam_hail: 0.0, snow_field: storm::RainField::default(), cam_snow: start_snow, cam_blow: 0.0, fresh: snow::Fresh::default(), fresh_line: 0.0, storm_adapt: 0.0, city_adapt: 0.0, city_probe: None, plane, weapons,
             airport_rx: None, hold_spot: None, bench: args.bench.map(Bench::new),
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
@@ -1933,6 +1976,7 @@ impl Game {
         self.head.center_seat();
         self.restore_wreck_meshes();
         self.sheds.items.clear();
+        self.contrails.clear();
         let next = match self.hangar.iter().position(|l| std::ptr::eq(l.spec, spec)) {
             Some(i) => self.hangar.swap_remove(i),
             None => match self.building.iter().position(|(s, _)| std::ptr::eq(*s, spec)) {
@@ -2242,6 +2286,7 @@ impl Game {
         self.weapons.reset(self.spec, &self.model.pieces);
         self.weapon_flash = None;
         self.kills.clear();
+        self.contrails.clear();
     }
 
     /// On the ground, at rest, waiting for the terrain under it to load.
@@ -3121,6 +3166,7 @@ impl Game {
         let id = self.pad_id.filter(|id| g.connected_gamepad(*id).is_some_and(|p| free(&p))).or_else(|| g.gamepads().find(|(_, p)| free(p)).map(|(id, _)| id));
         let Some(pad) = id.and_then(|id| g.connected_gamepad(id)) else {
             self.pad = Controls::default();
+            self.pad_live = None;
             padui::set_active(false);
             self.pad_aim = false;
             self.pad_rep = None;
@@ -3132,6 +3178,7 @@ impl Game {
             return;
         };
         padui::set_active(true);
+        self.pad_live = Some(pad_live(&pad));
         // Binding from the pad (Settings › Controls › Gamepad): its buttons
         // and sticks go to that alone.
         if let Some(cap) = self.binds.capture.clone().filter(|c| c.from_pad()) {
@@ -3196,12 +3243,13 @@ impl Game {
         } else {
             Nav::Off
         };
-        // A small dead zone, the rest of the travel rescaled so there is no step out of it.
-        let dz = |v: f32| {
-            let v = v as f64;
-            let d = 0.12;
-            if v.abs() < d { 0.0 } else { v.signum() * (v.abs() - d) / (1.0 - d) }
-        };
+        // Each thumbstick's dead zone (Settings › Controls › Gamepad), the rest
+        // of the travel rescaled so there is no step out of it.
+        let pm = &self.binds.pad;
+        let (dl, dr, dtrig) = (pm.dead(padmap::Thumb::Left), pm.dead(padmap::Thumb::Right), pm.dead(padmap::Thumb::Triggers));
+        let dzl = |v: f32| padmap::centred(v as f64, dl);
+        let dzr = |v: f32| padmap::centred(v as f64, dr);
+        let dz = |s: padmap::Stick, v: f32| if s.thumb() == padmap::Thumb::Left { dzl(v) } else { dzr(v) };
         // The analogue triggers; on a pad left without a layout they come through as
         // bare Z axes, -1 at rest to +1 squeezed.
         let trig = |b: Button, z: Axis| match (pad.button_data(b), pad.axis_data(z)) {
@@ -3209,6 +3257,7 @@ impl Game {
             (None, Some(a)) => ((a.value() as f64 + 1.0) * 0.5).clamp(0.0, 1.0),
             _ => 0.0,
         };
+        let trig_dz = |b: Button, z: Axis| padmap::one_ended(trig(b, z), dtrig);
         let modifier = pad.is_pressed(Button::North);
         let flying = self.mode == Mode::Fly && !self.pause_open;
         // The globe itself is only on the start screen's Fly page; the main
@@ -3217,18 +3266,18 @@ impl Game {
         // The flying axes, wherever Settings › Controls › Gamepad has put them.
         let map = &self.binds.pad;
         let stick = |s: padmap::Stick| match s {
-            padmap::Stick::LX => dz(pad.value(Axis::LeftStickX)),
-            padmap::Stick::LY => dz(pad.value(Axis::LeftStickY)),
-            padmap::Stick::RX => dz(pad.value(Axis::RightStickX)),
-            padmap::Stick::RY => dz(pad.value(Axis::RightStickY)),
-            padmap::Stick::Trig => (trig(Button::RightTrigger2, Axis::RightZ) - trig(Button::LeftTrigger2, Axis::LeftZ)).clamp(-1.0, 1.0),
+            padmap::Stick::LX => dz(s, pad.value(Axis::LeftStickX)),
+            padmap::Stick::LY => dz(s, pad.value(Axis::LeftStickY)),
+            padmap::Stick::RX => dz(s, pad.value(Axis::RightStickX)),
+            padmap::Stick::RY => dz(s, pad.value(Axis::RightStickY)),
+            padmap::Stick::Trig => (trig_dz(Button::RightTrigger2, Axis::RightZ) - trig_dz(Button::LeftTrigger2, Axis::LeftZ)).clamp(-1.0, 1.0),
         };
         let axis = |a: padmap::PadAxis| map.axis(a).map(|s| stick(s.stick) * s.sign as f64).unwrap_or(0.0);
         self.pad = Controls { pitch: axis(padmap::PadAxis::Pitch), roll: axis(padmap::PadAxis::Roll), yaw: axis(padmap::PadAxis::Rudder), throttle: axis(padmap::PadAxis::Throttle), ..Controls::default() };
         let (look_x, look_y) = (axis(padmap::PadAxis::LookX), axis(padmap::PadAxis::LookY));
         // The buttons held now, for the flying actions held with them.
         let down: Vec<padmap::PadBtn> = padmap::PadBtn::ALL.into_iter().filter(|b| pad.is_pressed(b.gilrs())).collect();
-        let ry = dz(pad.value(Axis::RightStickY));
+        let ry = dzr(pad.value(Axis::RightStickY));
         let right = (pad.value(Axis::RightStickX), pad.value(Axis::RightStickY));
 
         // Moving about the menus: the d-pad (and the left stick too, except
@@ -3295,7 +3344,7 @@ impl Game {
             // Left stick turns the globe (squared, for a fine touch), the triggers zoom.
             let h = self.window.inner_size().height.max(1) as f64;
             let sq = |v: f64| v * v.abs();
-            let (sx, sy) = (sq(dz(lx)), sq(dz(ly)));
+            let (sx, sy) = (sq(dzl(lx)), sq(dzl(ly)));
             if sx != 0.0 || sy != 0.0 {
                 let k = 0.8 * h * dt;
                 self.menu.drag(-sx * k, sy * k, h, 60f64.to_radians());
@@ -3314,10 +3363,11 @@ impl Game {
         if flying && nav != Nav::Panel && self.cam_mode != settings::TAIL_VIEW {
             // Right stick: look around, as fast as a quick head turn at full deflection.
             // Pushed right the view swings right, in the cockpit and outside.
+            let (sx, sy) = self.look_signs();
             let rate = 2.2 * self.look_sens * dt;
             let side = if self.cam_mode == 1 { 1.0 } else { -1.0 };
-            self.cam_yaw += look_x * rate * side;
-            self.cam_pitch = (self.cam_pitch - look_y * rate * 0.8).clamp(-1.2, 1.4);
+            self.cam_yaw += look_x * rate * side * sx;
+            self.cam_pitch = (self.cam_pitch - look_y * rate * 0.8 * sy).clamp(-1.2, 1.4);
         }
         // Looking or flying with the pad: the middle of the view aims at the cockpit's controls.
         if look_x != 0.0 || look_y != 0.0 || self.pad.pitch != 0.0 || self.pad.roll != 0.0 || !pressed.is_empty() {
@@ -4047,6 +4097,16 @@ impl Game {
         data
     }
 
+    /// (-1, -1) where Settings › Camera turns looking around the other way in this view.
+    fn look_signs(&self) -> (f64, f64) {
+        let (ix, iy) = if self.cam_mode == 1 {
+            (self.invert_look_cockpit, self.invert_look_cockpit)
+        } else {
+            (self.invert_look_outside_x, self.invert_look_outside_y)
+        };
+        (if ix { -1.0 } else { 1.0 }, if iy { -1.0 } else { 1.0 })
+    }
+
     fn cancel_cockpit_input(&mut self) {
         self.hot_press = None;
         self.lean_drag = None;
@@ -4677,7 +4737,7 @@ impl Game {
     /// Particles live in a frame anchored near the action; move it if the action has moved on.
     /// Advances the birds (birds.rs) around the camera; returns their strikes.
     fn step_birds(&mut self, dt: f64) -> Vec<birds::Strike> {
-        let level = self.birds_level.unwrap_or(self.gfx.birds);
+        let level = self.birds_level.unwrap_or(self.gfx_eff.birds);
         let sun = self.sun_dir();
         let (utc, doy, rain, conv) = (self.utc, self.doy, self.wx.rain as f64, self.wx.convection());
         let world = &self.world;
@@ -5295,7 +5355,7 @@ impl Game {
 
     /// The settings worth keeping, as they are now.
     fn live_settings(&self) -> settings::Settings {
-        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, path_marker: self.path_marker, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, arcade: self.arcade, auto_trim: self.auto_trim, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, snow: self.snow, last: self.last_start.clone(), multiplayer: self.mp_on, mp_server: self.mp_server.clone(), mp_name: self.mp_name.clone() }
+        settings::Settings { lang: self.prefs_lang, sound_on: self.sound_on, volume: self.volume, cam_mode: self.cam_mode, cockpit_fov: self.cockpit_fov, look_sens: self.look_sens, invert_look_cockpit: self.invert_look_cockpit, invert_look_outside_x: self.invert_look_outside_x, invert_look_outside_y: self.invert_look_outside_y, show_hud: self.show_hud, hud_cockpit: self.hud_cockpit, path_marker: self.path_marker, minimap: self.minimap.visible, landing_guidance: self.minimap.landing_guidance, arcade: self.arcade, auto_trim: self.auto_trim, minimap_plan: self.minimap.plan, minimap_heading_up: self.minimap.heading_up, minimap_zoom: self.minimap.zoom, minimap_size: self.minimap.size.x, minimap_height: self.minimap.size.y, taa: self.gfx.taa, live_traffic: self.live.enabled(), live_weather: self.wx.live, real_time: self.wx.real_time, snow: self.snow, last: self.last_start.clone(), multiplayer: self.mp_on, mp_server: self.mp_server.clone(), mp_name: self.mp_name.clone() }
     }
 
     /// Saves the settings when they have changed (looked at once a second,
@@ -5385,6 +5445,14 @@ impl Game {
         self.pump_mcp();
         if self.record.is_none() {
             self.fps += (1.0 / raw_dt.max(1e-4) - self.fps) * 0.05;
+        }
+        // dynamic quality: judged on flying frames only (not menus, pauses or recordings)
+        if self.gfx.dynamic && self.mode == Mode::Fly && !self.paused && self.record.is_none() && (self.bench.is_none() || self.dyn_cli) {
+            let hz = self.window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).map(|m| m as f32 / 1000.0);
+            let target = dynamic::target_ms(&self.gfx, if self.gfx.vsync || self.gfx.dyn_fps == 0 { hz } else { None });
+            // (vsync or a frame limit at the target holds frames back, hiding any room)
+            let paced = self.gfx.vsync || (self.gfx.fps_cap > 0 && (1000.0 / self.gfx.fps_cap as f32 - target).abs() < 0.01);
+            self.dynq.update(raw_dt as f32, self.r.frame_gpu_ms(), target, paced);
         }
 
         // Results of background lookups.
@@ -6330,7 +6398,7 @@ impl Game {
         }
         // Shadow cascades: three nested boxes around the aircraft, each snapped
         // to its own texel grid so shadows do not shimmer as it moves.
-        let shadow_on = mu > 0.04 && !in_menu && self.gfx.shadows != graphics::Level::Off;
+        let shadow_on = mu > 0.04 && !in_menu && self.gfx_eff.shadows != graphics::Level::Off;
         let sres = self.r.shadow_res() as f32;
         // (the aircraft's layer may use only part of it: Renderer::plane_shadow_res)
         let pres = self.r.plane_shadow_res() as f32;
@@ -6373,7 +6441,7 @@ impl Game {
             vol_o: [0.0; 4],
             vol_u: [0.0; 4],
             // screen space reflections on water and glass, off on low.
-            misc: [near, CITY_STOPS * self.city_adapt, if self.gfx.ssr() { 1.0 } else { 0.0 }, 2.0 * (fov * 0.5).tan() / rh],
+            misc: [near, CITY_STOPS * self.city_adapt, if self.gfx_eff.ssr() { 1.0 } else { 0.0 }, 2.0 * (fov * 0.5).tan() / rh],
             csm: [CASC[0] * 2.0 / sres, CASC[1] * 2.0 / sres, CASC[2] * 2.0 / sres, if shadow_on { 1.0 } else { 0.0 }],
             scorch: [[0.0; 4]; 8],
             crater: [[0.0; 4]; 8],
@@ -6412,7 +6480,7 @@ impl Game {
             rain: [[0.0; 4]; 2],
             quality: [0.0; 4],
             // (w: storm tier, negated for aircraft-picker stills, `still_mode`)
-            detail: [self.gfx.city_k(), self.gfx.tree_imp_k(), self.gfx.tree_far(), if still_mode() { -self.gfx.storm_tier() } else { self.gfx.storm_tier() }],
+            detail: [self.gfx_eff.city_k(), self.gfx_eff.tree_imp_k(), self.gfx_eff.tree_far(), if still_mode() { -self.gfx_eff.storm_tier() } else { self.gfx_eff.storm_tier() }],
             nimbo: if in_menu { [[0.0; 4]; 4] } else { self.wx.deck_globals() },
             glow_c: glow[0],
             glow_e: glow[1],
@@ -6432,7 +6500,7 @@ impl Game {
             snow_tr_n: snow_tr[2],
             storm_bounds: [[0.0; 4]; weather::MAX_STORMS],
             storm_turrets: [[0.0; 4]; 8 * weather::MAX_STORMS],
-            lite: [self.gfx.water_detail(), if self.gfx.clouds_on() { 1.0 } else { 0.0 }, 0.0, 0.0],
+            lite: [self.gfx_eff.water_detail(), if self.gfx_eff.clouds_on() { 1.0 } else { 0.0 }, 0.0, 0.0],
             det_mean: [[1.0 / 0.35, 1.0 / 0.35, 1.0 / 0.35, 1.0]; 16],
             det_hmean: [[0.5; 4]; 4],
         };
@@ -6440,8 +6508,9 @@ impl Game {
             let cells = self.wx.storm_cells(cam);
             let storm_w = DVec3::new(g.storm[0] as f64, g.storm[1] as f64, g.storm[2] as f64);
             let storm_base = self.wx.base();
-            let render_n = cells.len().min(self.gfx.storm_max_cells());
+            let render_n = cells.len().min(self.gfx_eff.storm_max_cells());
             g.storm[3] = render_n as f32;
+            self.storms_seen = render_n > 0 && self.gfx_eff.clouds_on();
             for (i, c) in cells.iter().take(render_n).enumerate() {
                 g.storm_cells[2 * i] = c[0];
                 g.storm_cells[2 * i + 1] = c[1];
@@ -6801,9 +6870,29 @@ impl Game {
         if !in_menu {
             self.lightning.segments(cam, dt, &mut bolts);
         }
+        if !in_menu && self.gfx.contrails {
+            let apt_air: Vec<(u32, u32, u8, DVec3, DVec3)> = self
+                .world
+                .air_targets(cam)
+                .into_iter()
+                .filter_map(|t| match t.key {
+                    weapons::TargetKey::Airport { apt, mover } => Some((apt, mover, t.size, t.pos, t.vel)),
+                    _ => None,
+                })
+                .collect();
+            self.contrails.step(dt, cam, &self.wx, self.doy, Some((&self.plane, !self.crashed)), &self.live.planes, &apt_air, &self.mp_players);
+            self.contrails.build_draw(cam, vp, &mut self.contrail_draw);
+        } else {
+            if !self.gfx.contrails && self.contrails.trail_count() > 0 {
+                self.contrails.clear();
+            }
+            self.contrail_draw.nodes.clear();
+            self.contrail_draw.segs.clear();
+        }
+        crate::gputime::cpu("sim.contrails");
         let rain_drops = if in_menu || (self.cam_rain < 0.002 && self.cam_blow < 0.01) { 0 } else { render::RAIN_DROPS };
         crate::gputime::cpu("shore+fields+misc");
-        self.r.render(Frame { rain_drops, bolts, g, tiles, tess, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.water_in_view().then(|| self.world.ocean.uniform()), egui: Some(ui), shot, cover, glow: glow_px, snow: snow_px, snow_tracks: snow_tr_uploads });
+        self.r.render(Frame { rain_drops, bolts, contrails: &self.contrail_draw, g, tiles, tess, details, photo, skins, skin_slots, fields, lights: air_lights, objs, insts, fall, near, casc_vp, shore: sf.step, shore_c, shore_tiles, psim, sim_steps: dt > 0.0, fluid, ocean: self.world.water_in_view().then(|| self.world.ocean.uniform()), egui: Some(ui), shot, cover, glow: glow_px, snow: snow_px, snow_tracks: snow_tr_uploads });
         self.finish_mcp_shots();
         if (had_shots && std::env::args().any(|a| a == "--shot") && self.record.is_none()) || rec_done {
             self.quit = true;
@@ -7390,7 +7479,11 @@ impl Game {
 
     /// Hands changed graphics settings to the renderer and the world.
     fn apply_graphics(&mut self) {
-        let g = self.gfx;
+        let g = self.dynq.settings(&self.gfx, self.storms_seen);
+        self.gfx_eff = g;
+        // (from the player's setting, not the lowered one: dynamic terrain
+        // detail must not drop loaded tiles that would then be fetched again)
+        self.world.tile_cap = self.gfx.tile_cap();
         if self.gfx_applied == Some(g) {
             return;
         }
@@ -7406,14 +7499,15 @@ impl Game {
         self.world.lod_k = g.lod_k();
         self.world.reach_k = g.reach();
         self.world.city_k = g.city_k();
-        self.world.tile_cap = g.tile_cap();
         self.world.spare_builds = g.spare_builds();
         self.world.max_build_jobs = g.max_build_jobs();
         self.world.tree_far = g.tree_far();
         self.world.tree_imp_k = g.tree_imp_k();
         self.world.cars = g.car_density();
-        if self.gfx_applied.is_some() {
-            log::info!("graphics: {} at {:.0}%, shadows {}, clouds {} (shadows {}), storms {}, terrain {}, scenery {}, city {}, trees {}, traffic {}, AO {}, water {}, MSAA {}x", g.matches().map(graphics::Preset::name).unwrap_or("custom"), g.scale * 100.0, g.shadows.name(), g.clouds.name(), g.cloud_shadows, g.storms.name(), g.terrain.name(), g.scenery.name(), g.city.name(), g.trees.name(), g.cars.name(), g.ao, g.water.name(), g.msaa);
+        if g.dynamic && self.gfx_applied.is_some_and(|a| a.dynamic) {
+            log::info!("dynamic quality: step {}/{} ({:.1} ms), {:.0}%, shadows {}, clouds {} (shadows {}), storms {}, terrain {}, city {}, trees {}, AO {}, water {}", self.dynq.down, self.dynq.depth(), self.dynq.ema, g.render_scale() * 100.0, g.shadows.name(), g.clouds.name(), g.cloud_shadows, g.storms.name(), g.terrain.name(), g.city.name(), g.trees.name(), g.ao, g.water.name());
+        } else if self.gfx_applied.is_some() {
+            log::info!("graphics: {} at {:.0}%, shadows {}, clouds {} (shadows {}), storms {}, contrails {}, terrain {}, scenery {}, city {}, trees {}, traffic {}, AO {}, water {}, MSAA {}x", g.matches().map(graphics::Preset::name).unwrap_or("custom"), g.scale * 100.0, g.shadows.name(), g.clouds.name(), g.cloud_shadows, g.storms.name(), g.contrails, g.terrain.name(), g.scenery.name(), g.city.name(), g.trees.name(), g.cars.name(), g.ao, g.water.name(), g.msaa);
         }
         self.gfx_applied = Some(g);
     }
@@ -8194,7 +8288,7 @@ impl Game {
             if self.show_help {
                 egui::Area::new(egui::Id::unique("help")).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
                     menu::panel().show(ui, |ui| {
-                        ui.set_width(600.0);
+                        ui.set_width((ctx.content_rect().width() - 80.0).clamp(320.0, 820.0));
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(t!("game.controls")).font(menu::page_title()).color(Color32::WHITE));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -8202,7 +8296,9 @@ impl Game {
                             });
                         });
                         ui.add_space(4.0);
-                        menu::controls_list(ui);
+                        egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 160.0).max(200.0)).auto_shrink([false, true]).show(ui, |ui| {
+                            menu::controls_list(ui);
+                        });
                     });
                 });
             }
@@ -8316,9 +8412,10 @@ impl ApplicationHandler for App {
             return;
         }
         if let DeviceEvent::MouseMotion { delta } = event {
+            let (sx, sy) = g.look_signs();
             let k = g.look_sens * g.head.zoom;
-            g.cam_yaw += delta.0 * 0.005 * k;
-            g.cam_pitch = (g.cam_pitch + delta.1 * 0.004 * k).clamp(-1.2, 1.4);
+            g.cam_yaw += delta.0 * 0.005 * k * sx;
+            g.cam_pitch = (g.cam_pitch + delta.1 * 0.004 * k * sy).clamp(-1.2, 1.4);
             g.pad_aim = false;
         }
     }
@@ -8506,9 +8603,10 @@ impl ApplicationHandler for App {
                 } else if g.drag && !g.pause_open && g.cam_mode != settings::TAIL_VIEW {
                     if let Some((x, y)) = g.last_cursor {
                         // Zoomed in, the view turns slower under the mouse.
+                        let (sx, sy) = g.look_signs();
                         let k = g.look_sens * if g.cam_mode == 1 { g.head.zoom } else { 1.0 };
-                        g.cam_yaw += (position.x - x) * 0.005 * k;
-                        g.cam_pitch = (g.cam_pitch + (position.y - y) * 0.004 * k).clamp(-1.2, 1.4);
+                        g.cam_yaw += (position.x - x) * 0.005 * k * sx;
+                        g.cam_pitch = (g.cam_pitch + (position.y - y) * 0.004 * k * sy).clamp(-1.2, 1.4);
                     }
                 }
                 // The mouse moved (not just a twitch): it points at the controls again, not the pad.
@@ -8914,6 +9012,23 @@ fn smoothstep(a: f64, b: f64, x: f64) -> f64 {
 
 /// The xpad driver's Xbox layout, in SDL's game controller mapping format.
 const XBOX_LAYOUT: &str = "a:b0,b:b1,back:b6,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b8,leftshoulder:b4,leftstick:b9,lefttrigger:a2,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b10,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,platform:Linux,";
+
+/// A pad's sticks and triggers now, before any dead zone (`padmap::Live`).
+fn pad_live(pad: &gilrs::Gamepad) -> padmap::Live {
+    use gilrs::{Axis, Button};
+    // (a pad left without a layout has its triggers as bare Z axes, -1 at rest)
+    let trig = |b: Button, z: Axis| match (pad.button_data(b), pad.axis_data(z)) {
+        (Some(d), _) => d.value(),
+        (None, Some(a)) => ((a.value() + 1.0) * 0.5).clamp(0.0, 1.0),
+        _ => 0.0,
+    };
+    padmap::Live {
+        ls: [pad.value(Axis::LeftStickX), pad.value(Axis::LeftStickY)],
+        rs: [pad.value(Axis::RightStickX), pad.value(Axis::RightStickY)],
+        lt: trig(Button::LeftTrigger2, Axis::LeftZ),
+        rt: trig(Button::RightTrigger2, Axis::RightZ),
+    }
+}
 
 /// An Xbox pad gilrs found no mapping for: a firmware newer than its copy of
 /// the SDL controller database, say. Left so, its triggers show up as bare

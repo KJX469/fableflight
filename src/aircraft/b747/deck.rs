@@ -81,7 +81,7 @@ pub mod screen {
 // ---------------------------------------------------------------- strings
 
 /// Every string a legend or a display can print, looked up by index. The
-/// shader gets them as a table (`strings_wgsl`); index 0 means "made-up text".
+/// shader reads them from the aircraft font uniform; index 0 means "made-up text".
 pub const STRINGS: &[&str] = &[
 
     "", "IAS/MACH", "HDG", "ALT", "VERT SPD", "LNAV", "VNAV", "FL CH", "HOLD", "A/T ARM", "F/D", "APP", "LOC", "BANK LIMIT", "CMD", "DISENGAGE",
@@ -146,7 +146,7 @@ pub fn sid(s: &str) -> u32 {
     STRINGS.iter().skip(1).position(|x| *x == s).map(|i| i as u32 + 1).unwrap_or_else(|| panic!("no legend string {s:?}"))
 }
 
-/// Stroke-font glyph index for a character (plane.wgsl `GSEG`).
+/// Stroke-font glyph index for a character (see `stroke_font::STARTS`).
 pub fn glyph(c: char) -> u32 {
     match c {
         '0'..='9' => c as u32 - '0' as u32,
@@ -163,22 +163,18 @@ pub fn glyph(c: char) -> u32 {
     }
 }
 
-/// The string table as WGSL: 15 glyphs a string, 8 bits each, the length in the top byte.
-pub fn strings_wgsl() -> String {
-    // (const, not var<private>: Metal copies a private array into every
-    // invocation, 4 KB here, on every pixel of the aircraft.)
-    let mut out = format!("const STRS = array<vec4u, {}>(\n", STRINGS.len());
-    for (k, s) in STRINGS.iter().enumerate() {
-        let mut b = [15u32; 16];
-        let n = s.chars().count().min(15);
-        for (i, c) in s.chars().take(15).enumerate() {
-            b[i] = glyph(c);
-        }
-        b[15] = n as u32;
-        let w: Vec<String> = (0..4).map(|j| format!("{}u", b[j * 4] | b[j * 4 + 1] << 8 | b[j * 4 + 2] << 16 | b[j * 4 + 3] << 24)).collect();
-        out += &format!("  vec4u({}){}\n", w.join(", "), if k + 1 < STRINGS.len() { "," } else { "" });
+/// Fifteen glyph indices and the length, packed into a WGSL vec4u.
+pub fn packed_string(s: &str) -> [u32; 4] {
+    let mut bytes = [15; 16];
+    for (i, c) in s.chars().take(15).enumerate() {
+        bytes[i] = glyph(c) as u8;
     }
-    out += ");\n";
+    bytes[15] = s.chars().count().min(15) as u8;
+    std::array::from_fn(|i| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+}
+
+pub fn strings_wgsl() -> String {
+    let mut out = format!("const STRING_COUNT: u32 = {}u;\n", STRINGS.len());
     // Names for the ones the displays print (the first of any repeats).
     let mut seen = std::collections::HashSet::new();
     for (k, s) in STRINGS.iter().enumerate().skip(1) {
@@ -2281,8 +2277,8 @@ mod tests {
                 assert!(glyph(c) != 15 || c == ' ', "no glyph for {c:?} in {s}");
             }
         }
-        let w = strings_wgsl();
-        assert!(w.contains("vec4u("));
+        assert_eq!(packed_string("12")[0], 0x0f0f0201);
+        assert_eq!(packed_string("12")[3] >> 24, 2);
     }
 
     #[test]

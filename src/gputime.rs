@@ -37,7 +37,8 @@ impl GpuTimer {
     }
 
     pub fn new(d: &wgpu::Device, q: &wgpu::Queue) -> Option<Self> {
-        if !d.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+        // (the device may have timestamps for FrameClock alone)
+        if !on() || !d.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
             return None;
         }
         let size = SLOTS as u64 * 8;
@@ -151,4 +152,92 @@ pub fn cpu(label: &'static str) {
             }
         }
     });
+}
+
+/// The whole frame's GPU time, always on where the adapter has timestamps,
+/// for the dynamic graphics (dynamic.rs). Unlike `GpuTimer` it never waits:
+/// two stamps a frame go into one of a few read-back buffers, which are read
+/// a frame or two later once the GPU has finished with them.
+pub struct FrameClock {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    ring: Vec<(wgpu::Buffer, std::sync::Arc<std::sync::atomic::AtomicU8>)>,
+    cur: usize,
+    period: f64,
+    /// the latest frame's GPU time (ms)
+    pub last: Option<f32>,
+}
+
+/// read-back buffer states
+const FREE: u8 = 0;
+const PENDING: u8 = 1;
+const READY: u8 = 2;
+const RING: usize = 4;
+
+impl FrameClock {
+    /// what the device needs for it (empty if the adapter cannot).
+    pub fn features(adapter: &wgpu::Adapter) -> wgpu::Features {
+        let f = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        if adapter.features().contains(f) && std::env::var_os("FABLE_NO_FRAME_CLOCK").is_none() { f } else { wgpu::Features::empty() }
+    }
+
+    pub fn new(d: &wgpu::Device, q: &wgpu::Queue) -> Option<Self> {
+        if !d.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+            return None;
+        }
+        let set = d.create_query_set(&wgpu::QuerySetDescriptor { label: Some("frame clock"), ty: wgpu::QueryType::Timestamp, count: 2 });
+        let resolve = d.create_buffer(&wgpu::BufferDescriptor { label: Some("frame clock"), size: 16, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let ring = (0..RING)
+            .map(|_| (d.create_buffer(&wgpu::BufferDescriptor { label: Some("frame clock read"), size: 16, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false }), std::sync::Arc::new(std::sync::atomic::AtomicU8::new(FREE))))
+            .collect();
+        Some(Self { set, resolve, ring, cur: usize::MAX, period: q.get_timestamp_period() as f64, last: None })
+    }
+
+    /// reads whatever the GPU has finished (after a non-blocking poll).
+    fn harvest(&mut self) {
+        use std::sync::atomic::Ordering::Acquire;
+        for (buf, st) in &self.ring {
+            if st.load(Acquire) == READY {
+                {
+                    let data = buf.slice(..).get_mapped_range().expect("mapped");
+                    let ts: &[u64] = bytemuck::cast_slice(&data[..16]);
+                    let ms = ts[1].saturating_sub(ts[0]) as f64 * self.period / 1e6;
+                    // (a stamp pair torn by a reset or a wrapped counter)
+                    if ms > 0.0 && ms < 1000.0 {
+                        self.last = Some(ms as f32);
+                    }
+                }
+                buf.unmap();
+                st.store(FREE, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+
+    /// the frame's first stamp (call on its first encoder).
+    pub fn begin(&mut self, enc: &mut wgpu::CommandEncoder) {
+        self.harvest();
+        self.cur = self.ring.iter().position(|(_, s)| s.load(std::sync::atomic::Ordering::Acquire) == FREE).unwrap_or(usize::MAX);
+        if self.cur != usize::MAX {
+            enc.write_timestamp(&self.set, 0);
+        }
+    }
+
+    /// the frame's last stamp and its copy out (call on its last encoder, before submit).
+    pub fn end(&mut self, enc: &mut wgpu::CommandEncoder) {
+        if let Some((buf, _)) = self.ring.get(self.cur) {
+            enc.write_timestamp(&self.set, 1);
+            enc.resolve_query_set(&self.set, 0..2, &self.resolve, 0);
+            enc.copy_buffer_to_buffer(&self.resolve, 0, buf, 0, 16);
+        }
+    }
+
+    /// after submit: asks for the copy to be mapped once the GPU is done.
+    pub fn after_submit(&mut self) {
+        if let Some((buf, st)) = self.ring.get(self.cur) {
+            st.store(PENDING, std::sync::atomic::Ordering::Release);
+            let st = st.clone();
+            buf.slice(..).map_async(wgpu::MapMode::Read, move |r| st.store(if r.is_ok() { READY } else { FREE }, std::sync::atomic::Ordering::Release));
+        }
+        self.cur = usize::MAX;
+    }
 }

@@ -72,6 +72,31 @@ pub struct Plane {
     pub downed: f64,
 }
 
+#[cfg(test)]
+impl Plane {
+    pub fn test_cruise(hex: &str, ty: &str, size: u8, pos: DVec3, vel: DVec3) -> Self {
+        let now = Instant::now();
+        Self {
+            hex: hex.into(),
+            call: hex.into(),
+            ty: ty.into(),
+            size,
+            fix: pos,
+            vel,
+            at: now,
+            off: DVec3::ZERO,
+            seen: now,
+            livery: (0, 0),
+            pos,
+            fwd: vel.normalize_or_zero(),
+            alt_ft: 34_500.0,
+            gs_kt: vel.length() * 1.94384,
+            vs_fpm: 0.0,
+            downed: 0.0,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     /// where to look (lat, lon in degrees); None while in the menus

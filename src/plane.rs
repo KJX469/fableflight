@@ -3282,7 +3282,7 @@ const ISA_LAYERS: [(f64, f64); 7] = [
 /// the USSA 1976 geopotential layers. Above 84.852 km, continue isothermally
 /// from the last tabulated layer; aircraft performance checks stay well below
 /// this extension, while it avoids freezing density for high rocket flights.
-fn atmosphere(h: f64) -> (f64, f64) {
+pub(crate) fn atmosphere(h: f64) -> (f64, f64) {
     const G0: f64 = 9.80665;
     const R_AIR: f64 = 287.05287;
     const EARTH_RADIUS: f64 = 6_356_766.0;

@@ -60,6 +60,8 @@ pub struct Target {
     pub freezing: Option<f64>,
     /// snow blown up off the ground (METAR BLSN 1, DRSN 0.5), 0..1
     pub blowing: f32,
+    /// surface relative humidity (0..1) from temperature and dew point when reported
+    pub humidity: Option<f32>,
     /// temperature less the standard atmosphere's at the station's height,
     /// K (None: not reported)
     pub isa_dev: Option<f64>,
@@ -122,6 +124,7 @@ impl LiveWx {
             wx.qnh = 1013.25;
             wx.freezing = None;
             wx.blowing = 0.0;
+            wx.humidity = None;
             return;
         }
         let (got, radar) = {
@@ -208,6 +211,10 @@ impl LiveWx {
             wx.qnh += (q - wx.qnh) * k;
         }
         wx.blowing = t.blowing;
+        wx.humidity = match (wx.humidity, t.humidity) {
+            (Some(a), Some(b)) => Some(a + (b - a) * k as f32),
+            (_, b) => b,
+        };
         wx.freezing = match (wx.freezing, t.freezing) {
             (Some(a), Some(b)) => Some(a + (b - a) * k),
             (_, b) => b,
@@ -576,6 +583,7 @@ fn from_metar(m: &serde_json::Value) -> Option<Target> {
         qnh: m["altim"].as_f64().filter(|q| (850.0..1100.0).contains(q)),
         freezing: freezing_for(m["temp"].as_f64().filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::snow::freezing_level(t, elev)), elev, p.snow),
         blowing: p.blowing,
+        humidity: rh_from_td(m["temp"].as_f64(), m["dewp"].as_f64()),
         isa_dev: m["temp"].as_f64().filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::plane::Atmos::from_surface(1013.25, t, elev).isa_dev),
         station,
         raw,
@@ -595,6 +603,16 @@ struct Precip {
     snow: Option<f32>,
     /// snow blown up off the ground: BLSN 1, DRSN (drifting, low) 0.5
     blowing: f32,
+}
+
+/// Surface relative humidity (0..1) from temperature and dew point (°C) via Magnus-Tetens.
+fn rh_from_td(temp_c: Option<f64>, dew_c: Option<f64>) -> Option<f32> {
+    let (t, d) = (temp_c?, dew_c?);
+    if !((-80.0..60.0).contains(&t) && (-90.0..60.0).contains(&d)) {
+        return None;
+    }
+    let es = |c: f64| (17.625 * c / (243.04 + c)).exp();
+    Some((es(d) / es(t)).clamp(0.05, 1.0) as f32)
 }
 
 /// The freezing level (m) moved, if need be, so that what the report says is
@@ -811,6 +829,7 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
         qnh: f("pressure_msl").filter(|q| (850.0..1100.0).contains(q)),
         freezing: freezing_for(f("temperature_2m").filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::snow::freezing_level(t, elev)), elev, snow),
         blowing: 0.0,
+        humidity: rh_from_td(f("temperature_2m"), f("dew_point_2m")),
         isa_dev: f("temperature_2m").filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::plane::Atmos::from_surface(1013.25, t, elev).isa_dev),
         station: "Open-Meteo".into(),
         raw: String::new(),

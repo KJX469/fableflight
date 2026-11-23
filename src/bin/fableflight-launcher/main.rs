@@ -1050,6 +1050,9 @@ impl App {
                 style::switch(ui, &mut g.cloud_shadows);
             });
             style::row(ui, "Storms", "Detail of thunderstorm and squall cells", |ui| style::segments(ui, &mut g.storms, no_off));
+            style::row(ui, "Contrails", "Condensation trails behind aircraft at altitude", |ui| {
+                style::switch(ui, &mut g.contrails);
+            });
             style::row(ui, "Terrain", "How far out the ground keeps its detail", |ui| style::segments(ui, &mut g.terrain, no_off));
             style::row(ui, "Scenery distance", "How far out buildings and trees are loaded", |ui| style::segments(ui, &mut g.scenery, no_off));
             style::row(ui, "City detail", "How far buildings keep their full detail", |ui| style::segments(ui, &mut g.city, no_off));

@@ -157,6 +157,7 @@ fn shaders_validate() {
         ("airfield", include_str!("../src/shaders/airfield.wgsl")),
         ("lights", include_str!("../src/shaders/lights.wgsl")),
         ("precip", include_str!("../src/shaders/precip.wgsl")),
+        ("contrails", include_str!("../src/shaders/contrails.wgsl")),
     ] {
         ok &= check(name, &format!("{common}\n{src}"));
     }
@@ -182,6 +183,6 @@ fn shaders_validate() {
     }
     ok &= check("composite (no MSAA)", &comp1);
     ok &= check("resolve (no MSAA)", &res1);
-    // plane.wgsl takes the 747 deck's string table: checked (including MSL/Metal) in b747::deck's tests.
+    // plane.wgsl uses the 747 deck's generated string IDs: checked (including MSL/Metal) in b747::deck's tests.
     assert!(ok, "shader errors above");
 }
