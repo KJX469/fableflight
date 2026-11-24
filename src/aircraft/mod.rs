@@ -313,6 +313,15 @@ pub struct Fan {
     /// airliner flat-rated to a hot day, more for an engine built to fly fast
     pub bpr: f64,
     pub theta_break: f64,
+    /// the highest inlet total pressure ratio δ0 its pressure limit allows (0:
+    /// none). A fighter's engine holds its burner pressure below what its
+    /// casings take, so low down and fast its thrust stops growing with the ram.
+    pub p_max: f64,
+    /// how far past `theta_break` its afterburner keeps its thrust (0: no
+    /// further): the burner's own limit is the liner's and the nozzle's, not
+    /// the turbine's, so an engine built to run in afterburner at Mach 2 makes
+    /// up more of its thrust there with the burner as the core is held back.
+    pub ab_theta: f64,
     /// static sea-level specific fuel consumption (lb/lbf/h), dry and with the afterburner
     pub tsfc: [f64; 2],
     /// station of the nozzle exits (body z), where the afterburners' light comes from

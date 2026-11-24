@@ -505,7 +505,7 @@ pub static SPEC: Spec = Spec {
     steer_fade: 15.0,
     // Two F404-GE-402s: 79.2 kN each in afterburner (Space); the dry figure is a
     // little under the book 48.9 kN so it does not supercruise down low.
-    engine: Engine::Fan(Fan { n: 2, thrust: 44_000.0, idle: 0.62, idle_n2: 0.7, idle_thrust: 0.06, n1_rpm: 13_200.0, spool: [4.0, 2.5], reverse: 0.0, reverser_time: 1.0, boost: 1.8, bpr: 0.34, theta_break: 1.08, tsfc: [0.81, 1.74], nozzle_z: 8.0, mounts: &MOUNTS }),
+    engine: Engine::Fan(Fan { n: 2, thrust: 44_000.0, idle: 0.62, idle_n2: 0.7, idle_thrust: 0.06, n1_rpm: 13_200.0, spool: [4.0, 2.5], reverse: 0.0, reverser_time: 1.0, boost: 1.8, bpr: 0.34, theta_break: 1.08, p_max: 0.0, ab_theta: 0.0, tsfc: [0.81, 1.74], nozzle_z: 8.0, mounts: &MOUNTS }),
     handling: Handling {
         q_ref: 8_000.0,
         a_max: 3.5,

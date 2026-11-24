@@ -857,7 +857,7 @@ pub static SPEC: Spec = Spec {
     // centreline, their axes about 3.7 m above the ground (from the pod
     // contact points above, the BR725's 1.27 m fan within them); their
     // nozzles' exits are 24.0 m behind the radome's tip.
-    engine: Engine::Fan(Fan { n: 2, thrust: 75_200.0, idle: 0.24, idle_n2: 0.62, idle_thrust: 0.035, n1_rpm: 7_000.0, spool: [7.0, 4.5], reverse: 0.30, reverser_time: 2.0, boost: 1.08, bpr: 4.35, theta_break: 1.052, tsfc: [0.37, 0.0], nozzle_z: bz(24.0) as f64, mounts: &MOUNTS }),
+    engine: Engine::Fan(Fan { n: 2, thrust: 75_200.0, idle: 0.24, idle_n2: 0.62, idle_thrust: 0.035, n1_rpm: 7_000.0, spool: [7.0, 4.5], reverse: 0.30, reverser_time: 2.0, boost: 1.08, bpr: 4.35, theta_break: 1.052, p_max: 0.0, ab_theta: 0.0, tsfc: [0.37, 0.0], nozzle_z: bz(24.0) as f64, mounts: &MOUNTS }),
     // Estimates: the 747's, quicker (about 25 deg/s of roll at 250 kt; no
     // outboard-aileron lockout), little adverse yaw (the fly-by-wire
     // coordinates the turn), and a sharper wing drop in a stall (its

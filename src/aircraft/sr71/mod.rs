@@ -495,8 +495,12 @@ pub static SPEC: Spec = Spec {
     // and 80,000 ft in full afterburner, and `inlet_mach` holds it there (it
     // settles near Mach 3.2 to 3.25, under its limit). Without the
     // afterburners there is none of that (`dry_mach`): military power will
-    // not keep it supersonic, and at Mach 3 it is next to nothing.
-    engine: Engine::Fan(Fan { n: 2, thrust: 80_070.0, idle: 0.65, idle_n2: 0.65, idle_thrust: 0.05, n1_rpm: 7_400.0, spool: [6.0, 3.0], reverse: 0.0, reverser_time: 1.0, boost: 1.4167, bpr: 0.0, theta_break: 2.3, tsfc: [0.9, 1.9], nozzle_z: 12.4 - CG, mounts: &MOUNTS }),
+    // not keep it supersonic, and at Mach 3 it is next to nothing. Low and
+    // fast, the inlet ducts' pressure limit (δ0 1.15) caps it. Its fuel figure
+    // in afterburner is set so that the cruise at Mach 3.2 burns about 1.9
+    // lb/lbf/h, the J58's usual figure: as a turbo-ramjet it does better there
+    // than a plain turbojet's rise with Mach would have it.
+    engine: Engine::Fan(Fan { n: 2, thrust: 80_070.0, idle: 0.65, idle_n2: 0.65, idle_thrust: 0.05, n1_rpm: 7_400.0, spool: [4.0, 2.5], reverse: 0.0, reverser_time: 1.0, boost: 1.4167, bpr: 0.0, theta_break: 2.3, p_max: 1.15, ab_theta: 0.0, tsfc: [0.9, 1.5], nozzle_z: 12.4 - CG, mounts: &MOUNTS }),
     // Estimates: a big, heavy delta flown through stability augmentation,
     // slow to answer in pitch and roll, with little stick to pull g with.
     handling: Handling {

@@ -438,11 +438,12 @@ pub static SPEC: Spec = Spec {
     steer_max: 0.9,
     steer_fade: 15.0,
     // Two F119-PW-100s: 26,000 lbf (115.7 kN) each dry, 35,000 lbf (155.7 kN) in
-    // afterburner (Space). The lapse and the wave drag are set against each
-    // other so that at military power it stays near Mach 1.1 down low but
-    // supercruises at 40,000 ft (Mach 1.5 here; 1.76 by the book), and the
-    // afterburners take it on to its Mach 2.25 limit there, not far past it.
-    engine: Engine::Fan(Fan { n: 2, thrust: 115_700.0, idle: 0.62, idle_n2: 0.7, idle_thrust: 0.05, n1_rpm: 10_000.0, spool: [3.5, 2.5], reverse: 0.0, reverser_time: 1.0, boost: 1.346, bpr: 0.3, theta_break: 1.2, tsfc: [0.79, 1.87], nozzle_z: 7.3, mounts: &MOUNTS }),
+    // afterburner (Space). Its temperature limit (θ0 1.15) is what holds its
+    // supercruise at 40,000 ft to about the book's Mach 1.76; the burner
+    // pressure limit (δ0 1.4) keeps it near its Mach 1.2 limit down low; and
+    // its afterburners, good for 0.15 past the core's limit, take it on to
+    // its Mach 2.25 there, not far past it.
+    engine: Engine::Fan(Fan { n: 2, thrust: 115_700.0, idle: 0.62, idle_n2: 0.7, idle_thrust: 0.05, n1_rpm: 10_000.0, spool: [3.5, 2.5], reverse: 0.0, reverser_time: 1.0, boost: 1.346, bpr: 0.3, theta_break: 1.15, p_max: 1.4, ab_theta: 0.15, tsfc: [0.79, 1.87], nozzle_z: 7.3, mounts: &MOUNTS }),
     // Estimates: the Hornet's, with more authority about every axis and a gentler stall.
     handling: Handling {
         q_ref: 8_000.0,

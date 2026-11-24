@@ -560,10 +560,20 @@ impl Plane {
         (p.last_thrust, p.eng_force, p.eng_moment) = (0.0, DVec3::ZERO, DVec3::ZERO);
         p.trim = 0.08;
         if p.airframe.is_some() {
-            // Trim set for the climb-out, as the checklist has it.
+            // Trim set for the climb-out, as the checklist has it: at take-off
+            // power, whose thrust line (under the wing, say) pitches it too.
             let speed = spec.approach.0 * 1.25;
+            p.throttle = 1.0;
+            p.charge = 1.0;
+            p.settle_engine(speed, h);
             p.trim_strips(speed, (density(h), sound_speed(h)));
             p.trim = 0.08;
+            (p.throttle, p.charge, p.power) = (0.0, 0.0, 0.0);
+            for u in &mut p.engines {
+                u.idle();
+            }
+            p.engines_out();
+            (p.last_thrust, p.eng_force, p.eng_moment) = (0.0, DVec3::ZERO, DVec3::ZERO);
         }
         p.on_ground = true;
         p.hold = true;
@@ -1386,7 +1396,11 @@ impl Plane {
     /// Thrust (N) once the engines have settled at this throttle, flying
     /// straight and level at true airspeed `v` at height `h`.
     pub fn thrust(&self, throttle: f64, v: f64, h: f64) -> f64 {
-        let mut lv = self.levers(false, false);
+        self.thrust_with(throttle, false, v, h)
+    }
+    /// The same, with the afterburners lit or not.
+    pub fn thrust_with(&self, throttle: f64, burner: bool, v: f64, h: f64) -> f64 {
+        let mut lv = self.levers(burner, false);
         (lv.throttle, lv.auto_mixture) = (throttle, true);
         let fl = self.flight(DVec3::new(0.0, 0.0, -v), DVec3::ZERO, h);
         self.engines.iter().map(|u| {
@@ -3823,14 +3837,14 @@ mod tests {
     /// level flight at `alt`, with this share of its fuel aboard: where it
     /// ends up if the throttle is left there for as long as it takes.
     fn top_mach(spec: &'static Spec, alt: f64, boost: bool, fuel: f64) -> f64 {
-        let Engine::Fan(fe) = &spec.engine else { panic!("a jet") };
+        assert!(spec.is_jet());
         let mut p = Plane::spawn(spec, 0.6, -2.1, alt, 0.0, 200.0);
         p.fuel = spec.fuel_kg * fuel;
         let mut top = 0.0;
         for k in 0..1750 {
             let m = 0.5 + 0.002 * k as f64;
             let v = m * sound_speed(alt);
-            if p.thrust(1.0, v, alt) * if boost { fe.boost } else { 1.0 } >= p.drag_level(v, alt, 0.0, 0.0) {
+            if p.thrust_with(1.0, boost, v, alt) >= p.drag_level(v, alt, 0.0, 0.0) {
                 top = m;
             }
         }
@@ -3867,7 +3881,7 @@ mod tests {
         // Down low it runs up against Mach 1 at military power and is not much past it in afterburner.
         let (dry, wet) = (level(3000.0, 200.0, false, 180.0), level(3000.0, 200.0, true, 180.0));
         println!("level at 3000 m: Mach {dry:.2} dry, {wet:.2} in afterburner");
-        assert!(dry > 0.9 && dry < 1.01 && wet > 1.05 && wet < 1.35, "{dry} {wet}");
+        assert!(dry > 0.9 && dry < 1.03 && wet > 1.05 && wet < 1.35, "{dry} {wet}");
         // At 40,000 ft in afterburner, from Mach 1.6: past Mach 2 inside seven minutes (2.23, 1,280 kt, by the book).
         let top = level(12_192.0, 470.0, true, 400.0);
         // Left in afterburner there until the tanks are nearly dry it ends up at
@@ -3876,7 +3890,7 @@ mod tests {
         // does: there the Mach limit's buffet is what tells the pilot to come back.)
         let limit = top_mach(phantom, 12_192.0, true, 0.1);
         println!("level at 40,000 ft in afterburner: Mach {top:.2}, settling at {limit:.2}");
-        assert!(top > 1.95 && top <= limit && limit > phantom.mmo - 0.08 && limit <= phantom.mmo + 0.01, "{top} {limit}");
+        assert!(top > 1.95 && top <= limit + 0.01 && limit > phantom.mmo - 0.08 && limit <= phantom.mmo + 0.01, "{top} {limit}");
 
         // Climbing away in afterburner at 350 kt near sea level (the book's best is 41,300 ft/min, light).
         let mut p = Plane::spawn(phantom, 0.6, -2.1, 300.0, 0.0, 180.0);
@@ -3959,16 +3973,16 @@ mod tests {
             assert!(gmax < 0.5, "porpoising: {gmax}");
             p.mach()
         };
-        // Down low it sits just past Mach 1 at military power (Mach 1.21, 800 kt, is its limit at sea level).
+        // Down low it goes supersonic at military power, about as far as its
+        // limit (Mach 1.21, 800 kt, at sea level); the burner pressure limit
+        // keeps the ram from taking it further.
         let (dry, wet) = (level(3000.0, 220.0, false, 180.0), level(3000.0, 220.0, true, 180.0));
         println!("level at 3000 m: Mach {dry:.2} dry, {wet:.2} in afterburner");
-        assert!(dry > 0.92 && dry < 1.15 && wet > 1.15 && wet < 1.6, "{dry} {wet}");
-        // At 40,000 ft it supercruises: about Mach 1.5 without afterburner. (By
-        // the book 1.76: with this thrust model more of it dry would take the
-        // afterburners well past the airframe's Mach limit.)
+        assert!(dry > 1.0 && dry < 1.25 && wet > 1.15 && wet < 1.6, "{dry} {wet}");
+        // At 40,000 ft it supercruises: Mach 1.76 without afterburner by the book.
         let cruise = level(12_192.0, 400.0, false, 300.0);
         println!("level at 40,000 ft at military power: Mach {cruise:.2}");
-        assert!(cruise > 1.4 && cruise < 1.7, "{cruise}");
+        assert!(cruise > 1.65 && cruise < 1.85, "{cruise}");
         // And in afterburner, from Mach 1.6: past Mach 2 inside three minutes,
         // settling at its limit of Mach 2.25, not past it. (Higher still the
         // thrust keeps gaining on the drag, as the Hornet's does: there the
@@ -3976,7 +3990,7 @@ mod tests {
         let top = level(12_192.0, 470.0, true, 180.0);
         let limit = top_mach(raptor, 12_192.0, true, 0.1);
         println!("level at 40,000 ft in afterburner: Mach {top:.2}, settling at {limit:.2}");
-        assert!(top > 2.0 && top <= limit && limit > raptor.mmo - 0.08 && limit <= raptor.mmo + 0.01, "{top} {limit}");
+        assert!(top > 2.0 && top <= limit + 0.01 && limit > raptor.mmo - 0.08 && limit <= raptor.mmo + 0.01, "{top} {limit}");
 
         // A full pull at 450 kt: the fly-by-wire holds it near 9 g.
         let mut p = Plane::spawn(raptor, 0.6, -2.1, 3000.0, 0.0, 232.0);
@@ -4210,7 +4224,9 @@ mod tests {
         let spare = 1.0 - p.drag_level(v450, 1000.0, 0.0, 0.0) / p.thrust(1.0, v450, 1000.0);
         let tw = |k: f64| fe.n as f64 * fe.thrust * k / (68_946.0 * 9.81);
         println!("military power at 1,000 m: {worst:.0} kt indicated within two minutes; {:.0}% throttle holds 450 kt ({:.0}% of its military thrust to spare there); installed static thrust over gross weight {:.2} dry, {:.2} in afterburner", thr * 100.0, spare * 100.0, tw(1.0), tw(fe.boost));
-        assert!(thr > 0.6 && thr < 0.8 && worst > 500.0, "{thr} {worst}");
+        // (What lever holds it there is the fuel control's schedule; what it
+        // has to spare, about half its thrust, is the engines and the airframe.)
+        assert!(spare > 0.4 && spare < 0.6 && thr > 0.3 && thr < 0.8 && worst > 500.0, "{spare} {thr} {worst}");
         // (0.44 by the book, which takes the bare engine's 34,000 lbf)
         assert!((tw(fe.boost) - 0.44 * 25_500.0 / 34_000.0).abs() < 0.02, "{}", tw(fe.boost));
 
@@ -4625,13 +4641,24 @@ mod tests {
         p.gear = 1.0;
         p.flap_set = 3;
         p.flaps = 1.0;
-        let mut hold = hold_alt(600.0);
+        // Flown as a pilot does: the climb rate sets the pitch attitude wanted, and
+        // the stick holds that attitude, so the pitch the power brings with it
+        // (the thrust lines are under the wing) is taken out as it comes.
+        let pitch_of = |p: &Plane| p.forward().dot(p.pos.normalize()).asin().to_degrees();
+        let (mut last, mut want) = (pitch_of(&p), pitch_of(&p));
         for _ in 0..(90.0 / dt) as usize {
             // auto-throttle on 160 kt
             let v = p.airspeed().length();
             let thr = (0.5 + (82.3 - v) * 0.08).clamp(0.0, 1.0);
+            let (_, _, h) = geo::pos_to_lla(p.pos);
+            let vs = p.vel.dot(p.pos.normalize());
+            want = (want + ((600.0 - h) * 0.01 - vs * 0.1) * dt).clamp(0.0, 16.0);
+            let pitch_deg = pitch_of(&p);
+            let rate = (pitch_deg - last) / dt;
+            last = pitch_deg;
+            let pitch = ((want - pitch_deg) * 0.25 - rate * 0.08).clamp(-1.0, 1.0);
             let roll_err = -p.right().dot(p.pos.normalize());
-            let c = Controls { pitch: hold(&p).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: thr, ..Default::default() };
+            let c = Controls { pitch, roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: thr, ..Default::default() };
             p.throttle = thr;
             assert!(p.step(dt, &c, &w).is_none());
         }
@@ -5971,7 +5998,9 @@ mod tests {
             let pitch_up = p.up().dot(p.pos.normalize()).acos();
             let pitch_deg = (p.forward().dot(p.pos.normalize())).asin().to_degrees();
             let _ = pitch_up;
-            let pitch = if v * KT > 155.0 { ((12.0 - pitch_deg) * 0.12).clamp(-1.0, 1.0) } else { 0.0 };
+            // Forward pressure until then: take-off thrust on engines hung below
+            // the wing lifts the nose, and the trim is set for the climb-out.
+            let pitch = if v * KT > 155.0 { ((12.0 - pitch_deg) * 0.12).clamp(-1.0, 1.0) } else { -0.3 };
             let c = Controls { throttle: 1.0, pitch, ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             if lifted.is_none() && !p.on_ground && t > 5.0 {

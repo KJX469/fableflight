@@ -246,6 +246,8 @@ impl Unit {
             }
             Kind::Jet(j) => {
                 j.settle(throttle);
+                // With the burner asked for (and the lever up), fully lit.
+                j.burner = if lv.burner && j.data.wet > 0.0 && throttle > 0.95 { 1.0 } else { 0.0 };
                 let inp = JetIn { throttle, burner: false, amb, fuel: true, starter: false, reverser: 0.0, health: 1.0 };
                 // Hold the spools while the temperatures and the lit burner settle.
                 let (n1, n2) = (j.n1, j.n2);

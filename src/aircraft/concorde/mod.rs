@@ -534,7 +534,7 @@ pub static SPEC: Spec = Spec {
     // thrust than standing still up to Mach 1, then more and more, until at
     // Mach 2 they make nearly twice what the thin air alone would leave them,
     // which is what cruises it there without reheat (`inlet_mach` stops it there).
-    engine: Engine::Fan(Fan { n: 4, thrust: 140_000.0, idle: 0.6, idle_n2: 0.68, idle_thrust: 0.05, n1_rpm: 6_500.0, spool: [5.0, 3.0], reverse: 0.3, reverser_time: 2.0, boost: 1.2093, bpr: 0.0, theta_break: 1.2, tsfc: [0.89, 1.39], nozzle_z: 18.9, mounts: &MOUNTS }),
+    engine: Engine::Fan(Fan { n: 4, thrust: 140_000.0, idle: 0.6, idle_n2: 0.68, idle_thrust: 0.05, n1_rpm: 6_500.0, spool: [5.0, 3.0], reverse: 0.3, reverser_time: 2.0, boost: 1.2093, bpr: 0.0, theta_break: 1.2, p_max: 0.0, ab_theta: 0.0, tsfc: [0.89, 1.39], nozzle_z: 18.9, mounts: &MOUNTS }),
     // Estimates: an airliner's, quicker in roll than the 747 (a short span and powerful elevons) and with no stall break.
     handling: Handling {
         q_ref: 11_000.0,

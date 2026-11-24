@@ -1676,7 +1676,7 @@ pub static SPEC: Spec = Spec {
     steer_max: 1.0,
     steer_fade: 12.0,
     // Four PW4056s, 252 kN (56,750 lbf) each.
-    engine: Engine::Fan(Fan { n: 4, thrust: 252_000.0, idle: 0.25, idle_n2: 0.62, idle_thrust: 0.035, n1_rpm: 3600.0, spool: [7.0, 4.0], reverse: 0.35, reverser_time: 2.0, boost: 1.08, bpr: 4.85, theta_break: 1.052, tsfc: [0.36, 0.0], nozzle_z: 0.0, mounts: &MOUNTS }),
+    engine: Engine::Fan(Fan { n: 4, thrust: 252_000.0, idle: 0.25, idle_n2: 0.62, idle_thrust: 0.035, n1_rpm: 3600.0, spool: [7.0, 4.0], reverse: 0.35, reverser_time: 2.0, boost: 1.08, bpr: 4.85, theta_break: 1.052, p_max: 0.0, ab_theta: 0.0, tsfc: [0.36, 0.0], nozzle_z: 0.0, mounts: &MOUNTS }),
     handling: Handling {
         q_ref: 11_000.0,
         a_max: 1.6,

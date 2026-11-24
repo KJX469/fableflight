@@ -110,6 +110,8 @@ pub fn units(spec: &crate::aircraft::Spec) -> Vec<unit::Unit> {
                 wet: if fe.boost >= 1.2 { fe.thrust * fe.boost } else { 0.0 },
                 bpr: fe.bpr,
                 theta_break: fe.theta_break,
+                p_max: fe.p_max,
+                ab_theta: fe.ab_theta,
                 tsfc: fe.tsfc[0] * jet::LB_LBF_H,
                 tsfc_wet: fe.tsfc[1] * jet::LB_LBF_H,
                 idle: [fe.idle, fe.idle_n2],

@@ -81,19 +81,27 @@ angle β at 75% radius. The tables are cached per geometry.
 
 ## Gas turbines (`jet.rs`)
 
-- **Thrust lapse.** These are Mattingly's installed-thrust families (*Elements
-  of Propulsion*), blended by bypass ratio:
-  - High bypass: `δ0 (1 − k √M)`. Mattingly's k = 0.49 is for a bypass ratio
-    near 8. Here it scales as (BPR/8)^¾, because ram drag is a smaller part of
-    a faster jet's thrust.
-  - Low bypass, mixed flow.
-  - Turbojet, dry and wet.
+- **Thrust lapse.**
+  - High bypass: Howe's fit to real turbofans (*Aircraft Conceptual Design
+    Synthesis*), `(K1 + K2·B + (K3 + K4·B)·M)·σ^0.7`. At a fixed lever the
+    ram drag outgrows the ram's gain, so thrust falls as the aircraft speeds
+    up. That is what damps an airliner's phugoid.
+  - Low bypass, mixed flow, and turbojets, dry and wet: Mattingly's
+    installed-thrust families (*Elements of Propulsion*), blended by bypass
+    ratio.
 
   δ0 and θ0 are the total pressure and temperature ratios. Past the
   engine's temperature limit, `theta_break`, thrust falls away: that is a
   hot-day flat rating for an airliner, and the design Mach for a fast jet.
   Above Mach 1, the intake's total-pressure recovery follows MIL-E-5007D,
   1 − 0.075 (M − 1)^1.35.
+- **Pressure limit.** `p_max` caps δ0: low down and fast, a fighter's fuel
+  control holds the burner pressure (or, on the SR-71, the inlet duct
+  pressure) at its limit, so the ram stops adding thrust.
+- **Afterburner margin.** `ab_theta` lets the afterburner keep its thrust
+  past the core's temperature limit. Its own limit is the liner's and the
+  nozzle's. That is how a Raptor reaches Mach 2.25 while supercruising at
+  1.76.
 - **Inlet fades.** `Spec::inlet_mach` and `Spec::dry_mach` cover a
   turbo-ramjet's inlet limit and a cruise-in-afterburner engine's dry fade.
 - **Spools.** Two spools, N2 driving N1. Each engine accelerates on a
@@ -114,6 +122,7 @@ angle β at 75% radius. The tables are cached per geometry.
 | `reverse`, `reverser_time` | reverse thrust fraction, deploy time |
 | `boost` | afterburning thrust as a multiple of dry (≥ 1.2 for an afterburner) |
 | `bpr`, `theta_break`, `tsfc` | bypass ratio, temperature limit θ0, static TSFC dry and wet |
+| `p_max`, `ab_theta` | burner pressure limit as a δ0 (0: none), afterburner's θ0 margin past the core's limit |
 | `nozzle_z`, `mounts` | nozzle station; each engine's nozzle and thrust line |
 
 ## On the airframe (`unit.rs`, `plane.rs`)

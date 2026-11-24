@@ -453,11 +453,13 @@ pub static SPEC: Spec = Spec {
     fbw_g: 0.0,
     steer_max: 0.9,
     steer_fade: 15.0,
-    // Two J79-GE-17As: 52.96 kN each dry, 79.38 kN in afterburner (Space). The
-    // lapse and the wave drag are set against each other so that it stays just
-    // subsonic dry down low, and the ram air takes it past Mach 2 at 40,000 ft
-    // in afterburner (by the book 2.23; it takes minutes and most of the fuel).
-    engine: Engine::Fan(Fan { n: 2, thrust: 52_960.0, idle: 0.65, idle_n2: 0.65, idle_thrust: 0.05, n1_rpm: 7_460.0, spool: [5.0, 3.0], reverse: 0.0, reverser_time: 1.0, boost: 1.5, bpr: 0.0, theta_break: 1.3, tsfc: [0.84, 1.97], nozzle_z: 4.8, mounts: &MOUNTS }),
+    // Two J79-GE-17As: 52.96 kN each dry, 79.38 kN in afterburner (Space).
+    // With the lapse it is just about sonic dry down low, where the burner
+    // pressure limit (δ0 1.8) keeps the afterburners from taking it much past
+    // Mach 1.3; the ram air takes it past Mach 2 at 40,000 ft in afterburner
+    // (by the book 2.23; it takes minutes and most of the fuel), the burners
+    // holding on 0.12 past the core's temperature limit.
+    engine: Engine::Fan(Fan { n: 2, thrust: 52_960.0, idle: 0.65, idle_n2: 0.65, idle_thrust: 0.05, n1_rpm: 7_460.0, spool: [5.0, 3.0], reverse: 0.0, reverser_time: 1.0, boost: 1.5, bpr: 0.0, theta_break: 1.3, p_max: 1.8, ab_theta: 0.12, tsfc: [0.84, 1.97], nozzle_z: 4.8, mounts: &MOUNTS }),
     // Heavier on the controls than the Hornet and less forgiving: the stick
     // moves the slab directly, the ailerons drag the nose the wrong way at
     // a high angle of attack, and a stalled wing goes with any yaw.

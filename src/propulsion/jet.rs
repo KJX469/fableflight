@@ -10,14 +10,16 @@
 //! - **Thrust lapse.** The thrust available is the static sea-level rating
 //!   times a lapse in the total pressure and temperature of the air at the
 //!   inlet (δ0, θ0) and the Mach number: Mattingly's installed-engine lapses
-//!   (*Aircraft Engine Design*, 2nd ed., §2.3.2) for high-bypass turbofans,
-//!   low-bypass mixed-flow turbofans and turbojets, each dry and with the
-//!   afterburner, blended by the bypass ratio. Below the throttle ratio
-//!   (`theta_break`, the θ0 where the engine reaches its turbine temperature
-//!   limit) it is limited by the compressor's pressure, above it by its
-//!   temperature: so an airliner's take-off thrust is flat-rated up to a hot
-//!   day and then falls, and an engine designed for Mach 2 keeps its thrust
-//!   to Mach 2.
+//!   (*Aircraft Engine Design*, 2nd ed., §2.3.2) for low-bypass mixed-flow
+//!   turbofans and turbojets, each dry and with the afterburner, and Howe's
+//!   fit to real engines for high-bypass turbofans, blended by the bypass
+//!   ratio. Below the throttle ratio (`theta_break`, the θ0 where the engine
+//!   reaches its turbine temperature limit) it is limited by the compressor's
+//!   pressure, above it by its temperature: so an airliner's take-off thrust
+//!   is flat-rated up to a hot day and then falls, and an engine designed for
+//!   Mach 2 keeps its thrust to Mach 2. A fighter's engine also holds its
+//!   burner pressure under a limit (`p_max`), and its afterburner can keep
+//!   going past the core's temperature limit (`ab_theta`).
 //! - **Fuel.** Thrust specific fuel consumption rises with flight Mach and
 //!   falls with the air's temperature (the same source's √θ fits), so cruise
 //!   burns about what the real engines burn per pound of thrust, not their
@@ -41,6 +43,10 @@ pub struct JetData {
     /// the θ0 where it reaches its temperature limit (1.0 to 1.1 for an
     /// airliner's flat rating, more for an engine designed to fly fast)
     pub theta_break: f64,
+    /// the highest δ0 its burner pressure limit allows (0: none)
+    pub p_max: f64,
+    /// how far past `theta_break` the afterburner keeps its thrust
+    pub ab_theta: f64,
     /// static sea-level specific fuel consumption, dry at full power and
     /// with the afterburner (kg/N s)
     pub tsfc: f64,
@@ -121,17 +127,20 @@ pub struct Jet {
 /// The installed thrust lapse α (thrust over static sea-level maximum dry
 /// thrust) for bypass ratio `bpr`, dry or with the afterburner, and the
 /// ratio of afterburning to dry thrust the engine's family has statically.
-fn lapse_family(bpr: f64, wet: bool, th0: f64, d0: f64, m: f64, tr: f64) -> f64 {
+fn lapse_family(bpr: f64, wet: bool, th0: f64, d0: f64, m: f64, tr: f64, sigma: f64) -> f64 {
     let over = (th0 - tr).max(0.0);
     let sm = m.max(0.0).sqrt();
-    // high bypass (no afterburner: wet is dry). Mattingly's 0.49 is for a
-    // bypass ratio near 8; the ram drag behind the √M term is a smaller part
-    // of a hotter, faster jet's thrust, so it shrinks with the bypass ratio,
-    // down to none in his mixed-flow family. As (BPR/8)^¾ (an estimate, set
-    // between a JT9D's take-off lapse and a light G650 still climbing at
-    // FL510): 0.34 at 5, 0.31 at 4.35.
-    let k_ram = 0.49 * (bpr / 8.0).clamp(0.0, 1.0).powf(0.75);
-    let hi = d0 * (1.0 - k_ram * sm - 3.0 * over / (1.5 + m));
+    // High bypass (no afterburner: wet is dry): Howe's fit to real turbofans
+    // (*Aircraft Conceptual Design Synthesis*, §3.4), (K1 + K2·B + (K3 + K4·B)·M)·σ^0.7,
+    // with his coefficients for a bypass ratio of 3 to 8. At a fixed lever the
+    // ram drag outgrows the ram's gain, so the thrust falls away as it speeds
+    // up (which damps the phugoid), and it goes with the air's density. Past
+    // the flat rating it falls as Mattingly's does.
+    let hi = {
+        let b = bpr.min(8.0);
+        let k = if m < 0.4 { 1.0 - (0.6 + 0.04 * b) * m } else { 0.88 - 0.016 * b - 0.3 * m };
+        k * sigma.max(0.0).powf(0.7) * (1.0 - 3.0 * over / (1.5 + m))
+    };
     // low bypass, mixed flow: dry normalised by its static 0.6 of the wet
     let lo = if wet { d0 * (1.0 - 3.5 * over / th0) } else { d0 * (1.0 - 3.8 * over / th0) };
     // turbojet: dry normalised by its static 0.8 (and its static 1 - 0.1·0)
@@ -266,10 +275,17 @@ impl Jet {
         let (th0, m) = (amb.theta0(), amb.mach);
         let recovery = if m > 1.0 { 1.0 - 0.075 * (m - 1.0).powf(1.35) } else { 1.0 };
         let d0 = amb.delta0() * recovery;
+        // Low down and fast, the fuel control holds the burner pressure at its
+        // limit: the thrust stops growing with the ram there.
+        let d0 = if d.p_max > 0.0 { d0.min(d.p_max) } else { d0 };
         let inlet = if d.inlet_mach > 0.0 { 1.0 - 0.65 * smooth(d.inlet_mach - 0.05, d.inlet_mach + 0.15, m) } else { 1.0 };
         let fade = if d.dry_mach > 0.0 { 1.0 - 0.97 * smooth(0.4 * d.dry_mach, d.dry_mach, m) } else { 1.0 };
-        let dry = d.thrust * lapse_family(d.bpr, false, th0, d0, m, d.theta_break) * inlet;
-        let wet = if d.wet > 0.0 { d.wet * lapse_family(d.bpr, true, th0, d0, m, d.theta_break) * inlet } else { dry };
+        // The density a standard day has at this pressure: below the flat
+        // rating a warm day costs no thrust (the θ0 term takes it off past it).
+        let pr = amb.p / P0;
+        let sigma = if pr > 0.2234 { pr.powf(1.0 - 0.190263) } else { pr / 0.7519 };
+        let dry = d.thrust * lapse_family(d.bpr, false, th0, d0, m, d.theta_break, sigma) * inlet;
+        let wet = if d.wet > 0.0 { d.wet * lapse_family(d.bpr, true, th0, d0, m, d.theta_break + d.ab_theta, sigma) * inlet } else { dry };
         (dry * fade, wet.max(dry * fade))
     }
 
@@ -327,6 +343,8 @@ mod tests {
             wet: 0.0,
             bpr: 5.0,
             theta_break: 1.05,
+            p_max: 0.0,
+            ab_theta: 0.0,
             tsfc: 0.36 * LB_LBF_H,
             tsfc_wet: 0.0,
             idle: [0.22, 0.6],
@@ -347,6 +365,8 @@ mod tests {
             wet: 78_700.0,
             bpr: 0.34,
             theta_break: 1.08,
+            p_max: 0.0,
+            ab_theta: 0.0,
             tsfc: 0.81 * LB_LBF_H,
             tsfc_wet: 1.74 * LB_LBF_H,
             idle: [0.6, 0.7],
