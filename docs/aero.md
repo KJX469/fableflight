@@ -128,7 +128,7 @@ auto-trim does. With it off, trimming is the pilot's job.
 
 ## Checking every aircraft
 
-All nine built-in aircraft fly on rigs. The tests that hold them to it:
+All ten built-in aircraft fly on rigs. The tests that hold them to it:
 
 - `every_aircraft_is_statically_stable_and_damped` (modes.rs): at a cruise
   point each has a lift slope, pitch and weathercock stability (a fly-by-wire
