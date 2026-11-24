@@ -22,6 +22,8 @@ pub enum Lat {
     Hdg,
     Nav,
     Apr,
+    /// follows the flight plan.
+    Gps,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +59,8 @@ pub struct Autopilot {
     pub spd: f64,
     /// the pitch held in PIT (rad)
     pitch_hold: f64,
+    /// gps track from the plan.
+    pub gps_trk: Option<f64>,
     /// NAV/APR: the course is captured (else HDG flies until it is)
     pub nav_cap: bool,
     /// APR: the glide slope is captured
@@ -77,7 +81,7 @@ pub struct Autopilot {
 
 impl Default for Autopilot {
     fn default() -> Self {
-        Autopilot { on: false, lat: Lat::Roll, vert: Vert::Pitch, hdg: 0.0, alt: 0.0, vs: 0.0, at: false, spd: 0.0, pitch_hold: 0.0, nav_cap: false, gs_cap: false, alt_cap: false, alt_hold: 0.0, slow: false, fast: false, i_aoa: 0.0, i_xw: 0.0, i_pitch: 0.0, i_thr: 0.0 }
+        Autopilot { on: false, lat: Lat::Roll, vert: Vert::Pitch, hdg: 0.0, alt: 0.0, vs: 0.0, at: false, spd: 0.0, pitch_hold: 0.0, gps_trk: None, nav_cap: false, gs_cap: false, alt_cap: false, alt_hold: 0.0, slow: false, fast: false, i_aoa: 0.0, i_xw: 0.0, i_pitch: 0.0, i_thr: 0.0 }
     }
 }
 
@@ -233,6 +237,14 @@ impl Autopilot {
         match self.lat {
             Lat::Roll => {}
             Lat::Hdg => want_hdg = Some(self.hdg),
+            // flies a ground track like nav.
+            Lat::Gps => match self.gps_trk {
+                Some(trk) => {
+                    want_hdg = Some(s.hdg + wrap(trk - s.trk));
+                    bank_max = BANK_NAV;
+                }
+                None => want_hdg = Some(self.hdg),
+            },
             Lat::Nav | Lat::Apr => {
                 match course_nav {
                     Some((course, cdi, ils)) if self.lat == Lat::Nav || ils => {
@@ -368,7 +380,12 @@ impl Autopilot {
             Lat::Nav if self.nav_cap => "NAV".into(),
             Lat::Apr if self.nav_cap => "LOC".into(),
             Lat::Nav | Lat::Apr => format!("HDG {:03.0}", self.hdg.rem_euclid(360.0)),
+            Lat::Gps if self.gps_trk.is_some() => "GPS".into(),
+            Lat::Gps => format!("HDG {:03.0}", self.hdg.rem_euclid(360.0)),
         });
+        if self.lat == Lat::Gps && self.gps_trk.is_none() {
+            armed.push("GPS".into());
+        }
         if matches!(self.lat, Lat::Nav | Lat::Apr) && !self.nav_cap {
             armed.push(if self.lat == Lat::Nav { "NAV" } else { "LOC" }.into());
         }

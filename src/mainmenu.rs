@@ -217,7 +217,7 @@ fn mp_bar(p: &Painter, r: Rect, resp: &egui::Response, status: &str, col: Color3
 }
 
 /// the wordmark at `at`, a hairline running on to `right`.
-fn wordmark(p: &Painter, at: Pos2, right: f32, k: f32) {
+pub(crate) fn wordmark(p: &Painter, at: Pos2, right: f32, k: f32) {
     let size = 60.0 * k.max(0.7);
     let mut job = egui::text::LayoutJob::default();
     let fmt = |col| egui::TextFormat { font_id: menu::bold(size), color: col, extra_letter_spacing: 3.0 * k, ..Default::default() };
@@ -325,7 +325,7 @@ fn fly_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32, globe: &egui::T
 }
 
 /// Text with extra space between the letters.
-fn spaced(p: &Painter, at: Pos2, align: Align2, text: &str, font: FontId, col: Color32, spacing: f32) {
+pub(crate) fn spaced(p: &Painter, at: Pos2, align: Align2, text: &str, font: FontId, col: Color32, spacing: f32) {
     let mut job = egui::text::LayoutJob::default();
     job.append(text, 0.0, egui::TextFormat { font_id: font, color: col, extra_letter_spacing: spacing, ..Default::default() });
     let g = p.layout_job(job);
@@ -336,7 +336,7 @@ fn spaced(p: &Painter, at: Pos2, align: Align2, text: &str, font: FontId, col: C
 }
 
 /// A horizontal gradient over a rectangle, `left` to `right`.
-fn hgradient(p: &Painter, r: Rect, left: Color32, right: Color32) {
+pub(crate) fn hgradient(p: &Painter, r: Rect, left: Color32, right: Color32) {
     let mut mesh = egui::Mesh::default();
     mesh.colored_vertex(r.left_top(), left);
     mesh.colored_vertex(r.right_top(), right);
@@ -348,7 +348,7 @@ fn hgradient(p: &Painter, r: Rect, left: Color32, right: Color32) {
 }
 
 /// A vertical gradient over a rectangle.
-fn gradient(p: &Painter, r: Rect, top: Color32, bottom: Color32) {
+pub(crate) fn gradient(p: &Painter, r: Rect, top: Color32, bottom: Color32) {
     let mut mesh = egui::Mesh::default();
     mesh.colored_vertex(r.left_top(), top);
     mesh.colored_vertex(r.right_top(), top);

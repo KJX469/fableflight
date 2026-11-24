@@ -598,6 +598,8 @@ pub struct FieldGpu {
 pub struct TileGpu {
     vbuf: wgpu::Buffer,
     bind: wgpu::BindGroup,
+    /// gpu bytes, for the streaming budget (world.rs `keep_budget`)
+    pub bytes: usize,
     radius: f32,
     wet: bool,
     all_water: bool,
@@ -656,6 +658,8 @@ pub struct BuildGpu {
     bind: wgpu::BindGroup,
     road: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
     pub trees: Option<wgpu::Buffer>,
+    /// gpu bytes, for the streaming budget (world.rs `keep_budget`)
+    pub bytes: usize,
 }
 impl BuildGpu {
     /// The cells (bit per cell) with geometry inside a shadow cascade's box,
@@ -728,6 +732,10 @@ impl BuildGpu {
 /// The bytes each of `BuildGpu::targets` is filled with.
 pub fn building_payload(b: &crate::buildings::BuildingData) -> [&[u8]; 5] {
     [bytemuck::cast_slice(&b.verts), bytemuck::cast_slice(&b.indices), bytemuck::cast_slice(&b.road_verts), bytemuck::cast_slice(&b.road_idx), bytemuck::cast_slice(&b.trees)]
+}
+/// gpu bytes of a building tile, for the streaming budget.
+pub fn building_bytes(b: &crate::buildings::BuildingData) -> usize {
+    building_payload(b).iter().map(|p| p.len()).sum::<usize>() + b.atlas.iter().map(|m| m.len()).sum::<usize>()
 }
 /// Bytes of a terrain tile's upload, for the per-frame upload budget.
 pub fn tile_bytes(t: &crate::sources::TileData) -> usize {
@@ -806,6 +814,8 @@ pub struct ObjFast {
     kind: u32,
     cut: wgpu::RenderPipeline,
     solid: wgpu::RenderPipeline,
+    /// depth only, for the whole pieces before `solid` shades them
+    pre: wgpu::RenderPipeline,
 }
 
 /// triangles of instrument faces (9) and displays (14) moved to the end, and where they start.
@@ -978,23 +988,49 @@ fn obj_generic_rest(d: &wgpu::Device, l0: &wgpu::BindGroupLayout, l_obj: &wgpu::
     ObjRest { shadow, shadow_solid, glass: p_glass }
 }
 
-/// the g-buffer pipeline for aircraft parts, mode 0 or 5 of `geom`.
-fn obj_pipeline(d: &wgpu::Device, layout: &wgpu::PipelineLayout, m: &wgpu::ShaderModule, cut: bool) -> wgpu::RenderPipeline {
+/// The specialised aircraft pipelines (`ObjFast`): cut pieces, whole pieces,
+/// and a depth prepass of the whole pieces, so the heavy shader runs once per
+/// visible pixel rather than for every layer of the cockpit (11.4 -> 3.2 ms of
+/// cockpit shading on an RTX 2050). The prepass and the shading share a module
+/// and an `@invariant` position (plane.wgsl), so their depths match exactly.
+#[derive(Clone, Copy, PartialEq)]
+enum ObjPass {
+    Cut,
+    Solid,
+    Pre,
+}
+fn obj_pipeline(d: &wgpu::Device, layout: &wgpu::PipelineLayout, m: &wgpu::ShaderModule, pass: ObjPass) -> wgpu::RenderPipeline {
     const A_PART: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4];
     let opts = wgpu::PipelineCompilationOptions::default();
+    let w = if pass == ObjPass::Pre { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL };
     let targets = [
-        Some(wgpu::ColorTargetState { format: HDR, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-        Some(wgpu::ColorTargetState { format: HDR, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-        Some(wgpu::ColorTargetState { format: AMB, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+        Some(wgpu::ColorTargetState { format: HDR, blend: None, write_mask: w }),
+        Some(wgpu::ColorTargetState { format: HDR, blend: None, write_mask: w }),
+        Some(wgpu::ColorTargetState { format: AMB, blend: None, write_mask: w }),
     ];
+    // whole pieces are shaded on their own prepass depth
+    let compare = if pass == ObjPass::Solid { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::Greater };
     d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("obj fast"),
+        label: Some(match pass {
+            ObjPass::Cut => "obj fast cut",
+            ObjPass::Solid => "obj fast solid",
+            ObjPass::Pre => "obj fast depth prepass",
+        }),
         layout: Some(layout),
         vertex: wgpu::VertexState { module: m, entry_point: Some("vs"), compilation_options: opts.clone(), buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &A_PART })] },
         primitive: Default::default(),
-        depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Greater), stencil: Default::default(), bias: Default::default() }),
+        depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH, depth_write_enabled: Some(true), depth_compare: Some(compare), stencil: Default::default(), bias: Default::default() }),
         multisample: wgpu::MultisampleState { count: msaa(), mask: !0, alpha_to_coverage_enabled: false },
-        fragment: Some(wgpu::FragmentState { module: m, entry_point: Some(if cut { "fs" } else { "fs_solid" }), compilation_options: opts, targets: &targets }),
+        fragment: Some(wgpu::FragmentState {
+            module: m,
+            entry_point: Some(match pass {
+                ObjPass::Cut => "fs",
+                ObjPass::Solid => "fs_solid",
+                ObjPass::Pre => "fs_pre",
+            }),
+            compilation_options: opts,
+            targets: &targets,
+        }),
         multiview_mask: None,
         cache: None,
     })
@@ -1063,6 +1099,9 @@ pub struct Frame<'a> {
     pub near: Vec<TreeInst>,
     /// shadow cascades, the aircraft's shadow, the 3D tiles' coverage mask
     pub casc_vp: [[[f32; 4]; 4]; CASCADES + 4],
+    /// bit per cascade kept from an earlier frame and not drawn (main.rs
+    /// `casc_keep`: the outer two take turns)
+    pub casc_skip: u8,
     /// the shore field's part this frame (shore.rs), and for drawing its
     /// mask: the new square's centre (camera-relative) and the terrain tiles
     /// near it that are out of view (their uniforms follow the view tiles')
@@ -1164,6 +1203,8 @@ pub struct Renderer {
     /// a GPU that shares the CPU's memory and power (Apple silicon, laptop
     /// chips): the defaults trade a little for speed there
     pub integrated: bool,
+    /// the GPU's own memory in bytes if known (Vulkan), sizes the streaming budget
+    pub vram: Option<u64>,
     /// the GPU's PCI vendor id (0x8086 Intel, 0x1002 AMD, 0x10de NVIDIA)
     pub vendor: u32,
     /// the volumetric clouds drawn (graphics settings; off skips their march)
@@ -1281,6 +1322,11 @@ pub struct Renderer {
     photo_mask: wgpu::TextureView,
     /// the mask holds something that has to be cleared when no tiles are drawn
     photo_mask_dirty: bool,
+    /// the mask is allocated at full size: it starts at 1x1 (128 MB saved)
+    /// until the first 3D tile is drawn (`grow_photo_mask`)
+    photo_mask_big: bool,
+    /// the sun shadow map's array view, to make `bg0` again
+    shadow_all: wgpu::TextureView,
     /// how far each building tile around the camera has faded in (`Frame::cover`)
     light_cover: wgpu::Texture,
     light_cover_view: wgpu::TextureView,
@@ -1481,10 +1527,25 @@ struct Bg0Src {
     gclouds: wgpu::TextureView,
     snow: wgpu::TextureView,
     snow_track: wgpu::TextureView,
+    /// stand-ins for the shadow passes' variant (`make_shadow_pass`)
+    black: wgpu::TextureView,
+    dummy_depth: wgpu::TextureView,
+    dummy_vol: wgpu::TextureView,
+    no_cs: wgpu::TextureView,
 }
 
 impl Bg0Src {
     fn make(&self, d: &wgpu::Device, shadow: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.make_with(d, &self.sky, shadow, &self.vol, &self.cs)
+    }
+
+    /// The variant the shadow passes use (`bg0_shadow`): it reads the photo
+    /// mask, so it is made again when the mask is (`grow_photo_mask`).
+    fn make_shadow_pass(&self, d: &wgpu::Device) -> wgpu::BindGroup {
+        self.make_with(d, &self.black, &self.dummy_depth, &self.dummy_vol, &self.no_cs)
+    }
+
+    fn make_with(&self, d: &wgpu::Device, sky: &wgpu::TextureView, shadow: &wgpu::TextureView, vol: &wgpu::TextureView, cs: &wgpu::TextureView) -> wgpu::BindGroup {
         fn samp(b: u32, s: &wgpu::Sampler) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry { binding: b, resource: wgpu::BindingResource::Sampler(s) }
         }
@@ -1495,7 +1556,7 @@ impl Bg0Src {
                 buf_res(0, &self.ub, 0),
                 tex_res(1, &self.trans),
                 tex_res(2, &self.ms),
-                tex_res(3, &self.sky),
+                tex_res(3, sky),
                 tex_res(4, &self.noise),
                 tex_res(5, &self.wave),
                 samp(6, &self.s_clamp),
@@ -1503,12 +1564,12 @@ impl Bg0Src {
                 tex_res(8, shadow),
                 samp(9, &self.s_shadow),
                 samp(10, &self.s_aniso),
-                tex_res(11, &self.vol),
+                tex_res(11, vol),
                 tex_res(12, &self.det_alb),
                 tex_res(13, &self.det_nrm),
                 samp(14, &self.s_detail),
                 tex_res(15, &self.mask),
-                tex_res(16, &self.cs),
+                tex_res(16, cs),
                 tex_res(17, &self.ocean),
                 tex_res(18, &self.shore),
                 tex_res(19, &self.glow),
@@ -1977,6 +2038,11 @@ impl Renderer {
         log::info!("GPU: {} ({:?})", info.name, info.device_type);
         crate::progress::step("gpu");
         let integrated = info.device_type == wgpu::DeviceType::IntegratedGpu;
+        let vram = vram_bytes(&adapter);
+        match vram {
+            Some(b) => log::info!("GPU memory: {} MB", b >> 20),
+            None => log::info!("GPU memory: unknown"),
+        }
         let samples = samples.unwrap_or(if !integrated { 4 } else if info.vendor == 0x8086 { 1 } else { 2 });
         // Intel integrated GPUs hang (i915 "GPU HANG ... context reset", then a lost
         // device) within a minute of the start screen at 4x; 2x runs clean (seen on
@@ -2253,7 +2319,8 @@ impl Renderer {
             ],
         });
         // Coverage of the photorealistic 3D tiles, seen from above (tiles3d.rs).
-        let photo_mask = view(&make_tex(d, "photo mask", PHOTO_MASK, PHOTO_MASK, 1, 1, PHOTO_MASK_FMT, rt));
+        // 1x1 until the first 3D tile shows up (`grow_photo_mask`): 128 MB at full size.
+        let photo_mask = view(&make_tex(d, "photo mask", 1, 1, 1, 1, PHOTO_MASK_FMT, rt));
         let light_cover = make_tex(d, "light cover", COVER_N as u32, COVER_N as u32, 1, 1, wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         let light_cover_view = view(&light_cover);
         let glow_tex = make_tex(d, "city glow", crate::skyglow::N as u32, crate::skyglow::N as u32, 1, 1, wgpu::TextureFormat::Rgba16Float, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
@@ -2303,10 +2370,11 @@ impl Renderer {
             layout: l0.clone(), ub: globals_ub.clone(), trans: lut_trans.clone(), ms: lut_ms.clone(), sky: lut_sky.clone(), noise: noise.clone(), wave: wave.clone(),
             s_clamp: s_clamp.clone(), s_repeat: s_repeat.clone(), s_shadow: s_shadow.clone(), s_aniso: s_aniso.clone(), vol: vol_light.clone(), det_alb: det_alb.clone(), det_nrm: det_nrm.clone(),
             s_detail: s_detail.clone(), mask: photo_mask.clone(), cs: cs_mix.clone(), ocean: ocean.view.clone(), shore: shore.view.clone(), glow: glow_view.clone(), gclouds: gclouds_view.clone(), snow: snow_view.clone(), snow_track: snow_track_view.clone(),
+            black: black.clone(), dummy_depth: dummy_depth.clone(), dummy_vol: dummy_vol.clone(), no_cs: no_cs.clone(),
         };
         // Variant for passes that render into the LUTs / shadow map / smoke volume / photo mask / cloud shadow themselves.
         let bg0_pre = make_bg0(&black, &lut_trans, &lut_ms, &dummy_depth, &dummy_vol, &no_mask, &no_cs);
-        let bg0_shadow = make_bg0(&black, &lut_trans, &lut_ms, &dummy_depth, &dummy_vol, &photo_mask, &no_cs);
+        let bg0_shadow = bg0_src.make_shadow_pass(d);
         let bg0_boot = make_bg0(&black, &black, &black, &dummy_depth, &dummy_vol, &no_mask, &no_cs);
         let bg0_ms = make_bg0(&black, &lut_trans, &black, &dummy_depth, &dummy_vol, &no_mask, &no_cs);
 
@@ -3017,9 +3085,9 @@ impl Renderer {
             gpu_timer: crate::gputime::GpuTimer::new(&device, &queue),
             frame_clock: crate::gputime::FrameClock::new(&device, &queue),
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_comp_cls, l_comp_main, l_comp_edge, l_comp_globe, l_hiz, ap_l, ap_t, cloud_refl, bg_atmlut, bg_comp_sky, p_hiz_build, p_ap_build, p_sky_build, p_cloud_refl, p_cloud_refl_plain, l_cloud, l_cloud_storm, l_cloud_rain, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
-            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, light_cover, light_cover_view, glow_tex, gclouds_tex, snow_tex, snow_track_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, font_ub, tile_ibuf, tile_nidx: ix.len() as u32,
+            tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, photo_mask_big: false, shadow_all: shadow_all.clone(), light_cover, light_cover_view, glow_tex, gclouds_tex, snow_tex, snow_track_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, font_ub, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_far, p_terrain_water, p_terrain_tess, p_terrain_cells, p_terrain_photo, p_terrain_tess_photo, p_terrain_cells_photo, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, obj_gen: None, obj_gen_rx: Some(obj_gen_rx), wait_objs: false, obj_wait: None, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_comp_cls, p_comp_sky, p_comp_opaque, p_comp_glass, p_comp_water, p_comp_edge, p_composite, p_composite_edge, p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit,
-            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, clouds: true, cloud_shadows: true, vendor: info.vendor, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, up, gpu: info.clone(), meshes: Vec::new(), egui, instance, window, gpu_error, device_lost, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated,
+            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, clouds: true, cloud_shadows: true, vendor: info.vendor, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, up, gpu: info.clone(), meshes: Vec::new(), egui, instance, window, gpu_error, device_lost, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated, vram,
         })
     }
 
@@ -3210,15 +3278,38 @@ impl Renderer {
         }
     }
 
+    /// rough gpu bytes the renderer holds outside world streaming, at this render scale.
+    pub fn fixed_bytes(&self, scale: f32) -> u64 {
+        let (w, h) = ((self.config.width as f32 * scale) as u64, (self.config.height as f32 * scale) as u64);
+        let px = w * h;
+        // msaa targets, full size targets, half size cloud and bloom
+        let targets = px * (msaa() as u64 * (8 + 8 + 1 + 4) + 7 * 8 + 4 + 4) + px / 4 * (4 * 8 + 2 * 4 + 16 + 2) + px / 4 * 8 * 4 / 3;
+        let shadow = (CASCADES as u64 + 1) * self.shadow_res as u64 * self.shadow_res as u64 * 4;
+        // the rest measured on an rtx 2050, the tree impostors alone are 426 mb
+        targets + shadow + (950 << 20)
+    }
+
     /// A new sun shadow map of this side (texels).
     pub fn set_shadow_res(&mut self, res: u32) {
         let res = res.clamp(256, self.device.limits().max_texture_dimension_2d);
         if res != self.shadow_res {
             let (all, layers) = make_shadow(&self.device, res);
             self.bg0 = self.bg0_src.make(&self.device, &all);
+            self.shadow_all = all;
             self.shadow = layers;
             self.shadow_res = res;
         }
+    }
+
+    /// Allocates the photo mask at full size and makes the bind groups that read it again.
+    fn grow_photo_mask(&mut self) {
+        let rt = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        self.photo_mask = view(&make_tex(&self.device, "photo mask", PHOTO_MASK, PHOTO_MASK, 1, 1, PHOTO_MASK_FMT, rt));
+        self.bg0_src.mask = self.photo_mask.clone();
+        self.bg0 = self.bg0_src.make(&self.device, &self.shadow_all);
+        self.bg0_shadow = self.bg0_src.make_shadow_pass(&self.device);
+        self.photo_mask_big = true;
+        self.photo_mask_dirty = true;
     }
 
     pub fn set_vsync(&mut self, on: bool) {
@@ -3256,7 +3347,7 @@ impl Renderer {
             if p[0] > 0 { wet = true; }
             if p[0] <= 127 { all_water = false; }
         }
-        TileGpu { vbuf, bind, radius: t.radius as f32, wet, all_water }
+        TileGpu { vbuf, bind, bytes: tile_bytes(t), radius: t.radius as f32, wet, all_water }
     }
 
     /// Create a building tile's GPU objects. The geometry buffers start out
@@ -3309,7 +3400,7 @@ impl Renderer {
         let bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.l_build, entries: &[buf_res(0, &self.build_ub, 64), tex_res(1, &atlas)] });
         let road = (!b.road_idx.is_empty()).then(|| (buf(bytemuck::cast_slice(&b.road_verts), wgpu::BufferUsages::VERTEX), buf(bytemuck::cast_slice(&b.road_idx), wgpu::BufferUsages::INDEX), b.road_idx.len() as u32));
         let trees = (!b.trees.is_empty()).then(|| buf(bytemuck::cast_slice(&b.trees), wgpu::BufferUsages::VERTEX));
-        BuildGpu { vbuf, ibuf, n_main: b.n_main, n_det: b.n_det, n_far: b.n_far, cell_end: b.cell_end.clone(), cell_bound: b.cell_bound.clone(), bind, road, trees }
+        BuildGpu { bytes: building_bytes(b), vbuf, ibuf, n_main: b.n_main, n_det: b.n_det, n_far: b.n_far, cell_end: b.cell_end.clone(), cell_bound: b.cell_bound.clone(), bind, road, trees }
     }
 
     pub fn upload_field(&self, m: &crate::airfield::FieldMesh) -> FieldGpu {
@@ -3465,11 +3556,13 @@ impl Renderer {
             let f = {
                 let _big = BIG_COMPILE.lock().unwrap_or_else(|e| e.into_inner());
                 let m = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("plane fast"), source: wgpu::ShaderSource::Wgsl(specialise(&src, kind).into()) });
-                let cut = obj_pipeline(&d, &pl, &m, true);
+                let cut = obj_pipeline(&d, &pl, &m, ObjPass::Cut);
                 FAST_STEPS.store(1, Relaxed);
-                let solid = obj_pipeline(&d, &pl, &m, false);
+                let solid = obj_pipeline(&d, &pl, &m, ObjPass::Solid);
                 FAST_STEPS.store(2, Relaxed);
-                ObjFast { kind, cut, solid }
+                // (a trivial fragment shader: quick next to the two above)
+                let pre = obj_pipeline(&d, &pl, &m, ObjPass::Pre);
+                ObjFast { kind, cut, solid, pre }
             };
             FAST_STATE.store(2, Relaxed);
             log::info!("aircraft shader for kind {kind} ready in {:.1} s", t.elapsed().as_secs_f64());
@@ -3601,6 +3694,9 @@ impl Renderer {
         let t_enc = std::time::Instant::now();
         self.stats[1] += (t_enc - t_acq).as_secs_f64();
         crate::gputime::cpu("render.acquire_frame");
+        if !f.photo.is_empty() && !self.photo_mask_big {
+            self.grow_photo_mask();
+        }
         // (asked for first: a screenshot waiting below for the generic set
         // would otherwise hold it back until the 15 s are up)
         let kind = f.objs.iter().find(|o| !o.glass).map(|o| o.glow[1].round().max(0.0) as u32);
@@ -4241,9 +4337,32 @@ impl Renderer {
                     }
                 }
             }
+            let fast = self.obj_fast.as_ref().filter(|_| !shadow);
+            // Depth prepass of the whole pieces the specialised shader draws
+            // (`ObjPass`): their shading below then runs once per visible pixel.
+            // The instruments and other kinds (generic pipelines) go without.
+            if let Some(fp) = fast.filter(|_| part & 1 != 0) {
+                let mut set = false;
+                for (i, o) in f.objs.iter().take(n_objs).enumerate() {
+                    let m = &self.meshes[o.mesh];
+                    if o.glass || o.cut || m.n_main == 0 || fp.kind != o.glow[1].round() as u32 {
+                        continue;
+                    }
+                    if !set {
+                        rp.set_pipeline(&fp.pre);
+                        set = true;
+                    }
+                    rp.set_bind_group(1, m.bind.as_deref().unwrap_or(&self.bg_obj), &[(i as u64 * OBJ_STRIDE) as u32]);
+                    rp.set_vertex_buffer(0, m.vbuf.slice(..));
+                    rp.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..m.n_main, 0, 0..1);
+                }
+                if set {
+                    rmark(rp, "view.aircraft_prepass");
+                }
+            }
             // pipeline set last: 0 generic solid, 1 generic cut, 2 fast solid, 3 fast cut.
             let mut cur: Option<u8> = None;
-            let fast = self.obj_fast.as_ref().filter(|_| !shadow);
             // (until the generic pipelines are built, only what the fast ones draw)
             let generic = self.obj_gen.as_ref();
             let rest = generic.and_then(|g| g.rest.as_ref());
@@ -4366,6 +4485,9 @@ impl Renderer {
         }
         mark(&mut enc, "shore.field");
         for c in 0..CASCADES {
+            if f.casc_skip & (1 << c) != 0 {
+                continue;
+            }
             let mut rp = enc.begin_render_pass(&pass_desc(&[], Some(depth_att(&self.shadow[c], 1.0))));
             if f.g.csm[3] > 0.0 {
                 rp.set_bind_group(0, &self.bg0_shadow, &[]);
@@ -5019,6 +5141,23 @@ impl Renderer {
                 Err(e) => log::error!("screenshot failed: {e}"),
             }
         }
+    }
+}
+
+/// Largest device-local memory heap in bytes (Vulkan only; None elsewhere).
+fn vram_bytes(adapter: &wgpu::Adapter) -> Option<u64> {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        // safety: only reads the physical device's memory properties
+        let a = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }?;
+        let props = unsafe { a.shared_instance().raw_instance().get_physical_device_memory_properties(a.raw_physical_device()) };
+        let heaps = &props.memory_heaps[..props.memory_heap_count as usize];
+        heaps.iter().filter(|h| h.flags.contains(ash::vk::MemoryHeapFlags::DEVICE_LOCAL)).map(|h| h.size).max()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = adapter;
+        None
     }
 }
 

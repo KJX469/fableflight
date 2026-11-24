@@ -291,6 +291,51 @@ fn clip_to_disc(ctx: &egui::Context, layer: egui::LayerId, start: egui::layers::
     });
 }
 
+/// route colour, same as main.rs.
+const ROUTE: Color32 = Color32::from_rgb(214, 104, 255);
+
+/// draws the flight plan on the map.
+#[allow(clippy::too_many_arguments)]
+fn draw_route(painter: &egui::Painter, rect: egui::Rect, cx: f64, cy: f64, n: f64, angle: f64, plan: &crate::flightplan::Plan, at: (f64, f64)) {
+    if plan.done() {
+        return;
+    }
+    let project = |p: (f64, f64)| {
+        let x = geo::lon_to_merc_x(p.1.to_radians()) * n;
+        let y = geo::lat_to_merc_y(p.0.to_radians()) * n;
+        let delta = Vec2::new(((x - cx + n * 0.5).rem_euclid(n) - n * 0.5) as f32, (y - cy) as f32) * 256.0;
+        rect.center() + rotate(delta, angle)
+    };
+    // active leg first.
+    let from = plan.from.unwrap_or(at);
+    let mut pts = vec![from];
+    pts.extend(plan.wps[plan.active..].iter().map(|w| w.at()));
+    // keep far points near the map.
+    let far = |p: Pos2| {
+        let d = p - rect.center();
+        let l = d.length();
+        if l > 4000.0 { rect.center() + d / l * 4000.0 } else { p }
+    };
+    for (k, w) in pts.windows(2).enumerate() {
+        let steps = (crate::flightplan::dist(w[0], w[1]) / 20_000.0).clamp(1.0, 48.0) as usize;
+        let line: Vec<Pos2> = (0..=steps).map(|i| far(project(crate::flightplan::between(w[0], w[1], i as f64 / steps as f64)))).collect();
+        let col = if k == 0 { ROUTE } else { ROUTE.gamma_multiply(0.6) };
+        painter.add(egui::Shape::line(line.clone(), Stroke::new(4.0, Color32::from_black_alpha(110))));
+        painter.add(egui::Shape::line(line, Stroke::new(if k == 0 { 2.5 } else { 1.8 }, col)));
+    }
+    for (k, w) in plan.wps[plan.active..].iter().enumerate() {
+        let p = project(w.at());
+        if !rect.expand(20.0).contains(p) {
+            continue;
+        }
+        painter.circle_filled(p, 5.5, Color32::from_rgb(20, 14, 30));
+        painter.circle_stroke(p, 5.5, Stroke::new(2.0, if k == 0 { ROUTE } else { ROUTE.gamma_multiply(0.7) }));
+        let at = p + Vec2::new(9.0, -9.0);
+        painter.text(at + Vec2::new(1.0, 1.0), egui::Align2::LEFT_CENTER, &w.ident, crate::menu::semibold(12.5), Color32::from_black_alpha(200));
+        painter.text(at, egui::Align2::LEFT_CENTER, &w.ident, crate::menu::semibold(12.5), if k == 0 { Color32::WHITE } else { Color32::from_white_alpha(200) });
+    }
+}
+
 fn tile_offset(x: f64, center: f64, n: f64) -> f64 {
     (x - center + n * 0.5).rem_euclid(n) - n * 0.5
 }
@@ -576,7 +621,7 @@ impl Minimap {
     /// Everything inside the map's outline: the imagery or road map, the
     /// runways, the approach guide, the names and the aircraft, cut to the outline.
     #[allow(clippy::too_many_arguments)]
-    fn paint(&mut self, ctx: &egui::Context, src: &Arc<Sources>, painter: &egui::Painter, view: &View, aircraft: (f64, f64), guide: Option<&crate::approach::Guide>, world: &crate::world::World, mut occupied: Vec<egui::Rect>) {
+    fn paint(&mut self, ctx: &egui::Context, src: &Arc<Sources>, painter: &egui::Painter, view: &View, aircraft: (f64, f64), guide: Option<&crate::approach::Guide>, world: &crate::world::World, mut occupied: Vec<egui::Rect>, route: Option<(&crate::flightplan::Plan, f64)>) {
         let rect = view.rect;
         let outline = Outline::new(rect);
         // Everything painted from here to the bezel is cut to the outline afterwards.
@@ -592,6 +637,7 @@ impl Minimap {
             if self.plan { drawn = map_drawn; }
             self.draw_runways(world, painter, view, &outline, &mut occupied);
             if let Some(guide) = guide { guide.draw_map(painter, rect, view.cx, view.cy, view.n, view.angle); }
+            if let Some((plan, _)) = route { draw_route(painter, rect, view.cx, view.cy, view.n, view.angle, plan, (aircraft.0.to_degrees(), aircraft.1.to_degrees())); }
         }
         // the VFR chart and the track flown.
         let at = view.project(geo::lon_to_merc_x(aircraft.1).rem_euclid(1.0), geo::lat_to_merc_y(aircraft.0));
@@ -666,6 +712,25 @@ impl Minimap {
         let a = Pos2::new(rect.center().x - 30.0, chip.bottom() - 6.0);
         painter.line_segment([a, a + Vec2::new(60.0, 0.0)], Stroke::new(1.5, Color32::WHITE));
         clip_to_disc(ctx, painter.layer_id(), first_shape, &outline);
+        // the next waypoint on a chip.
+        if let Some((plan, gs)) = route {
+            let at = (aircraft.0.to_degrees(), aircraft.1.to_degrees());
+            if let (Some(s), Some(wp)) = (plan.steer(at), plan.target()) {
+                let ete = plan.ete(at, gs).map(|(t, _)| format!("  ·  {}", crate::flightplan::hm(t))).unwrap_or_default();
+                let cons = wp.alt.map(|a| format!("  ·  {}", a.text())).unwrap_or_default();
+                let text = match wp.leg {
+                    crate::flightplan::Leg::Climb { course, until } => format!("HDG {course:03.0}°  to {until:.0} ft"),
+                    crate::flightplan::Leg::Intercept { course } => format!("HDG {course:03.0}°  INTC"),
+                    crate::flightplan::Leg::Vectors { course } => format!("HDG {course:03.0}°  VECTORS"),
+                    _ => format!("{}  {:.1} nm  ·  {:03.0}°{ete}{cons}", wp.ident, s.dist / 1852.0, s.bearing),
+                };
+                let galley = painter.layout_no_wrap(text, crate::menu::medium(12.5), Color32::WHITE);
+                let chip = egui::Rect::from_center_size(Pos2::new(rect.center().x, rect.bottom() - 52.0), galley.size() + Vec2::new(26.0, 8.0));
+                painter.rect_filled(chip, crate::flightui::R_IN, Color32::from_black_alpha(170));
+                painter.circle_filled(Pos2::new(chip.left() + 9.0, chip.center().y), 3.5, ROUTE);
+                painter.galley(Pos2::new(chip.left() + 18.0, chip.center().y - galley.size().y * 0.5), galley, Color32::WHITE);
+            }
+        }
         // a dark line outside, a bright hairline inside.
         painter.rect_stroke(rect, crate::flightui::R_HUD, Stroke::new(1.0, Color32::from_black_alpha(90)), egui::StrokeKind::Outside);
         painter.rect_stroke(rect, crate::flightui::R_HUD, Stroke::new(1.0, Color32::from_white_alpha(72)), egui::StrokeKind::Inside);
@@ -753,21 +818,22 @@ impl Minimap {
         }
     }
 
-    /// The map: the minimap in the corner, or the full-size map over the view.
+    /// The map: the minimap in the corner, or the full-size map over the view,
+    /// with the flight plan and the ground speed (m/s) for its times, if any.
     #[allow(clippy::too_many_arguments)]
-    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World, route: Option<(&crate::flightplan::Plan, f64)>) {
         self.frame += 1;
         self.poll(ctx, src.google.generation());
         if let Some(h) = heading { self.heading = h; }
         if self.full {
-            self.show_full(ctx, src, lat, lon, guide, world);
+            self.show_full(ctx, src, lat, lon, guide, world, route);
         } else {
-            self.show_mini(ctx, src, lat, lon, info_open, guide, world);
+            self.show_mini(ctx, src, lat, lon, info_open, guide, world, route);
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn show_mini(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+    fn show_mini(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World, route: Option<(&crate::flightplan::Plan, f64)>) {
         let reserved_width = if info_open { 426.0 } else { 44.0 };
         let limit = (ctx.content_rect().width() - reserved_width).min(ctx.content_rect().bottom() - self.bottom - 44.0 - self.top - 8.0).clamp(120.0, 640.0);
         let diameter = self.size.x.clamp(240.0, 640.0).min(limit);
@@ -804,7 +870,7 @@ impl Minimap {
                         self.set_destination(dlat, dlon, name);
                     }
                 }
-                self.paint(ctx, src, &painter, &view, (lat, lon), guide, world, reserved(rect, angle));
+                self.paint(ctx, src, &painter, &view, (lat, lon), guide, world, reserved(rect, angle), route);
                 // north on a chip.
                 let north = center + rotate(Vec2::new(0.0, -(radius - 18.0)), angle);
                 painter.circle_filled(north, 11.0, Color32::from_black_alpha(160));
@@ -840,7 +906,8 @@ impl Minimap {
 
     /// The full-size map over the whole view, north up: drag to move it, the
     /// wheel zooms about the pointer, and it follows the aircraft until moved.
-    fn show_full(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+    #[allow(clippy::too_many_arguments)]
+    fn show_full(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, guide: Option<&crate::approach::Guide>, world: &crate::world::World, route: Option<(&crate::flightplan::Plan, f64)>) {
         let screen = ctx.content_rect();
         let margin = if screen.width() < 900.0 { 12.0 } else { 28.0 };
         let area = screen.shrink(margin);
@@ -904,7 +971,7 @@ impl Minimap {
             let hint = egui::Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 44.0), Pos2::new(rect.left() + 420.0, rect.bottom()));
             let scale_chip = egui::Rect::from_center_size(Pos2::new(rect.center().x, rect.bottom() - 22.0), Vec2::new(84.0, 32.0));
             let plane_at = view.project(aircraft.x, aircraft.y);
-            self.paint(ctx, src, &painter, &view, (lat, lon), guide, world, vec![bar, title, hint, scale_chip, egui::Rect::from_center_size(plane_at, Vec2::splat(38.0))]);
+            self.paint(ctx, src, &painter, &view, (lat, lon), guide, world, vec![bar, title, hint, scale_chip, egui::Rect::from_center_size(plane_at, Vec2::splat(38.0))], route);
             // what the pointer is on.
             let hover = response.hover_pos().filter(|_| !response.dragged()).and_then(|p| crate::vfrmap::hit_at(&self.hits, p, 12.0).map(|t| (p, t)));
             if let Some((p, t)) = hover {

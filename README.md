@@ -58,6 +58,8 @@ cargo build --release --locked
 
 - **Aircraft:** Cessna 172RG, Robin DR400, Beechcraft A36 Bonanza, Boeing 747, Gulfstream G650, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
 - **Flight systems:** fuel, mass and balance, electrical failures, clickable cockpits, radio navigation, and autopilot.
+- **Flight plans:** on the start screen, add airports, named fixes, VORs, NDBs, coordinates or a whole route string with airways (`KSFO SFO V25 SNS KLAX`), or click waypoints on the globe. US airports get real SIDs, STARs and approaches from the FAA's public domain CIFP (`assets/mkcifp.py` rebuilds it; for the sim only, not real navigation). Every other airport in the world gets generated procedures for each runway: an RNAV approach with left, right and straight in entries on a 3° final, and a runway heading departure. In flight, the minimap shows the route and the next leg, and the autopilot's GPS mode flies it, heading legs and vectors included.
+- **Mouse yoke:** `F8` turns it on: the pointer becomes a dot and its offset from the centre is the stick, the wheel is the throttle.
 - **World:** real METAR weather, seasonal & live snow cover, satellite/road minimap, live ADS-B traffic, and multiplayer.
 - **Controls:** remappable keyboard, joystick, throttle, pedals, and gamepad. Configure them in **Settings → Controls**.
 - **Arcade mode:** optional boosts, missiles, and in-flight respawns. Enable in **Settings → General** or pass `--arcade`.
@@ -94,6 +96,10 @@ All bindings can be customized in **Settings → Controls**. In cockpit view, ho
 | Go to place / Respawn / Pause | `G` / `R` / `P` |
 | Flight panel / Pause menu | `Tab` / `Esc` |
 | Sound toggle / Screenshot | `U` / `F12` |
+| Full screen / window | `F11` or `Alt+Enter` |
+| Mouse yoke | `F8` |
+
+The game starts in borderless full screen. Turn this off in **Settings → General**, or pass `--windowed` (or `--width`/`--height`) for a single run.
 
 ## Configuration & Data Paths
 

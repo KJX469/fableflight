@@ -144,6 +144,7 @@ pub const ACTIONS: &[Action] = &[
     act("ap_alt_down", KeyCode::Semicolon),
     act("ap_alt_up", KeyCode::Quote),
     act("heading_sync", KeyCode::KeyK),
+    act("mouse_yoke", KeyCode::F8),
     act("camera", KeyCode::KeyC),
     act("tail_view", KeyCode::F6),
     act("hud", KeyCode::KeyH),
