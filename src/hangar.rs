@@ -742,6 +742,9 @@ pub(crate) struct Part {
     bpr: Option<f64>,
     tsfc: Option<f64>,
     atsfc: Option<f64>,
+    /// a piston engine's boost: how many speeds its blower has, the boost it
+    /// is rated to (psi over the sea level's) and the height it holds it to (ft)
+    boost: Option<(u32, f64, f64)>,
 }
 
 pub(crate) fn read_part(xml: &str) -> Result<Part, String> {
@@ -761,6 +764,10 @@ pub(crate) fn read_part(xml: &str) -> Result<Part, String> {
     p.bpr = num("bypassratio").filter(|b| *b >= 0.0);
     p.tsfc = num("tsfc").filter(|t| *t > 0.0);
     p.atsfc = num("atsfc").filter(|t| *t > 0.0);
+    let speeds = num("numboostspeeds").unwrap_or(0.0) as u32;
+    if speeds > 0 {
+        p.boost = num("ratedboost1").filter(|b| *b > 0.0).map(|b| (speeds, b, num("ratedaltitude1").unwrap_or(0.0)));
+    }
     Ok(p)
 }
 
@@ -1018,12 +1025,24 @@ pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], 
     match &mut s.engine {
         Engine::Piston(pe) => {
             pe.power = power;
-            // The engine: its own displacement where its file gives it (else in
-            // proportion to its power), friction in proportion to its power.
+            // The engine: its own displacement where its file gives it (else
+            // what aero engines of that power have), friction in proportion to
+            // its power.
             let cu_in: Option<f64> = eng.iter().map(|e| e.displacement).sum();
-            pe.litres = cu_in.map_or(pe.litres * p, |c| c * 0.016_387);
+            pe.litres = cu_in.map_or(crate::propulsion::piston::PistonData::displacement_for(power, pe.w_rated * 60.0 / std::f64::consts::TAU) * 1e3, |c| c * 0.016_387);
             pe.fric0 *= p;
             pe.fric1 *= p;
+            // Its blower, if the file gives one: one speed taken as a turbocharger
+            // holding its rated boost to its rated height, two or more as a
+            // geared supercharger (as the wartime engines that have them).
+            if let Some(&(speeds, psi, ft)) = eng.iter().find_map(|e| e.boost.as_ref()) {
+                let map = crate::propulsion::P0 + psi * 6894.76;
+                pe.boost = if speeds == 1 {
+                    crate::propulsion::piston::Boost::Turbo { max_map: map, critical: ft * 0.3048 }
+                } else {
+                    crate::propulsion::piston::Boost::Super { ratio: map / crate::propulsion::P0 }
+                };
+            }
             // The propeller: a bigger disc for more power (diameter as the
             // fourth root, as for real types), and a coarser pitch for a
             // faster aircraft so that its thrust runs out at a higher speed.

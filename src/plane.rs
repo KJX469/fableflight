@@ -1396,6 +1396,7 @@ impl Plane {
         }).sum()
     }
     /// The first propeller's blade angle at 75% radius (rad; 0 for a jet).
+    #[cfg(test)]
     pub fn blade_angle(&self) -> f64 {
         self.engines.first().map_or(0.0, |u| match &u.kind {
             crate::propulsion::unit::Kind::Piston { prop, .. } => prop.beta,
@@ -1404,6 +1405,7 @@ impl Plane {
     }
     /// The propeller (or fan) revs (rpm) the first engine settles at with
     /// the throttle at `throttle`, flying straight at `v` at height `h`.
+    #[cfg(test)]
     pub fn settled_rpm(&self, throttle: f64, v: f64, h: f64) -> f64 {
         let mut lv = self.levers(false, false);
         (lv.throttle, lv.auto_mixture) = (throttle, true);

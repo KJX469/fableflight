@@ -231,9 +231,6 @@ pub struct PropOut {
     /// thrust along the axis (N) and the torque the blades take (N m, at the propeller)
     pub thrust: f64,
     pub torque: f64,
-    /// advance ratio, and the tips' Mach number
-    pub j: f64,
-    pub tip_mach: f64,
 }
 
 impl Prop {
@@ -303,7 +300,6 @@ impl Prop {
         let mx = (tip_mach - 0.85).max(0.0);
         let (kt, kp) = (1.0 - 1.5 * mx * mx, 1.0 + 6.0 * mx * mx);
         let (mut force, mut moment, mut thrust, mut torque) = (DVec3::ZERO, DVec3::ZERO, 0.0, 0.0);
-        let j = if n.abs() > 0.05 { v_ax.max(0.0) / (n * d) } else { f64::INFINITY };
         for s in 0..SECTORS {
             let psi = TAU * (s as f64 + 0.5) / SECTORS as f64;
             // Radial direction of this sector, and the way a blade there moves.
@@ -333,7 +329,7 @@ impl Prop {
         }
         // The engine turns the propeller one way; the airframe is turned the other.
         moment -= axis * (mount.spin * torque);
-        PropOut { force: force * k, moment: moment * k, thrust: thrust * k, torque: torque * k, j, tip_mach }
+        PropOut { force: force * k, moment: moment * k, thrust: thrust * k, torque: torque * k }
     }
 }
 
