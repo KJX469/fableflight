@@ -236,15 +236,15 @@ pub fn does(id: &str, rocket: bool) -> Option<Does> {
 pub fn label(id: &str) -> &'static str {
     use crate::i18n::t;
     match id {
-        "view_ahead" => t!("Look ahead", "Regarder devant"),
-        "view_down" => t!("Look down / behind", "Regarder en bas / derrière"),
-        "view_left" => t!("Look left", "Regarder à gauche"),
-        "view_right" => t!("Look right", "Regarder à droite"),
-        "view_reset" => t!("Reset the view", "Recentrer la vue"),
-        "ap" => t!("Autopilot (rocket: autoland)", "Pilote auto (fusée : atterrissage)"),
-        "master_arm" => t!("Master arm (rocket: engines)", "Armement maître (fusée : moteurs)"),
-        "target_lock" => t!("Lock target (rocket: staging)", "Verrouiller (fusée : largage)"),
-        "fire_missile" => t!("Fire missile", "Tirer un missile"),
+        "view_ahead" => t!("gamepad.look_ahead"),
+        "view_down" => t!("gamepad.look_down_behind"),
+        "view_left" => t!("gamepad.look_left"),
+        "view_right" => t!("gamepad.look_right"),
+        "view_reset" => t!("gamepad.reset_the_view"),
+        "ap" => t!("gamepad.autopilot_rocket_autoland"),
+        "master_arm" => t!("gamepad.master_arm_rocket_engines"),
+        "target_lock" => t!("gamepad.lock_target_rocket_staging"),
+        "fire_missile" => t!("gamepad.fire_missile"),
         _ => crate::bind::ACTIONS.iter().find(|a| a.id == id).map(|a| a.label()).unwrap_or("?"),
     }
 }
@@ -283,12 +283,12 @@ impl PadAxis {
     pub fn label(self) -> &'static str {
         use crate::i18n::t;
         match self {
-            PadAxis::Pitch => t!("Pitch", "Profondeur"),
-            PadAxis::Roll => t!("Roll", "Roulis"),
-            PadAxis::Rudder => t!("Rudder", "Palonnier"),
-            PadAxis::Throttle => t!("Throttle up / down", "Gaz plus / moins"),
-            PadAxis::LookX => t!("Look left / right", "Regarder à gauche / droite"),
-            PadAxis::LookY => t!("Look up / down", "Regarder en haut / bas"),
+            PadAxis::Pitch => t!("gamepad.pitch"),
+            PadAxis::Roll => t!("gamepad.roll"),
+            PadAxis::Rudder => t!("gamepad.rudder"),
+            PadAxis::Throttle => t!("gamepad.throttle_up_down"),
+            PadAxis::LookX => t!("gamepad.look_left_right"),
+            PadAxis::LookY => t!("gamepad.look_up_down"),
         }
     }
 
@@ -296,12 +296,12 @@ impl PadAxis {
     pub fn how(self) -> &'static str {
         use crate::i18n::t;
         match self {
-            PadAxis::Pitch => t!("Pull the stick back (nose up), then let it go.", "Tirez le stick (cabrer), puis lâchez-le."),
-            PadAxis::Roll => t!("Push the stick right, then let it go.", "Poussez le stick à droite, puis lâchez-le."),
-            PadAxis::Rudder => t!("Push the stick right, or squeeze RT, then let go.", "Poussez le stick à droite, ou pressez RT, puis lâchez."),
-            PadAxis::Throttle => t!("Push the stick up (more power), then let it go.", "Poussez le stick vers le haut (plus de gaz), puis lâchez-le."),
-            PadAxis::LookX => t!("Push the stick right, then let it go.", "Poussez le stick à droite, puis lâchez-le."),
-            PadAxis::LookY => t!("Push the stick up, then let it go.", "Poussez le stick vers le haut, puis lâchez-le."),
+            PadAxis::Pitch => t!("gamepad.pull_the_stick_back_nose"),
+            PadAxis::Roll => t!("gamepad.push_the_stick_right_then"),
+            PadAxis::Rudder => t!("gamepad.push_the_stick_right_or"),
+            PadAxis::Throttle => t!("gamepad.push_the_stick_up_more"),
+            PadAxis::LookX => t!("gamepad.push_the_stick_right_then"),
+            PadAxis::LookY => t!("gamepad.push_the_stick_up_then"),
         }
     }
 
@@ -343,12 +343,106 @@ impl Stick {
     pub fn spec(self) -> String {
         use crate::i18n::t;
         match self {
-            Stick::LX => format!("LS {}", t!("left-right", "gauche-droite")),
-            Stick::LY => format!("LS {}", t!("up-down", "haut-bas")),
-            Stick::RX => format!("RS {}", t!("left-right", "gauche-droite")),
-            Stick::RY => format!("RS {}", t!("up-down", "haut-bas")),
+            Stick::LX => format!("LS {}", t!("gamepad.left_right")),
+            Stick::LY => format!("LS {}", t!("gamepad.up_down")),
+            Stick::RX => format!("RS {}", t!("gamepad.left_right")),
+            Stick::RY => format!("RS {}", t!("gamepad.up_down")),
             Stick::Trig => "LT / RT".to_string(),
         }
+    }
+
+    /// The thumbstick (or the triggers) it is on, whose dead zone it has.
+    pub fn thumb(self) -> Thumb {
+        match self {
+            Stick::LX | Stick::LY => Thumb::Left,
+            Stick::RX | Stick::RY => Thumb::Right,
+            Stick::Trig => Thumb::Triggers,
+        }
+    }
+}
+
+/// A thumbstick, or the two triggers: each has its own dead zone, as
+/// pads wear (and drift) unevenly.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum Thumb {
+    Left,
+    Right,
+    Triggers,
+}
+
+/// The most a dead zone can take, of the travel.
+pub const DEAD_MAX: f32 = 0.5;
+
+impl Thumb {
+    pub const ALL: [Thumb; 3] = [Thumb::Left, Thumb::Right, Thumb::Triggers];
+
+    fn id(self) -> &'static str {
+        match self {
+            Thumb::Left => "LS",
+            Thumb::Right => "RS",
+            Thumb::Triggers => "LT/RT",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Thumb> {
+        Thumb::ALL.into_iter().find(|t| t.id() == s)
+    }
+
+    pub fn label(self) -> &'static str {
+        use crate::i18n::t;
+        match self {
+            Thumb::Left => t!("gamepad.dead_zone_left_stick"),
+            Thumb::Right => t!("gamepad.dead_zone_right_stick"),
+            Thumb::Triggers => t!("gamepad.dead_zone_triggers"),
+        }
+    }
+
+    /// What it starts with: the sticks the small dead zone they always had,
+    /// the triggers none.
+    pub fn default_dead(self) -> f32 {
+        if self == Thumb::Triggers { 0.0 } else { 0.12 }
+    }
+}
+
+/// A stick's -1..1 with the dead zone `d` round its centre taken off, the
+/// rest of the travel stretched so there is no step out of it.
+pub fn centred(v: f64, d: f32) -> f64 {
+    let d = (d as f64).clamp(0.0, DEAD_MAX as f64);
+    if v.abs() <= d { 0.0 } else { v.signum() * ((v.abs() - d) / (1.0 - d)).min(1.0) }
+}
+
+/// A trigger's 0..1 with the dead zone `d` at its rest end taken off, likewise.
+pub fn one_ended(v: f64, d: f32) -> f64 {
+    let d = (d as f64).clamp(0.0, DEAD_MAX as f64);
+    if v <= d { 0.0 } else { ((v - d) / (1.0 - d)).min(1.0) }
+}
+
+/// The pad's sticks and triggers as read now, before any dead zone: for
+/// Settings › Controls › Gamepad to show where a drifting pad rests.
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
+pub struct Live {
+    /// left stick x, y (-1..1, up and right +)
+    pub ls: [f32; 2],
+    pub rs: [f32; 2],
+    /// the triggers, 0..1
+    pub lt: f32,
+    pub rt: f32,
+}
+
+impl Live {
+    /// A thumbstick as x, y; the triggers as LT, RT.
+    pub fn at(&self, t: Thumb) -> [f32; 2] {
+        match t {
+            Thumb::Left => self.ls,
+            Thumb::Right => self.rs,
+            Thumb::Triggers => [self.lt, self.rt],
+        }
+    }
+
+    /// Whether each of `at`'s two gets through the dead zone `d`.
+    pub fn through(&self, t: Thumb, d: f32) -> [bool; 2] {
+        let f = |v: f32| if t == Thumb::Triggers { one_ended(v as f64, d) } else { centred(v as f64, d) } != 0.0;
+        self.at(t).map(f)
     }
 }
 
@@ -386,6 +480,8 @@ pub struct PadMap {
     /// action id -> its binding now (None: none)
     moved: HashMap<&'static str, Option<Chord>>,
     axes: HashMap<PadAxis, Option<AxisSrc>>,
+    /// dead zones tuned away from `Thumb::default_dead`
+    dead: HashMap<Thumb, f32>,
 }
 
 impl PadMap {
@@ -502,14 +598,25 @@ impl PadMap {
         lost
     }
 
+    /// A thumbstick's (or the triggers') dead zone, as a fraction of the travel.
+    pub fn dead(&self, t: Thumb) -> f32 {
+        self.dead.get(&t).copied().unwrap_or(t.default_dead())
+    }
+
+    pub fn set_dead(&mut self, t: Thumb, d: f32) {
+        self.dead.insert(t, d.clamp(0.0, DEAD_MAX));
+        self.tidy();
+    }
+
     pub fn is_default(&self) -> bool {
-        self.moved.is_empty() && self.axes.is_empty()
+        self.moved.is_empty() && self.axes.is_empty() && self.dead.is_empty()
     }
 
     /// Drops what is back to its default.
     fn tidy(&mut self) {
         self.moved.retain(|id, c| *c != default_of(id));
         self.axes.retain(|a, s| *s != axis_default(*a));
+        self.dead.retain(|t, d| *d != t.default_dead());
     }
 
     // ------------------------------------------------------------ the file
@@ -523,7 +630,8 @@ impl PadMap {
         for (a, s) in &self.axes {
             axes.insert(a.id().to_string(), s.map(|s| serde_json::json!({ "stick": s.stick.id(), "sign": s.sign })).unwrap_or(serde_json::Value::Null));
         }
-        serde_json::json!({ "buttons": buttons, "axes": axes })
+        let dead: serde_json::Map<_, _> = self.dead.iter().map(|(t, d)| (t.id().to_string(), serde_json::json!(d))).collect();
+        serde_json::json!({ "buttons": buttons, "axes": axes, "dead": dead })
     }
 
     pub fn read(&mut self, j: &serde_json::Value) {
@@ -537,6 +645,11 @@ impl PadMap {
             if let Some(a) = PadAxis::parse(a) {
                 let s = s["stick"].as_str().and_then(Stick::parse).map(|stick| AxisSrc { stick, sign: if s["sign"].as_f64().unwrap_or(1.0) < 0.0 { -1.0 } else { 1.0 } });
                 self.axes.insert(a, s);
+            }
+        }
+        for (t, d) in j["dead"].as_object().into_iter().flatten() {
+            if let (Some(t), Some(d)) = (Thumb::parse(t), d.as_f64()) {
+                self.dead.insert(t, (d as f32).clamp(0.0, DEAD_MAX));
             }
         }
         // (two actions on one binding, edited by hand: the first keeps it)
@@ -675,7 +788,7 @@ pub fn flying_rows() -> Vec<(String, String)> {
         let mut c = s.chars();
         c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
     };
-    NOW.with(|n| rows(&n.borrow())).into_iter().map(|(k, w)| (k, low(crate::i18n::tr(w)))).collect()
+    NOW.with(|n| rows(&n.borrow())).into_iter().map(|(k, w)| (k, low(crate::i18n::tr_en(w)))).collect()
 }
 
 fn rows(m: &PadMap) -> Vec<(String, &'static str)> {
@@ -710,7 +823,7 @@ fn rows(m: &PadMap) -> Vec<(String, &'static str)> {
                 continue;
             }
         }
-        let spec = if c == Y_ALONE { crate::i18n::t!("Y (let go)", "Y (relâché)").to_string() } else { c.spec() };
+        let spec = if c == Y_ALONE { crate::i18n::t!("gamepad.y_let_go").to_string() } else { c.spec() };
         rows.push((spec, label(id)));
     }
     rows.push(("A".into(), "fly again after a crash"));
@@ -752,6 +865,7 @@ mod tests {
         assert!(r.contains(&("A / B".to_string(), "throttle up / down (hold)")));
         assert!(r.contains(&("Y + Up / Down".to_string(), "trim nose down / up")));
         assert!(r.contains(&("Dpad".to_string(), "quick views")));
+        assert_eq!(does("tail_view", false), Some(Does::Key(KeyCode::F6)));
     }
 
     #[test]
@@ -783,6 +897,57 @@ mod tests {
             m.reset_axis(a);
         }
         assert!(m.is_default(), "{m:?}");
+    }
+
+    #[test]
+    fn dead_zones() {
+        let mut m = PadMap::default();
+        // The sticks start with the small dead zone they always had, the triggers with none.
+        assert_eq!(m.dead(Thumb::Left), 0.12);
+        assert_eq!(m.dead(Thumb::Right), 0.12);
+        assert_eq!(m.dead(Thumb::Triggers), 0.0);
+        assert_eq!((Stick::LX.thumb(), Stick::RY.thumb(), Stick::Trig.thumb()), (Thumb::Left, Thumb::Right, Thumb::Triggers));
+        // Inside it nothing; out of it the rest of the travel, with no step.
+        assert_eq!(centred(0.1, 0.12), 0.0);
+        // (a pad reads in f32, as the dead zone is kept)
+        assert_eq!(centred(-0.12f32 as f64, 0.12), 0.0);
+        assert!(centred(0.1201, 0.12) < 1e-3);
+        assert_eq!(centred(1.0, 0.12), 1.0);
+        assert_eq!(centred(-1.0, 0.12), -1.0);
+        assert!((centred(0.56, 0.12) - 0.5).abs() < 1e-6);
+        assert_eq!(one_ended(0.04, 0.05), 0.0);
+        assert_eq!(one_ended(1.0, 0.05), 1.0);
+        assert_eq!(one_ended(0.5, 0.0), 0.5);
+        // Tuned, it goes in the file and comes back; held to a sane range.
+        m.set_dead(Thumb::Left, 0.2);
+        m.set_dead(Thumb::Triggers, 0.9);
+        assert_eq!(m.dead(Thumb::Triggers), 0.5);
+        assert!(!m.is_default());
+        let mut n = PadMap::default();
+        n.read(&m.json());
+        assert_eq!(n, m);
+        // Out of range by hand in the file: held in range too.
+        let mut n = PadMap::default();
+        n.read(&serde_json::json!({ "dead": { "RS": -1.0 } }));
+        assert_eq!(n.dead(Thumb::Right), 0.0);
+        // Back to its default, it is not kept.
+        m.set_dead(Thumb::Left, 0.12);
+        m.set_dead(Thumb::Triggers, 0.0);
+        assert!(m.is_default(), "{m:?}");
+    }
+
+    #[test]
+    fn live_readout() {
+        let l = Live { ls: [0.03, -0.08], rs: [0.5, 0.0], lt: 0.02, rt: 0.9 };
+        // A thumbstick as x, y; the triggers as LT, RT.
+        assert_eq!(l.at(Thumb::Left), [0.03, -0.08]);
+        assert_eq!(l.at(Thumb::Right), [0.5, 0.0]);
+        assert_eq!(l.at(Thumb::Triggers), [0.02, 0.9]);
+        // Whether each way gets through a dead zone, as the flying reads it.
+        assert_eq!(l.through(Thumb::Left, 0.05), [false, true]);
+        assert_eq!(l.through(Thumb::Left, 0.12), [false, false]);
+        assert_eq!(l.through(Thumb::Right, 0.12), [true, false]);
+        assert_eq!(l.through(Thumb::Triggers, 0.05), [false, true]);
     }
 
     #[test]

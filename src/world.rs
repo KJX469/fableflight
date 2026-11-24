@@ -5,7 +5,7 @@ use crate::cars::{self, Car};
 use crate::geo::{self, TileId};
 use crate::render::{BuildGpu, DetailDraw, Inst, NearDraw, Renderer, TessCells, TileGpu, TreeDraw, TreeInst, MAX_NEAR};
 use crate::roads::RoadNet;
-use crate::trees::{lod_span, tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_DIST, LODS, LOD_DIST, LOD_JITTER, TREE_SPECIES, VARIANTS};
+use crate::trees::{tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_DIST, LODS, LOD_JITTER, TREE_SPECIES, VARIANTS};
 use crate::weapons::{Target, TargetKey};
 use crate::sources::{Job, JobResult, Loader, DATA_ZOOM, GRID, GV};
 use glam::{DMat4, DVec3, DVec4, Vec3};
@@ -61,12 +61,22 @@ struct BTile {
     /// distance scale of its tallest height class (buildings::HCLASS)
     tall: f32,
 }
+/// How far from the camera a floodlight still lights the ground (m).
+const FLOOD_REACH: f64 = 3000.0;
+/// A mast's floodlights: about 1e5 cd on the beam's axis (Globals units, as
+/// the landing lights: cd / 1e4 / pi, times 60), and the beam's half-angle.
+const FLOOD_I: f32 = 1.0e5 / 1.0e4 / std::f32::consts::PI * 60.0;
+const FLOOD_COS: f32 = 0.42;
 /// An airfield near enough to be drawn and to be busy.
 pub struct Field {
     pub geo: std::sync::Arc<crate::airports::Geo>,
     gpu: crate::render::FieldGpu,
     props: Vec<crate::airfield::Prop>,
     socks: Vec<Vec3>,
+    /// a hand-made scenery pack's objects (scenery.rs)
+    scenery: Vec<crate::scenery::Placed>,
+    /// floodlights that light the ground: lamp (relative to `geo.center`), beam direction
+    floods: Vec<(Vec3, Vec3)>,
     pub traffic: crate::traffic::Traffic,
     last_used: u64,
 }
@@ -178,7 +188,7 @@ const TESS_N: u32 = 16;
 /// any is in doubt the larger patch is taken, which costs time but changes
 /// nothing on screen. `p`: the grid vertices, `o`: the tile's offset from the
 /// camera and `cell` its grid spacing, as in the tile's uniform.
-fn tess_cells(p: &[[f32; 3]], o: Vec3, cell: f32, b: [f32; 4], out: &mut [Vec<u32>; 5]) {
+fn tess_cells(p: &[[f32; 3]], o: Vec3, cell: f32, b: [f32; 4], fr: Option<&Frustum>, out: &mut [Vec<u32>; 5]) {
     let w = cell as f64;
     // terrain.wgsl `tess_level` at distance d.
     let level = |d: f64| {
@@ -191,6 +201,14 @@ fn tess_cells(p: &[[f32; 3]], o: Vec3, cell: f32, b: [f32; 4], out: &mut [Vec<u3
         for ci in x0..(x0 + b[2] as usize).min(GRID) {
             let i00 = cj * GV + ci;
             let (c00, c10, c01, c11) = (at(i00), at(i00 + 1), at(i00 + GV), at(i00 + GV + 1));
+            // Skip cells completely outside the view frustum (pad radius for relief, waves and craters).
+            if let Some(fr) = fr {
+                let mid = (c00 + c10 + c01 + c11) * 0.25;
+                let r2 = (c00 - mid).length_squared().max((c10 - mid).length_squared()).max((c01 - mid).length_squared()).max((c11 - mid).length_squared());
+                if !fr.sphere(mid.as_dvec3(), r2.sqrt() as f64 + 20.0) {
+                    continue;
+                }
+            }
             // The edges' midpoints, then the inside's (the shader's order of operations).
             let mids = [(c00 + c10) * 0.5, (c01 + c11) * 0.5, (c00 + c01) * 0.5, (c10 + c11) * 0.5, (c00 + c11) * 0.5];
             let (mut lo, mut hi) = (TESS_N, 1);
@@ -238,6 +256,14 @@ pub struct World {
     /// graphics settings: multiplies the distances buildings change level of
     /// detail at (buildings.wgsl `city_k`)
     pub city_k: f32,
+    /// terrain tiles kept loaded before the ones unused for a while go, and
+    /// building tiles kept past the reach (the graphics settings: in a city
+    /// each building tile is 50-170 MB of geometry, which an integrated GPU
+    /// takes out of the system's memory)
+    pub tile_cap: usize,
+    pub spare_builds: usize,
+    /// building tiles made (or waiting to go to the GPU) at once
+    pub max_build_jobs: usize,
     /// graphics settings: how far out trees are drawn (m), and the factor on
     /// the distance they turn into impostors at (trees.wgsl `tree_far`, `tree_imp_k`)
     pub tree_far: f32,
@@ -284,7 +310,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tile_cap: 700, spare_builds: 12, max_build_jobs: 12, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
     }
 
     /// Tiles wanted but not yet asked for (at most 28 are on their way at once).
@@ -295,6 +321,11 @@ impl World {
     /// Height of the ground (or water surface) at a lat/lon: the top of the
     /// photorealistic 3D mesh inside its zone (buildings included), our own
     /// terrain everywhere else.
+    /// Whether a sphere (camera-relative centre, radius) is in this frame's view.
+    pub fn in_view(&self, rel: DVec3, r: f64) -> bool {
+        self.frustum.as_ref().map(|f| f.sphere(rel, r)).unwrap_or(true)
+    }
+
     pub fn ground(&self, lat: f64, lon: f64) -> Option<Ground> {
         let g = self.terrain_ground(lat, lon);
         if let Some(mut h) = self.photo.as_deref().and_then(|p| p.ground(lat, lon, g.as_ref().map(|g| g.h))) {
@@ -306,6 +337,38 @@ impl World {
             return Some(Ground { h, water });
         }
         g
+    }
+
+    /// Outward unit surface normal of the ground at `(lat, lon)` (radians),
+    /// estimated from nearby height samples; falls back to local up on flat
+    /// ground, water, or sudden vertical cliffs.
+    pub fn ground_normal(&self, lat: f64, lon: f64) -> DVec3 {
+        let p0 = geo::lla_to_pos(lat, lon, 0.0);
+        let (east, north, up) = geo::enu(p0);
+        let Some(g0) = self.ground(lat, lon) else { return up };
+        if g0.water {
+            return up;
+        }
+        let eps = 1.0;
+        let dlat = eps / geo::R;
+        let dlon = eps / (geo::R * lat.cos().max(0.05));
+        let slope = |a: Option<Ground>, b: Option<Ground>| -> f64 {
+            let fwd = a.map(|g| g.h - g0.h).filter(|d| d.abs() <= 3.0);
+            let bwd = b.map(|g| g0.h - g.h).filter(|d| d.abs() <= 3.0);
+            match (fwd, bwd) {
+                (Some(f), Some(b)) => 0.5 * (f + b) / eps,
+                (Some(f), None) => f / eps,
+                (None, Some(b)) => b / eps,
+                (None, None) => 0.0,
+            }
+            .clamp(-2.0, 2.0)
+        };
+        let dh_de = slope(self.ground(lat, lon + dlon), self.ground(lat, lon - dlon));
+        let dh_dn = slope(self.ground(lat + dlat, lon), self.ground(lat - dlat, lon));
+        if dh_de == 0.0 && dh_dn == 0.0 {
+            return up;
+        }
+        (up - east * dh_de - north * dh_dn).normalize()
     }
 
     /// Obstruction lights on the 3D tiles' tall buildings, if they are on.
@@ -516,7 +579,21 @@ impl World {
                 return Some(Ground { h, water: w });
             }
         }
-        self.flat.map(|h| Ground { h, water: false })
+        let mut h = self.flat?;
+        if !self.craters.is_empty() {
+            let p = geo::lla_to_pos(lat, lon, h);
+            for (c, r) in &self.craters {
+                let v = p - *c;
+                if v.length_squared() < (*r as f64 * 2.0).powi(2) {
+                    let up = c.normalize();
+                    let d = (v - up * v.dot(up)).length() / *r as f64;
+                    if d < 1.8 {
+                        h += crater_profile(d) * *r as f64 * 0.34;
+                    }
+                }
+            }
+        }
+        Some(Ground { h, water: false })
     }
 
     /// Building or bridge deck over a lat/lon.
@@ -944,7 +1021,7 @@ impl World {
                             let gpu = r.upload_field(&mesh);
                             let traffic = crate::traffic::Traffic::new(&geo, i.wrapping_mul(2654435761) ^ 0x5bd1e995);
                             log::info!("airfield {} ready: {} runways, {} stands, {} lights", geo.apt().ident, geo.runways.len(), geo.stands.len(), mesh.lights.len());
-                            self.fields.insert(i, FSlot::Ready(Box::new(Field { geo, gpu, props: mesh.props, socks: mesh.socks, traffic, last_used: self.frame })));
+                            self.fields.insert(i, FSlot::Ready(Box::new(Field { geo, gpu, props: mesh.props, socks: mesh.socks, scenery: mesh.scenery, floods: mesh.floods, traffic, last_used: self.frame })));
                         }
                         Err(e) => {
                             log::debug!("airfield {i} failed: {e}");
@@ -1031,10 +1108,28 @@ impl World {
                     None if self.in_flight < 28 => {
                         self.fields.insert(i, FSlot::Loading);
                         self.in_flight += 1;
-                        self.loader.submit(1.0 + (d / 9000.0) as f32, Job::Airfield(i));
+                        if let Some(evicted) = self.loader.submit(1.0 + (d / 9000.0) as f32, Job::Airfield(i)) {
+                            self.drop_loading(evicted);
+                        }
                     }
                     None => {}
                 }
+            }
+        }
+
+        // Cancel still-queued jobs that are now far behind the camera (fast flight / teleport).
+        if self.in_flight > 0 && self.frame % 15 == 0 {
+            let tile_pos = |id: TileId| {
+                let (la, lo) = id.lat_lon(0.5, 0.5);
+                geo::lla_to_pos(la, lo, 0.0)
+            };
+            let cancelled = self.loader.cancel_where(|job| match *job {
+                Job::Terrain(id) => id.z >= 10 && (tile_pos(id) - cam).length() > id.width_m() * 6.0 + 15_000.0,
+                Job::Buildings(id) => (tile_pos(id) - cam).length() > id.width_m() * 6.0 + 15_000.0,
+                Job::Airfield(_) => false,
+            });
+            for job in cancelled {
+                self.drop_loading(job);
             }
         }
 
@@ -1042,44 +1137,82 @@ impl World {
         self.wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
         // (What is not asked for this time stays in `wanted` until the next
         // update clears it: `queued` counts it.)
-        let mut sent = 0;
+        // Building tiles being made or waiting for the GPU: each is some
+        // 150-250 MB of memory in a city until uploaded, so only a few at once
+        // (`max_build_jobs`); the rest wait their turn in `wanted`.
+        let mut building = self.builds.values().filter(|s| matches!(s, BSlot::Loading)).count();
+        let mut sent = vec![false; self.wanted.len()];
         for k in 0..self.wanted.len() {
             if self.in_flight >= 28 {
                 break;
             }
             let (prio, id) = self.wanted[k];
-            sent += 1;
-            self.in_flight += 1;
             if id.z & 0x80 != 0 {
+                if building >= self.max_build_jobs {
+                    continue;
+                }
+                building += 1;
+            }
+            sent[k] = true;
+            self.in_flight += 1;
+            let evicted = if id.z & 0x80 != 0 {
                 let id = TileId::new(id.z & 0x7f, id.x, id.y);
                 self.builds.insert(id, BSlot::Loading);
-                self.loader.submit(prio, Job::Buildings(id));
+                self.loader.submit(prio, Job::Buildings(id))
             } else if id.z & 0x40 != 0 {
                 // keeps drawing the old tile until the new one is in
                 let id = TileId::new(id.z & 0x3f, id.x, id.y);
                 match self.tiles.get_mut(&id) {
                     Some(Slot::Ready(t)) if !t.refreshing => {
                         t.refreshing = true;
-                        self.loader.submit(prio, Job::Terrain(id));
+                        self.loader.submit(prio, Job::Terrain(id))
                     }
-                    _ => self.in_flight -= 1,
+                    _ => {
+                        self.in_flight -= 1;
+                        None
+                    }
                 }
             } else {
                 self.tiles.insert(id, Slot::Loading);
-                self.loader.submit(prio, Job::Terrain(id));
+                self.loader.submit(prio, Job::Terrain(id))
+            };
+            if let Some(ev) = evicted {
+                self.drop_loading(ev);
             }
         }
 
-        self.wanted.drain(..sent);
+        let mut k = 0;
+        self.wanted.retain(|_| {
+            k += 1;
+            !sent[k - 1]
+        });
 
         // Evict what has not been needed for a while.
         if self.frame % 120 == 0 {
             let f = self.frame;
-            if self.tiles.len() > 700 {
+            if self.tiles.len() > self.tile_cap {
                 self.tiles.retain(|id, s| id.z <= 3 || !matches!(s, Slot::Ready(t) if f - t.last_used > 600));
+            }
+            // Still over: the least recently used of those not drawn in the
+            // last couple of seconds go too.
+            if self.tiles.len() > self.tile_cap {
+                let mut old: Vec<(u64, TileId)> = self.tiles.iter().filter_map(|(id, s)| match s { Slot::Ready(t) if id.z > 3 && f - t.last_used > 120 => Some((t.last_used, *id)), _ => None }).collect();
+                old.sort_unstable_by_key(|o| o.0);
+                for (_, id) in old.iter().take(self.tiles.len() - self.tile_cap) {
+                    self.tiles.remove(id);
+                }
             }
             self.tiles.retain(|_, s| !matches!(s, Slot::Failed) || f % 3600 != 0);
             self.builds.retain(|_, s| !matches!(s, BSlot::Ready(b) if f - b.last_used > 900));
+            // Of the building tiles left behind (out of reach this frame),
+            // only the most recent few stay, for turning back.
+            let mut behind: Vec<(u64, TileId)> = self.builds.iter().filter_map(|(id, s)| match s { BSlot::Ready(b) if b.last_used != f => Some((b.last_used, *id)), _ => None }).collect();
+            if behind.len() > self.spare_builds {
+                behind.sort_unstable_by_key(|b| b.0);
+                for (_, id) in &behind[..behind.len() - self.spare_builds] {
+                    self.builds.remove(id);
+                }
+            }
             self.fields.retain(|_, s| match s {
                 FSlot::Ready(fl) => f - fl.last_used < 1200,
                 FSlot::Failed => f % 3600 != 0,
@@ -1087,6 +1220,27 @@ impl World {
             });
         }
         self.stats = (self.draw.len(), self.in_flight, self.draw_b.len());
+    }
+
+    fn drop_loading(&mut self, job: Job) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        match job {
+            Job::Terrain(id) => match self.tiles.get_mut(&id) {
+                Some(Slot::Loading) => { self.tiles.remove(&id); }
+                Some(Slot::Ready(t)) => t.refreshing = false,
+                _ => {}
+            },
+            Job::Buildings(id) => {
+                if matches!(self.builds.get(&id), Some(BSlot::Loading)) {
+                    self.builds.remove(&id);
+                }
+            }
+            Job::Airfield(i) => {
+                if matches!(self.fields.get(&i), Some(FSlot::Loading)) {
+                    self.fields.remove(&i);
+                }
+            }
+        }
     }
 
     /// Copy queued building geometry to the GPU until `bytes` (already used
@@ -1200,7 +1354,33 @@ impl World {
     }
 
     /// Fixed airport objects, parked and moving aircraft and their lights.
-    pub fn airport_instances(&self, cam: DVec3, wind_from: f32, wind_kt: f32, t: f64, out: &mut Vec<(u32, Inst)>, lights: &mut Vec<crate::airfield::Light>) {
+    /// `scenery` takes the hand-made scenery packs' objects (scenery.rs).
+    /// `wind`: where it blows from (degrees) and how hard (knots).
+    /// The eight floodlights nearest the camera within 3 km, for Globals
+    /// `flood` (common.wgsl `flood_light`), `on` 0..1 as they come on at dusk.
+    pub fn flood_globals(&self, cam: DVec3, on: f32, out: &mut [[f32; 4]; 16]) {
+        let mut near: Vec<(f64, DVec3, Vec3)> = Vec::new();
+        for s in self.fields.values() {
+            let FSlot::Ready(f) = s else { continue };
+            for (p, d) in &f.floods {
+                let o = f.geo.center - cam + p.as_dvec3();
+                let r = o.length();
+                if r < FLOOD_REACH {
+                    near.push((r, o, *d));
+                }
+            }
+        }
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (k, (r, o, d)) in near.iter().take(out.len() / 2).enumerate() {
+            // fading out toward the edge of the reach, so none pops in or out
+            let fade = (((FLOOD_REACH - r) / 500.0) as f32).clamp(0.0, 1.0);
+            out[2 * k] = [o.x as f32, o.y as f32, o.z as f32, FLOOD_I * on * fade];
+            out[2 * k + 1] = [d.x, d.y, d.z, FLOOD_COS];
+        }
+    }
+
+    pub fn airport_instances(&self, cam: DVec3, wind: (f32, f32), t: f64, out: &mut Vec<(u32, Inst)>, scenery: &mut Vec<(u32, Inst)>, lights: &mut Vec<crate::airfield::Light>) {
+        let (wind_from, wind_kt) = wind;
         let fr = self.frustum.as_ref();
         for s in self.fields.values() {
             let FSlot::Ready(f) = s else { continue };
@@ -1227,15 +1407,37 @@ impl World {
                 if o.length() > 5000.0 {
                     continue;
                 }
-                let wob = (t as f32 * (2.3 + k as f32 * 0.4)).sin() * 0.05 * (wind_kt / 10.0).min(1.5);
-                let droop = (1.0 - (wind_kt / 15.0).clamp(0.0, 1.0)) * 1.25 + wob;
-                let fwd = hd * droop.cos() - up * droop.sin();
-                let fwd = (fwd + hd.cross(up) * wob).normalize();
+                let fwd = sock_dir(hd, up, wind_kt, t, k);
                 let upv = (up - fwd * fwd.dot(up)).normalize();
                 let x = fwd.cross(upv);
                 let z = -fwd;
                 let o = o.as_vec3();
                 out.push((crate::airmodels::M_SOCK, Inst { m: [[x.x, upv.x, z.x, o.x], [x.y, upv.y, z.y, o.y], [x.z, upv.z, z.z, o.z]], tint: [1.0, 1.0, 1.0, 0.0], ext: [0.0; 4] }));
+            }
+            // The scenery pack's objects, each as far as its class reaches; its
+            // windsocks turn with the wind like the procedural ones. They give
+            // way to the 3D tiles (ext.w).
+            let mut ks = 0;
+            for (pi, p) in f.scenery.iter().enumerate() {
+                let o = base + DVec3::new(p.m[0][3] as f64, p.m[1][3] as f64, p.m[2][3] as f64);
+                let r = p.radius as f64;
+                if o.length() > crate::scenery::reach(p.class) as f64 + r || !fr.map(|f| f.sphere(o, r)).unwrap_or(true) {
+                    if p.class == crate::scenery::C_SOCK {
+                        ks += 1;
+                    }
+                    continue;
+                }
+                let o = o.as_vec3();
+                let mut m = p.m;
+                if p.class == crate::scenery::C_SOCK {
+                    let (x, y, z) = crate::scenery::sock_axes(sock_dir(hd, p.up, wind_kt, t, ks), p.up);
+                    ks += 1;
+                    m = [[x.x, y.x, z.x, 0.0], [x.y, y.y, z.y, 0.0], [x.z, y.z, z.z, 0.0]];
+                }
+                (m[0][3], m[1][3], m[2][3]) = (o.x, o.y, o.z);
+                // ext.y: a steady random number per object (scenery.wgsl varies its wear by it)
+                let rnd = ((pi as u32).wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0;
+                scenery.push((p.mesh, Inst { m, tint: [p.tint[0], p.tint[1], p.tint[2], 0.0], ext: [0.0, rnd, 0.0, 1.0] }));
             }
             f.traffic.draw(g, cam, t, out, lights);
         }
@@ -1409,10 +1611,11 @@ impl World {
     }
 
     /// Terrain tiles and detail tiles to draw. `focus` and `casc` (radius of
-    /// each shadow cascade) decide what has to be rendered into the shadow maps.
+    /// each shadow cascade) decide what has to be rendered into the shadow maps,
+    /// with `casc_vp` tightening tree shadow culling to each cascade's ortho box.
     /// Also the tessellated cells of the terrain tiles, by the patch they are
     /// drawn with (`tess_cells`).
-    pub fn draw_lists(&self, cam: DVec3, focus: DVec3, casc: [f32; 3]) -> (Vec<(&TileGpu, [f32; 12])>, TessCells, Vec<DetailDraw<'_>>, Vec<TreeInst>) {
+    pub fn draw_lists(&self, cam: DVec3, focus: DVec3, casc: [f32; 3], casc_vp: &[[[f32; 4]; 4]; 3]) -> (Vec<(&TileGpu, [f32; 12])>, TessCells, Vec<DetailDraw<'_>>, Vec<TreeInst>) {
         let mut drawn = Vec::with_capacity(self.draw.len());
         let (clat, clon, calt) = geo::pos_to_lla(cam);
         let agl = calt - self.ground(clat, clon).map(|g| g.h).unwrap_or(0.0);
@@ -1433,8 +1636,9 @@ impl World {
         for (i, (t, u)) in drawn.iter().enumerate() {
             // (render.rs draws a block tessellated only if it has cells both ways)
             if u[10] >= 1.0 && u[11] >= 1.0 {
-                tess_cells(&t.grid, Vec3::new(u[0], u[1], u[2]), u[3], [u[8], u[9], u[10], u[11]], &mut by_n);
-                for (k, cells) in by_n.iter_mut().enumerate() {
+                tess_cells(&t.grid, Vec3::new(u[0], u[1], u[2]), u[3], [u[8], u[9], u[10], u[11]], self.frustum.as_ref(), &mut by_n);
+                // Highest subdivision (nearest cells) first so early-Z hides farther cells behind ridges.
+                for (k, cells) in by_n.iter_mut().enumerate().rev() {
                     if !cells.is_empty() {
                         tess.groups.push((i as u32, k as u32, tess.cells.len() as u32, cells.len() as u32));
                         tess.cells.append(cells);
@@ -1446,6 +1650,15 @@ impl World {
         let mut details = Vec::with_capacity(self.draw_b.len());
         let mut near_inst: Vec<TreeInst> = Vec::new();
         let mut tb = TreeBatcher::new();
+        let casc_box: [(glam::Mat4, f32, f32); 2] = std::array::from_fn(|c| {
+            let m = glam::Mat4::from_cols_array_2d(&casc_vp[c]);
+            (m, m.row(0).truncate().length(), m.row(1).truncate().length())
+        });
+        let in_casc = |c: usize, p: Vec3, r: f32| {
+            let (m, sx, sy) = casc_box[c];
+            let q = m * p.extend(1.0);
+            q.x.abs() <= 1.0 + r * sx && q.y.abs() <= 1.0 + r * sy
+        };
         for (id, view) in self.draw_b.iter().zip(&self.in_view) {
             let Some(BSlot::Ready(b)) = self.builds.get(id) else { continue };
             let Some(g) = &b.gpu else { continue };
@@ -1463,53 +1676,49 @@ impl World {
             if dist < self.tree_far + 100.0 && g.trees.is_some() {
                 for ch in &b.chunks {
                     let cp = b.center + ch.center.as_dvec3();
-                    let dc = (cp - cam).length() as f32;
+                    let rel = (cp - cam).as_vec3();
+                    let dc = rel.length();
                     if dc - ch.radius > self.tree_far {
                         continue;
                     }
                     let seen = self.frustum.as_ref().map(|f| f.sphere(cp - cam, ch.radius as f64 + 25.0)).unwrap_or(true);
                     let fd = (cp - focus).length() as f32 - ch.radius;
-                    // The nearest cascade gets each tree's own model; the next one,
-                    // with texels most of a metre across, one simple model for the
-                    // whole chunk (no per-tree choice, so whole runs batch together).
-                    let cm = (fd < casc[0] * 1.45) as u8;
-                    let in_c1 = fd < casc[1] * 1.45;
+                    // Exact orthographic XY box test per shadow cascade cuts ~39% of out-of-box chunks.
+                    let sr = ch.radius + 10.0;
+                    let cm = (fd < casc[0] * 1.5 && in_casc(0, rel, sr)) as u8;
+                    let in_c1 = fd < casc[1] * 1.5 && in_casc(1, rel, sr);
                     if !seen && cm == 0 && !in_c1 {
                         continue;
                     }
                     if in_c1 {
-                        let lod = LOD_DIST.iter().filter(|d| dc - ch.radius >= **d).count().clamp(C1_LOD, LODS - 2);
+                        // LOD 3 (20-tri icosphere) up to 850 m, area-matched LOD 4 (8-tri
+                        // octahedron) beyond 850 m where cascade 1 texels are 0.73 m wide.
+                        let lod = if dc - ch.radius >= 850.0 { LODS - 2 } else { C1_LOD };
                         for (variant, first, count) in &ch.runs {
-                            tb.push(TreeDraw { mesh: *variant as u32 * LODS as u32 + lod as u32, first: *first, count: *count, view: false, casc: 2, close: false, imp: false, fixed: true });
+                            tb.push(TreeDraw { mesh: *variant as u32 * LODS as u32 + lod as u32, first: *first, count: *count, view: false, casc: 2, close: false, imp: false, fixed: true, ring: 0 });
                         }
                     }
-                    // Every model some tree in the chunk may use: the shader keeps
-                    // each tree to the one for its own distance. In view, only
-                    // trees short of IMP_DIST are drawn as models; the simpler
-                    // ones are for the shadows.
-                    let close = dc - ch.radius < imp_dist * (1.0 + LOD_JITTER);
-                    for lod in 0..LODS - 1 {
-                        let (lo, hi) = lod_span(lod);
-                        if dc + ch.radius < lo || dc - ch.radius >= hi {
-                            continue;
-                        }
-                        let view = seen && close && lod == 0;
-                        if !view && cm == 0 {
-                            continue;
-                        }
+                    // Cascade 0 shadow models: keep full LOD 0 close to the camera (< 140 m)
+                    // so nearby ground shadows preserve exact branch/skirt silhouettes; use
+                    // LOD 1 (same 6 blobs, 4.5x fewer tris) from 140..260 m, LOD 2 beyond.
+                    if cm != 0 {
+                        let dmin = dc - ch.radius;
+                        let lod = if dmin < 140.0 { 0 } else if dmin < 260.0 { 1 } else { 2 };
                         for (variant, first, count) in &ch.runs {
-                            tb.push(TreeDraw { mesh: *variant as u32 * LODS as u32 + lod as u32, first: *first, count: *count, view, casc: cm, close: view, imp: false, fixed: false });
+                            tb.push(TreeDraw { mesh: *variant as u32 * LODS as u32 + lod as u32, first: *first, count: *count, view: false, casc: cm, close: false, imp: false, fixed: true, ring: 0 });
                         }
                     }
-                    // Further off, the trees are impostors.
+                    // Further off, the trees are impostors, bucketed into distance rings so
+                    // foreground crowns draw first and populate Hi-Z before distant ones.
                     if seen && dc + ch.radius >= imp_dist * (1.0 - LOD_JITTER) {
+                        let ring = if dc < 260.0 { 0 } else if dc < 600.0 { 1 } else if dc < 950.0 { 2 } else if dc < 1450.0 { 3 } else if dc < 2150.0 { 4 } else { 5 };
                         for (variant, first, count) in &ch.runs {
-                            tb.push(TreeDraw { mesh: *variant as u32, first: *first, count: *count, view: true, casc: 0, close: false, imp: true, fixed: false });
+                            tb.push(TreeDraw { mesh: *variant as u32, first: *first, count: *count, view: true, casc: 0, close: false, imp: true, fixed: false, ring });
                         }
                     }
                 }
             }
-            // Close to the camera: trees get their leaf cards, and the undergrowth appears.
+            // Close to the camera: near trees (solid + leaf cards) and undergrowth.
             let mut near = Vec::new();
             if dist < CARD_RANGE && near_inst.len() < MAX_NEAR {
                 let lp = -o;
@@ -1542,7 +1751,12 @@ impl World {
                         found.push((ring(uo.length_squared()) | u.var as u16, u.inst(c.center)));
                     }
                 }
-                found.truncate(MAX_NEAR - near_inst.len());
+                let cap = MAX_NEAR - near_inst.len();
+                if found.len() > cap {
+                    // Keep standing trees ahead of undergrowth if the near buffer fills up.
+                    found.sort_unstable_by_key(|f| ((f.0 & 255) as usize / VARIANTS >= TREE_SPECIES, f.0));
+                    found.truncate(cap);
+                }
                 found.sort_unstable_by_key(|f| f.0);
                 let mut i = 0;
                 while i < found.len() {
@@ -1553,11 +1767,9 @@ impl World {
                         i += 1;
                     }
                     let (mesh, count) = (var as u32 * LODS as u32, near_inst.len() as u32 - first);
-                    // Trees are already standing there as solids; undergrowth is not.
-                    if var as usize / VARIANTS >= TREE_SPECIES {
-                        near.push(NearDraw { mesh, first, count, cards: false });
-                    }
-                    near.push(NearDraw { mesh: mesh + CARDS, first, count, cards: true });
+                    let is_tree = (var as usize / VARIANTS) < TREE_SPECIES;
+                    near.push(NearDraw { mesh, first, count, cards: false, tree: is_tree });
+                    near.push(NearDraw { mesh: mesh + CARDS, first, count, cards: true, tree: is_tree });
                 }
             }
             let fade = |t: f32, secs: f32| (t / secs).clamp(0.0, 1.0);
@@ -1593,8 +1805,8 @@ impl World {
     }
 }
 
-/// Model the second shadow cascade draws trees with, at the least: some 25
-/// triangles, enough for texels most of a metre across.
+/// Model the second shadow cascade draws trees with, at the least: 20-triangle
+/// icosphere crown (no sub-texel trunk), matching full crown shadow area at 0.73 m/texel.
 const C1_LOD: usize = 3;
 
 /// Collects a tile's tree batches, joining each to the last one drawn the same
@@ -1612,11 +1824,16 @@ impl TreeBatcher {
         Self { open: vec![0; 64 * 512], touched: Vec::new(), out: Vec::new() }
     }
     fn push(&mut self, t: TreeDraw) {
-        let k = ((t.imp as usize) | (t.fixed as usize) << 1 | (t.view as usize) << 2 | (t.close as usize) << 3 | ((t.casc as usize) & 3) << 4) * 512 + (t.mesh as usize).min(511);
+        let flags = if t.imp {
+            1 | (((t.ring as usize) & 7) << 1)
+        } else {
+            ((t.fixed as usize) << 1) | ((t.view as usize) << 2) | ((t.close as usize) << 3) | (((t.casc as usize) & 3) << 4)
+        };
+        let k = flags * 512 + (t.mesh as usize).min(511);
         let o = self.open[k] as usize;
         if o > 0 {
             let p = &mut self.out[o - 1];
-            if p.mesh == t.mesh && p.first + p.count == t.first {
+            if p.mesh == t.mesh && p.ring == t.ring && p.first + p.count == t.first {
                 p.count += t.count;
                 return;
             }
@@ -1648,4 +1865,13 @@ impl Tag for TileId {
     fn with_refresh(self) -> Self {
         TileId::new(self.z | 0x40, self.x, self.y)
     }
+}
+
+/// Which way a windsock hangs: downwind (`hd`, horizontal), drooping in a
+/// light breeze and stirring a little; `k` staggers neighbouring socks.
+pub fn sock_dir(hd: Vec3, up: Vec3, wind_kt: f32, t: f64, k: usize) -> Vec3 {
+    let wob = (t as f32 * (2.3 + k as f32 * 0.4)).sin() * 0.05 * (wind_kt / 10.0).min(1.5);
+    let droop = (1.0 - (wind_kt / 15.0).clamp(0.0, 1.0)) * 1.25 + wob;
+    let fwd = hd * droop.cos() - up * droop.sin();
+    (fwd + hd.cross(up) * wob).normalize()
 }

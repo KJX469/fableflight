@@ -90,7 +90,7 @@ fn cfg(l: &RoadLine, urban: bool) -> Cfg {
         RC_MOTORWAY => if l.oneway { c(13.0, 3, 29.0) } else { c(24.0, 6, 29.0) },
         RC_TRUNK => if l.oneway { c(8.6, 2, 22.0) } else { c(15.0, 4, 20.0) },
         RC_PRIMARY => Cfg { walk: urban && plain, ..if l.oneway { c(10.2, 3, 15.0) } else { c(13.6, 4, 15.0) } },
-        RC_SECONDARY => Cfg { walk: urban && plain, parking: urban && plain, ..if l.oneway { c(7.0 + if urban { 4.4 } else { 0.0 }, 2, 13.0) } else { c(7.0 + if urban { 4.4 } else { 0.0 }, 2, 13.0) } },
+        RC_SECONDARY => Cfg { walk: urban && plain, parking: urban && plain, ..c(7.0 + if urban { 4.4 } else { 0.0 }, 2, 13.0) },
         RC_TERTIARY => Cfg { walk: urban && plain, parking: urban && plain, ..if l.oneway { c(4.0 + if urban { 4.4 } else { 0.0 }, 1, 11.0) } else { c(6.6 + if urban { 4.4 } else { 0.0 }, 2, 11.0) } },
         RC_MINOR => Cfg { walk: urban && plain, parking: urban && plain, ..if l.oneway { c(3.6 + if urban { 4.4 } else { 0.0 }, 1, 8.0) } else { c(5.6 + if urban { 4.4 } else { 0.0 }, 2, 8.5) } },
         RC_SERVICE => Cfg { cars: l.sub == 0, ..c(if l.sub == 1 { 2.8 } else { 3.6 }, 1, 4.0) },

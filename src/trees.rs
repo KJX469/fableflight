@@ -18,17 +18,10 @@ pub const VARIANTS: usize = 4;
 /// Meshes per individual: five levels of detail of the solid model, then its leaf cards.
 pub const LODS: usize = 6;
 pub const CARDS: u32 = LODS as u32 - 1;
-/// Distances at which a tree changes to its next simpler model. Each tree
-/// moves them by up to `LOD_JITTER` of its own, so a forest changes model a
-/// tree at a time rather than along a line. Must match `lod_of` in trees.wgsl.
-pub const LOD_DIST: [f32; LODS - 2] = [260.0, 600.0, 1200.0, 2200.0];
+/// Each tree moves its LOD/impostor hand-over distances by up to `LOD_JITTER`
+/// of its own, so a forest transitions a tree at a time rather than along a line.
+/// Must match `LOD_JITTER` in trees.wgsl.
 pub const LOD_JITTER: f32 = 0.12;
-/// Range of distances over which some tree may be drawn with model `lod`.
-pub fn lod_span(lod: usize) -> (f32, f32) {
-    let lo = if lod == 0 { 0.0 } else { LOD_DIST[lod - 1] * (1.0 - LOD_JITTER) };
-    let hi = if lod >= LOD_DIST.len() { f32::INFINITY } else { LOD_DIST[lod] * (1.0 + LOD_JITTER) };
-    (lo, hi)
-}
 /// How far away leaf cards are drawn. Must match `CARD_RANGE` in trees.wgsl.
 pub const CARD_RANGE: f32 = 150.0;
 /// Beyond this (times the tree's own `tree_jit`) a standing tree is drawn as
@@ -329,7 +322,7 @@ impl TB {
             self.v.push(sv(d * r * jag + Vec3::Y * (y0 - (jag - 0.7) * (y1 - y0) * 0.25), (d + Vec3::Y * 0.55).normalize(), col * sh, 1.0, d * (-0.38 * r * jag), 1.0, 0.0));
         }
         for s in 0..sides {
-            self.i.extend([b, b + 1 + s, b + 1 + (s + 1) % sides]);
+            self.i.extend([b, b + 1 + (s + 1) % sides, b + 1 + s]);
         }
     }
     /// A palm frond: an arching, folded strip. From afar it is a solid blade;
@@ -361,7 +354,8 @@ impl TB {
         for k in 0..segs {
             for j in 0..per - 1 {
                 let a = b + k * per + j;
-                self.i.extend([a, a + 1, a + per, a + 1, a + per + 1, a + per]);
+                // Open strip: emit both windings so shadow backface culling keeps fronds solid.
+                self.i.extend([a, a + 1, a + per, a + 1, a + per + 1, a + per, a, a + per, a + 1, a + 1, a + per, a + per + 1]);
                 if fold {
                     let a = cb + k * 3 + j;
                     self.ci.extend([a, a + 1, a + 3, a + 1, a + 4, a + 3]);
@@ -464,8 +458,9 @@ fn grow(species: usize, variant: usize, lod: usize) -> (TB, TreeDim) {
         3 => (3, 0),
         _ => (3, -1),
     };
-    // A trunk under half a metre across is gone well before a pixel at the last level.
-    let has_trunk = lod < 4;
+    // A trunk under half a metre across is sub-texel in cascade 1 (0.73 m/texel)
+    // and hidden under the crown; LOD 3 and 4 are shadow-only beyond 260 m.
+    let has_trunk = lod < 3;
     let sp = spray(species);
     let lean = Vec3::new(rng.r(-1.0, 1.0), 0.0, rng.r(-1.0, 1.0));
     let mut dim = TreeDim::default();
@@ -543,7 +538,7 @@ fn grow(species: usize, variant: usize, lod: usize) -> (TB, TreeDim) {
             for k in 0..rings {
                 for s in 0..sd {
                     let (a, c) = (b + k * sd + s, b + k * sd + (s + 1) % sd);
-                    t.i.extend([a, c, a + sd, c, c + sd, a + sd]);
+                    t.i.extend([a, a + sd, c, c, a + sd, c + sd]);
                 }
             }
             if has_trunk {
@@ -676,7 +671,7 @@ fn grow(species: usize, variant: usize, lod: usize) -> (TB, TreeDim) {
                     }
                 } else if lod == 1 {
                     t.tube(&[trunk[0], trunk[2], trunk[3], trunk[4]], sides, bark, bark_style);
-                } else if lod < 4 {
+                } else if lod < 3 {
                     t.tube(&[trunk[1], trunk[4]], sides, bark, bark_style);
                 }
             }
@@ -704,7 +699,9 @@ fn grow(species: usize, variant: usize, lod: usize) -> (TB, TreeDim) {
                         t.blob(c, r * 1.05, crown, leaf, 0, k as f32 + variant as f32 * 3.1, lump, &[], 0);
                     }
                 }
-                _ => t.blob((lo + hi) * 0.5, (hi - lo) * 0.52, crown, leaf * 0.95, level, variant as f32, lump * 0.6, &[], 0),
+                // LOD 4 uses an 8-triangle octahedron whose inscribed radius is smaller than
+                // LOD 3's icosphere; inflate slightly so projected shadow area matches.
+                _ => t.blob((lo + hi) * 0.5, (hi - lo) * if level < 0 { 0.60 } else { 0.52 }, crown, leaf * 0.95, level, variant as f32, lump * 0.6, &[], 0),
             }
             dim = TreeDim { height: hi.y, crown_r: ((hi.x - lo.x).max(hi.z - lo.z)) * 0.5, crown_base: lo.y.max(0.0), trunk_r: tr.max(0.15) };
         }

@@ -15,7 +15,7 @@ struct Globals {
   light_col: vec4f,
   vol_o: vec4f,      // explosion volume corner relative to camera, w cell size
   vol_u: vec4f,      // volume up axis, w = 1 while it holds smoke
-  misc: vec4f,       // near plane, city glow 0..1, water quality, pixel angle
+  misc: vec4f,       // near plane, stops the night exposure is closed down for city lights, water quality, pixel angle
   csm: vec4f,        // world size of a shadow texel in each cascade, w = shadows on
   scorch: array<vec4f, 8>,
   crater: array<vec4f, 8>,  // xyz relative to camera, w radius
@@ -133,6 +133,23 @@ struct Globals {
   snow_tr_c: vec4f,
   snow_tr_e: vec4f,
   snow_tr_n: vec4f,
+  // Precomputed horizontal bounding circles of the storm cells (storm.rs `bound`):
+  // xyz centre on the planet surface (planet frame, m) + w radius (m).
+  storm_bounds: array<vec4f, 16>,
+  // Precomputed lone-cell turrets (5 per cell: tc.xy, rk, ck) and flanking
+  // towers (3 per cell: fo.xy, fr, ft) (storm.rs `turrets`).
+  storm_turrets: array<vec4f, 128>,
+  // Graphics settings (graphics.rs): x the water's detail (0 plain, 1 full,
+  // 2 full + screen-space reflections), y 1 while the clouds are drawn.
+  lite: vec4f,
+  // Precomputed top-mip means for the ground detail arrays (render.rs GroundMats):
+  // det_mean: rgb = 1 / max(albedo mean, 0.02), w = cavity mean; det_hmean = height mean (4 per vec4).
+  det_mean: array<vec4f, 16>,
+  det_hmean: array<vec4f, 4>,
+  // Apron floodlights (world.rs `flood_globals`), eight, two each: lamp
+  // (camera-relative) + intensity (0 = none, and none after it); beam
+  // direction + cosine of its half-angle.
+  flood: array<vec4f, 16>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -268,6 +285,7 @@ fn sun_trans(h: f32, mu: f32) -> vec3f {
   let hc = max(h, 0.0);
   let mu_h = -sqrt(hc * (2.0 * rg + hc)) / (rg + hc);
   let vis = smoothstep(mu_h - 0.006, mu_h + 0.006, mu);
+  if (vis <= 0.0) { return vec3f(0.0); }
   return textureSampleLevel(t_trans, s_clamp, trans_uv(hc, mu), 0.0).rgb * vis;
 }
 fn ms_lut(h: f32, mu: f32) -> vec3f {
@@ -283,16 +301,21 @@ struct Scatter { L: vec3f, T: vec3f };
 // Single scattering plus the multi-scatter LUT along a ray segment. oc is the
 // ray origin relative to the planet centre.
 fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -> Scatter {
+  let rg = G.planet.w;
   let sun = G.sun_dir.xyz;
   let c = dot(rd, sun);
   let pr = phase_r(c);
   let pm = phase_m(c, 0.8);
+  let oc_sun = dot(oc, sun);
   let moon = G.moon.xyz;
   let cm = dot(rd, moon);
   let prm = phase_r(cm);
   let pmm = phase_m(cm, 0.8);
+  let oc_moon = dot(oc, moon);
   let mk = MOON_TINT * (G.moon.w / G.sun_dir.w);
   let moon_on = G.moon.w > 0.0;
+  let cs_on = G.cs[4].w >= 0.5 && G.start.x <= 0.0;
+  let cs_top = G.cs[3].y;
   var T = vec3f(1.0);
   var L = vec3f(0.0);
   let len = max(tmax - tmin, 0.0);
@@ -303,20 +326,24 @@ fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -
     let f = f32(i + 1) / f32(steps);
     let tn = tmin + len * f * f;
     let dt = tn - tp;
-    let p = oc + rd * mix(tp, tn, jit);
+    let tm = mix(tp, tn, jit);
+    let p = oc + rd * tm;
     let r = length(p);
-    let h = r - G.planet.w;
-    let mu = dot(p / r, sun);
+    let h = r - rg;
+    let mu = (oc_sun + c * tm) / r;
     let d = atm_density(h);
     let ext = atm_ext(d);
     let sr = RAYLEIGH * d.x;
     let sm = MIE_S * d.y;
     // Air in the shadow of a cloud gets no sunlight (light shafts through the gaps);
     // under a closed deck the light that remains is the deck's dull grey.
-    let cl = cloud_sun(p, false);
     var msl = ms_lut(h, mu);
-    msl = mix(msl, vec3f(luma(msl)), cl.closed * 0.75) * (1.0 - 0.45 * cl.closed);
-    var vis = cl.vis;
+    var vis = 1.0;
+    if (cs_on && h < cs_top) {
+      let cl = cloud_sun_at(p, r, h, false);
+      msl = mix(msl, vec3f(luma(msl)), cl.closed * 0.75) * (1.0 - 0.45 * cl.closed);
+      vis = cl.vis;
+    }
     if (sdark > 0.0) {
       let k = 1.0 - 0.8 * sdark * exp(-mix(tp, tn, 0.5) / 15000.0);
       msl *= k;
@@ -324,7 +351,7 @@ fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -
     }
     var S = sun_trans(h, mu) * vis * (sr * pr + vec3f(sm * pm)) + msl * (sr + vec3f(sm));
     if (moon_on) {
-      let mum = dot(p / r, moon);
+      let mum = (oc_moon + cm * tm) / r;
       S += (sun_trans(h, mum) * (sr * prm + vec3f(sm * pmm)) + ms_lut(h, mum) * (sr + vec3f(sm))) * mk;
     }
     let st = exp(-ext * dt);
@@ -446,15 +473,24 @@ const CU_SHAPE = 15000.0;     // tile size of the cumulus cell noise, metres
 const CIRRUS_H = 8800.0;
 
 // cb: how deep inside a storm cell this point is, 0 outside .. 1 well inside.
-// sc: the storm cell that matters here, xyz centre (km on the sphere, planet frame,
-// cloud space), w radius of its tower (km, 0 = none); sp: its maturity (young
-// towers have no anvil), anvil top (m above sea level), how far the core
-// overshoots the anvil (m), seed.
+// ci: index of the winning storm cell in G.storm_cells / G.storm_turrets (-1 = none).
 // cell: stratocumulus cell pattern, 1 at the heart of a cell, low between cells.
-// sd: signed distance (m) to that cell's smooth envelope, + inside (-1e6 = none).
 // ns: how far into the rain deck's area the column is (nimbostratus), 0..1.
-struct Weather { cov: f32, typ: f32, top: f32, cb: f32, sc: vec4f, sp: vec4f, cell: f32, sd: f32, ns: f32 };
-fn no_weather() -> Weather { return Weather(0.0, 0.0, 0.0, 0.0, vec4f(0.0), vec4f(0.0), 0.0, -1e6, 0.0); }
+struct Weather { cov: f32, typ: f32, top: f32, cb: f32, ci: i32, cell: f32, ns: f32 };
+fn no_weather() -> Weather { return Weather(0.0, 0.0, 0.0, 0.0, -1, 0.0, 0.0); }
+// Signed distance (m, + inside) and radius (km) of the closest storm cell's
+// bound envelope, set by storm_find / cloud_weather_m for step-sizing.
+// g_storm_sd2 holds the 2nd-closest cell's bound so exact storm_sd distances
+// from the winning cell can safely expand clear-air strides without ever
+// skipping over a neighbouring storm cell.
+var<private> g_storm_sd: f32;
+var<private> g_storm_sd2: f32;
+var<private> g_storm_sd_full: f32;
+var<private> g_storm_r: f32;
+// Set briefly on the main march step when storm_find's upper bound already
+// proves the sample lies outside storm_reach (skips redundant storm_sd(..., true)).
+var<private> g_skip_storm: bool = false;
+var<private> g_meso: bool = false;
 
 // The rain deck: where rain is set (weather.rs rain_set) the layer closes into
 // a deep grey nimbostratus over a lobed area ~90 km across around where it was
@@ -512,10 +548,10 @@ const SHELF_AHEAD = 0.35;
 // A squall line's shelf cloud: its leading edge this far ahead of the line's
 // axis, and how far back from there its upper face rises into the base (x the
 // line's radius R). Must match storm.rs.
-const SHELF_F = 1.4;
-const SHELF_W = 0.65;
+const SHELF_F = 1.42;
+const SHELF_W = 0.50;
 // ...and over how much of that its steep upper face rises (x R).
-const SHELF_FACE = 0.16;
+const SHELF_FACE = 0.14;
 
 // How deep a squall line's shelf cloud hangs at cxl metres along the line (a
 // share of its full depth): scalloped, one shallow arc after another, deepest
@@ -551,9 +587,14 @@ fn shelf_top(u: f32, R: f32, Ds: f32) -> f32 {
 }
 // Rounded intersection of two half-spaces at distances a and b (radius r).
 fn round_min(a: f32, b: f32, r: f32) -> f32 { return max(r, min(a, b)) - length(max(vec2f(r - a, r - b), vec2f(0.0))); }
+// Smooth polynomial union of two signed distances (+ inside) with blend radius k.
+fn smooth_max(a: f32, b: f32, k: f32) -> f32 {
+  let h = max(k - abs(a - b), 0.0) / max(k, 1.0);
+  return max(a, b) + h * h * k * 0.25;
+}
 
 // How far the turrets push a storm cell's surface out past its envelope, m.
-fn storm_bulge(sc: vec4f) -> f32 { return clamp(sc.w * 280.0, 800.0, 2200.0); }
+fn storm_bulge(sc: vec4f) -> f32 { return clamp(sc.w * 250.0, 1000.0, 3200.0); }
 // How far out past the envelope there can be any cloud at all: the billows push
 // out by at most 0.22 x 1.3 of the bulge, x 1.9 on the flanks (cloud_shape_f;
 // under the base, hb < 0, a quarter of 0.3), the low scud by 300 m. (The whole bulge is a far looser
@@ -571,7 +612,7 @@ fn storm_anvil(sc: vec4f, sp: vec4f) -> vec3f {
   // march had to cross.) A supercell's spreads 100 km and more downwind, and
   // is sheared back a little way upwind.
   let sup = storm_super(sp);
-  return vec3f(R * (1.0 + mix(select(4.5, 2.8, sp.w >= 1.0), 10.5, sup) * mature), R * (0.8 + 0.35 * mature + 0.45 * sup), R * (1.0 + 0.6 * mature + 0.4 * sup));
+  return vec3f(R * (1.0 + mix(select(4.0, 2.6, sp.w >= 1.0), 7.8, sup) * mature), R * (0.9 + 0.35 * mature + 0.35 * sup), R * (1.1 + 0.65 * mature + 0.25 * sup));
 }
 // A supercell (weather.rs CellKind::Supercell): its maturity runs on past 1, to
 // 2 for a full one; 0..1 how much of one it is.
@@ -594,9 +635,11 @@ fn storm_lean(sp: vec4f) -> f32 { return mix(0.12, 0.22, smoothstep(0.5, 0.8, sp
 var<private> g_anvil: f32;
 // How much the wall cloud is the part of the envelope that counts (set by storm_sd).
 var<private> g_wall: f32;
-fn storm_sd(pp: vec3f, hb: f32, sc: vec4f, sp: vec4f, full: bool) -> f32 {
+fn storm_sd(pp: vec3f, hb: f32, ci: u32) -> f32 {
   g_anvil = 0.0;
   g_wall = 0.0;
+  let sc = G.storm_cells[2u * ci];
+  let sp = G.storm_cells[2u * ci + 1u];
   if (sc.w <= 0.0) { return -1e6; }
   let R = sc.w * 1000.0;
   // A squall line: sp.w's whole part is its length (km, 0 = a lone cell). It
@@ -611,7 +654,7 @@ fn storm_sd(pp: vec3f, hb: f32, sc: vec4f, sp: vec4f, full: bool) -> f32 {
   let lean = storm_lean(sp);
   let at = sp.y - G.cloud.y;               // anvil top above the base
   let htop = at * storm_top(sp.x);         // this tower's top
-  let size = smoothstep(2500.0, 8000.0, R);
+  let size = smoothstep(4000.0, 13000.0, R);
   let W = G.storm.xyz;
   let un = normalize(pp);
   let X = normalize(cross(un, W));
@@ -630,189 +673,171 @@ fn storm_sd(pp: vec3f, hb: f32, sc: vec4f, sp: vec4f, full: bool) -> f32 {
   let hc = clamp(hb / max(htop, 1.0), 0.0, 1.2);
   let dw = dw0 - hb * lean;
   let r = length(vec2f(dw, cx));
-  // (A squall line's turrets stand within 1.1 R of its axis: a tighter bound
-  // lets the march stride past it sooner.)
-  let rmax = R * select(1.75, 1.2, L2 > 0.0);
-  var sd = min(rmax - r, htop - hb);
-  // (Not full: that cylinder is the bound. It must hold the turrets too, or the
-  // march's clear-air strides skip over them.)
-  sd = min(sd, hb + 30.0);
-  if (full && sd > -2500.0) {
+  let flare = mature * smoothstep(0.66, 1.0, hc);
+  let rmax = R * (select(select(1.65, 1.25, sup > 0.5), 1.48, L2 > 0.0) + select(0.30, 0.58, sup > 0.5) * flare);
+  var sd = min(min(rmax - r, htop - hb), hb + 30.0);
+  // Well below the cloud base only the wall/shelf cloud can reach; skip the
+  // tower, turrets, flanking line and anvil entirely.
+  let above_sub = hb > -150.0;
+  if (above_sub && sd > -2500.0) {
     let ang = atan2(cx, dw);
     // (Along a squall line its face bulges in and out too, not one straight wall.)
     // (A supercell's lobes wind round it as they climb: the rotating
     // updraft's corkscrew.)
-    let twist = sup * hb / 1700.0;
-    let lob = 1.0 + (0.1 * sin(2.0 * (ang - twist) + seed * 40.0 + hc * 1.7) + 0.07 * sin(3.0 * (ang - twist) + seed * 73.0 - hc * 2.3)) * (1.0 + 0.5 * sup) + 0.12 * min(L2, 1.0) * sin(cxl / (1.15 * R) + seed * 29.0 + hc * 1.3);
-    // Young towers round off into a cauliflower dome over their top third.
-    let dome = sqrt(max(1.0 - pow(max(hc - 0.62, 0.0) / 0.38, 2.0), 0.0));
-    // The core narrows with height; mature ones mushroom out under the
-    // tropopause and merge into the anvil.
-    let taper = mix(1.0, 0.72, smoothstep(0.0, 0.9, hc));
-    // (The flare is the dense head the anvil streams out of: without it, seen from
-    // afar, the anvil was a thin veil on a narrow stem.)
-    let fq = smoothstep(0.72, 1.0, hc);
+    let twist = sup * hb / 1900.0;
+    let lob = 1.0 + (0.11 * sin(2.0 * (ang - twist) + seed * 40.0 + hc * 1.7) + 0.075 * sin(3.0 * (ang - twist) + seed * 73.0 - hc * 2.3)) * (1.0 + 0.45 * sup) + 0.12 * min(L2, 1.0) * sin(cxl / (1.15 * R) + seed * 29.0 + hc * 1.3);
+    // Young towers round off into a broad cauliflower dome over their upper half.
+    let dm = max(hc - 0.56, 0.0) / 0.44;
+    let dome = sqrt(max(1.0 - dm * dm, 0.0));
+    // Broad convective base tapering smoothly upward; mature ones flare into the anvil.
+    let taper = mix(1.06, 0.80, smoothstep(0.0, 0.88, hc));
+    let fq = smoothstep(0.68, 1.0, hc);
     // Its foot tucks in over the lowest few hundred metres, a rounded edge to
     // the base instead of a square corner (a straight dark wall seen from afar).
-    let foot = 1.0 - 0.1 * (1.0 - smoothstep(0.0, 700.0, hb));
-    // A squall line's core is the low, merged foot of its towers: they stand
-    // out of it, each to its own height, and its outline is theirs. (As one
-    // slab the full height of the line it stood as a flat-topped wall with no
-    // turrets of its own, its face one plane in shade or sun all along.)
-    // (A supercell's is one slenderer column: its R sizes the whole storm,
-    // anvil and all.)
-    var Rt = R * select(mix(0.82, 0.62, sup), 0.5, L2 > 0.0) * lob * taper * foot * mix(dome, 1.0 + 1.5 * fq * sqrt(fq), mature);
+    let foot = 1.0 - 0.09 * (1.0 - smoothstep(0.0, 750.0, hb));
+    // Broader, imposing towers for lone cells, supercells and squall lines alike.
+    var Rt = R * select(mix(0.92, 0.80, sup), 0.72, L2 > 0.0) * lob * taper * foot * mix(dome, 1.0 + 1.15 * fq * sqrt(fq), mature);
     if (sup > 0.0) {
       // A supercell's lower third is the rotating updraft (the mesocyclone):
-      // a broad, smooth bell over the rain-free base, narrowing as it climbs,
-      // striated in stacked plates that wind round it (each a little proud
-      // of the one below, with an overhanging lip at its top and an
-      // undercut beneath: the "mothership", the barber-pole bands). Smooth,
-      // laminar cloud, not billows (g_wall < 0, see cloud_shape_f).
-      // (Evenly spaced, level and all alike, the plates stood as a stack of
-      // rings, a wedding cake: they tilt, crowd and thin out, wind round
-      // round it, and stand out more on some sides than others.)
-      let mz = sup * (1.0 - smoothstep(0.26, 0.44, hc));
+      // a broad, imposing striated bell over the rain-free base, narrowing as
+      // it climbs in stacked laminar plates ("mothership").
+      let mz = sup * (1.0 - smoothstep(0.28, 0.46, hc));
       let hw = hb + 0.09 * dot(vec2f(dw, cx), vec2f(cos(seed * 6.3), sin(seed * 6.3))) + 260.0 * sin(hb / 1300.0 + seed * 7.0);
-      let fb = fract(hw / 650.0 + ang * 0.159155 + seed * 3.0);
+      let fb = fract(hw / 680.0 + ang * 0.159155 + seed * 3.0);
       let plate = (smoothstep(0.0, 0.82, fb) - smoothstep(0.82, 1.0, fb)) * (0.55 + 0.45 * sin(ang + seed * 11.0 + hb / 2100.0));
-      Rt = mix(Rt, R * mix(0.68, 0.52, smoothstep(0.0, 0.44, hc)) * (0.97 + 0.07 * plate) * foot * (1.0 + 0.06 * sin(2.0 * (ang - twist) + seed * 40.0)), mz);
-      g_wall = -mz * (1.0 - smoothstep(0.85 * R, 1.05 * R, r));
+      Rt = mix(Rt, R * mix(0.84, 0.68, smoothstep(0.0, 0.46, hc)) * (0.97 + 0.07 * plate) * foot * (1.0 + 0.06 * sin(2.0 * (ang - twist) + seed * 40.0)), mz);
+      g_wall = -mz * (1.0 - smoothstep(0.95 * R, 1.15 * R, r));
     }
     // (The flat base is put on below, once, rounded into the walls.)
-    sd = min(Rt - r, select(htop, 0.5 * htop, L2 > 0.0) - hb);
-    if (r < R * select(1.6, 1.35, L2 > 0.0) && hb < htop * 0.92) {
-      // Five turrets around the core, each a column of its own height ending
-      // in a rounded top (a capsule), slightly narrowing as it climbs. Along a
-      // squall line, the three nearest of a row of them (0.85 R apart, each
-      // its own height and depth in the line; the line's ends round off): fat
-      // towers 0.6 to all of the line's height, the younger, lower ones along
-      // its leading edge and the tall ones behind them, with clefts where
-      // neighbours meet. (Above 0.92 of the height they are inside the anvil.)
-      let D = 0.85 * R;
-      let nj = floor(L2 / D);
-      let j0 = round(clamp(cxl, -L2, L2) / D);
-      // (The next ones along stand a radius further off than the widest turret.)
-      // (Not a supercell's: one massive, crisp, rotating column.)
-      for (var k = 0; k < select(select(5, 3, L2 > 0.0), 0, sup > 0.5); k++) {
-        let fk = f32(k);
-        let jk = clamp(j0 + fk - 1.0, -nj, nj);
-        let hs = fract(sin(seed * 91.7 + select(fk, jk * 1.618 + 5.0, L2 > 0.0) * 12.989) * vec4f(43758.5, 22578.1, 19642.3, 47453.7));
-        let th = 1.2566 * (fk + 0.35 * hs.x) + seed * 17.0;
-        var rk = R * (0.42 + 0.18 * hs.z);
-        var ft = htop * mix(0.42, 0.88, hs.w) * mix(0.75, 1.0, mature);
-        var tc = vec2f(cos(th), sin(th)) * (R * (0.6 + 0.3 * hs.y));
-        if (L2 > 0.0) {
-          rk = R * (0.45 + 0.25 * hs.z);
-          ft = htop * mix(0.6, 1.05, 1.0 - (1.0 - hs.w) * (1.0 - hs.w)) * mix(0.45, 1.0, lend);
-          tc = vec2f(R * (0.3 - 0.55 * hs.w + 0.2 * (hs.y - 0.5)), (jk + 0.6 * (hs.x - 0.5)) * D);
+    sd = min(Rt - r, select(htop, 0.76 * htop, L2 > 0.0) - hb);
+    let deep_core = sd > 1.25 * storm_bulge(sc) + 900.0;
+    if (!deep_core && r < R * select(1.75, 1.48, L2 > 0.0) && hb < htop * 0.94 && sup <= 0.5) {
+      // Five turrets around the core, smooth-blended into a muscular convective
+      // mass instead of separate narrow sticks. Along a squall line, closely
+      // overlapping towers form a continuous boiling rampart under the anvil.
+      let kt = clamp(R * 0.14, 550.0, 1500.0);
+      if (L2 > 0.0) {
+        let D = 0.78 * R;
+        let nj = floor(L2 / D);
+        let j0 = round(clamp(cxl, -L2, L2) / D);
+        for (var k = 0; k < 3; k++) {
+          let fk = f32(k);
+          let jk = clamp(j0 + fk - 1.0, -nj, nj);
+          var hp = fract(vec4f(seed * 91.7 + (jk * 1.618 + 5.0) * 12.989) * vec4f(0.1031, 0.1030, 0.0973, 0.1099));
+          hp += dot(hp, hp.wzxy + 33.33);
+          let hs = fract((hp.xxyz + hp.yzzw) * hp.zywx);
+          let rk = R * (0.56 + 0.26 * hs.z);
+          let ft = htop * mix(0.72, 1.04, 1.0 - (1.0 - hs.w) * (1.0 - hs.w)) * mix(0.5, 1.0, lend);
+          let tc = vec2f(R * (0.28 - 0.50 * hs.w + 0.22 * (hs.y - 0.5)), (jk + 0.55 * (hs.x - 0.5)) * D);
+          let dk = length(vec2f(dw, cxl) - tc);
+          let ck = max(ft - rk, 0.0);
+          let sk = rk * (1.0 - 0.15 * min(hb / max(ck, 1.0), 1.0)) - length(vec2f(dk, max(hb - ck, 0.0)));
+          sd = smooth_max(sd, sk, kt);
         }
-        let dk = length(vec2f(dw, cxl) - tc);
-        let ck = max(ft - rk, 0.0);
-        let sk = rk * (1.0 - 0.18 * min(hb / max(ck, 1.0), 1.0)) - length(vec2f(dk, max(hb - ck, 0.0)));
-        sd = max(sd, sk);
+      } else {
+        let base_t = 8u * ci;
+        let p_t = vec2f(dw, cxl);
+        for (var k = 0u; k < 5u; k++) {
+          let t = G.storm_turrets[base_t + k];
+          let dk = length(p_t - t.xy);
+          let sk = t.z * (1.0 - 0.15 * min(hb / max(t.w, 1.0), 1.0)) - length(vec2f(dk, max(hb - t.w, 0.0)));
+          sd = smooth_max(sd, sk, kt);
+        }
       }
     }
   }
-  // Flanking line: a row of younger towers stepping down from the main one,
-  // upwind and off to one side, where new updrafts feed the storm. (Not on a
-  // squall line: its new towers rise along its leading edge.)
-  let fl = vec2f(-0.75, -0.66);
-  let fh0 = htop * 0.56 * mix(0.6, 1.0, mature);
-  let fc = vec2f(dw0 - hb * 0.1, cx);
-  if (L2 <= 0.0) {
-  if (full) {
-    // (Its towers all lie inside the bound below, so outside it there are none.
-    // Taking the bound's distance there put a surface on that fat cylinder: the
-    // billows grew a straight-walled, flat-topped box of cloud round the storm.)
-    if (hb < fh0 + 500.0 && length(fc - fl * (R * 2.05)) < R * 2.2) {
-    for (var k = 1; k <= 3; k++) {
-      let fk = f32(k);
-      let fo = fl * (R * (0.55 + 0.75 * fk)) + vec2f(sin(seed * 31.0 + fk * 2.1), cos(seed * 17.0 + fk * 1.3)) * R * 0.18;
-      // (A supercell's flanking line is a row of slenderer towers.)
-      let fr = R * (0.62 - 0.12 * fk) * (1.0 - 0.4 * sup);
-      let ft = htop * (0.72 - 0.16 * fk) * mix(0.6, 1.0, mature);
-      let fh = clamp(hb / ft, 0.0, 1.2);
-      let rf = length(fc - fo);
-      let fd = sqrt(max(1.0 - pow(max(fh - 0.5, 0.0) / 0.5, 2.0), 0.0));
-      sd = max(sd, min(fr * fd - rf, ft - hb));
+  // Flanking line: a row of younger feeder towers stepping down upwind and off
+  // to one side, smooth-blended into the main convective mass.
+  if (L2 <= 0.0 && above_sub && hb < htop * 0.65 + 2200.0 && sd <= 1.25 * storm_bulge(sc) + 900.0) {
+    let fc = vec2f(dw0 - hb * 0.1, cx);
+    let kf = clamp(R * 0.15, 600.0, 1600.0);
+    let base_f = 8u * ci + 5u;
+    for (var k = 0u; k < 3u; k++) {
+      let t = G.storm_turrets[base_f + k];
+      let fh = clamp(hb / max(t.w, 1.0), 0.0, 1.2);
+      let rf = length(fc - t.xy);
+      let fdm = max(fh - 0.48, 0.0) / 0.52;
+      let fd = sqrt(max(1.0 - fdm * fdm, 0.0));
+      sd = smooth_max(sd, min(t.z * fd - rf, t.w - hb), kf);
     }
-    }
-  } else {
-    sd = max(sd, min(min(R * 2.2 - length(fc - fl * (R * 2.05)), fh0 + 500.0 - hb), hb + 30.0));
-  }
   }
   // The flat base, 30 m under the layer's: every column (core, turrets,
-  // flanking towers) rounds off into it over its lowest few hundred metres
-  // (rounded intersection), not the square corner where a straight wall met the
-  // base, which stood as a box seen from afar. (Never above min(sd, base), so
-  // the bound holds.)
-  if (full) {
-    let rb = clamp(R * 0.25, 450.0, 1000.0);
+  // flanking towers) rounds off into it over its lowest few hundred metres.
+  if (above_sub) {
+    let rb = clamp(R * 0.22, 450.0, 1100.0);
     let bb = hb + 30.0;
     sd = max(rb, min(sd, bb)) - length(max(vec2f(rb - sd, rb - bb), vec2f(0.0)));
   }
   // Mature cells: anvil, overshooting top.
-  if (mature > 0.0) {
-    let an = storm_anvil(sc, sp);
-    let xa = dw0 - at * lean;
-    let lc = an.z + max(xa, 0.0) * mix(0.45, 0.3, sup);
-    let rn = length(vec2f(xa / select(an.y, an.x, xa > 0.0), cx / lc));
-    let edge = max(1.0 - rn, 0.0);
-    let th = mix(mix(1500.0, 3500.0, size), 3300.0, sup) * mature * select(1.0, mix(0.4, 1.0, lend), L2 > 0.0);
-    // A slab with a nearly flat underside, a little deeper over the tower, thinning
-    // only in its outer reaches to a sharp leading edge. (A wedge thinning all the
-    // way out showed only its shaded underside from afar: a hairline anvil.)
-    // A supercell's is thick right out to its edges, sheared back against
-    // the wind upwind: there its edge is a bulging, rounded nose (a quarter
-    // circle of thickness, top and bottom coming round to meet), not the
-    // straight-walled drum a slab cut off at its outline makes.
-    var ab = at - th * smoothstep(0.0, 0.45, edge) * (0.8 + 0.2 * edge) - 150.0;
-    var atop = at + 350.0 * edge;
-    if (sup > 0.0) {
-      let en = clamp(edge / mix(0.3, 0.22, smoothstep(0.2 * R, -0.5 * R, xa)), 0.0, 1.0);
-      let nose = sqrt(en * (2.0 - en));
-      ab = mix(ab, at - th * nose * (0.8 + 0.2 * edge) - 150.0, sup);
-      atop -= 0.45 * th * (1.0 - nose) * sup;
-      if (xa > 0.0) {
-        // Mammatus: rounded pouches a km or two across hanging from the
-        // underside downwind, packed unevenly (Worley cells, a few hundred
-        // metres to 700 m deep), smooth and crisp-edged (g_wall < 0) so a
-        // low sun picks each one out.
-        let mreg = sup * smoothstep(0.06 * an.x, 0.2 * an.x, xa) * (1.0 - smoothstep(0.45 * an.x, 0.8 * an.x, xa)) * smoothstep(0.1, 0.35, edge);
-        if (mreg > 0.0) {
-          let nz = textureSampleLevel(t_noise, s_repeat, vec3f(dw0, cx, seed * 9000.0) / 7000.0 + vec3f(0.43, 0.19, 0.77), 0.0);
-          let pouch = smoothstep(0.42, 0.85, nz.g * 0.75 + nz.b * 0.25);
-          ab -= mreg * (300.0 + 450.0 * nz.r) * pouch * (2.0 - pouch);
-          g_wall = min(g_wall, -mreg * smoothstep(0.0, 0.25, pouch));
+  if (mature > 0.0 && above_sub) {
+    let th = mix(mix(1800.0, 3800.0, size), 3600.0, sup) * mature * select(1.0, mix(0.45, 1.0, lend), L2 > 0.0);
+    let k_anv = clamp(R * 0.20, 1100.0, 2400.0) * mature;
+    let ab_min = at - th - 150.0 - 750.0 * sup;
+    // Far below the anvil's lowest possible base, neither the anvil nor the
+    // overshooting top can affect the SDF near the surface.
+    if (hb >= ab_min - k_anv - 900.0) {
+      let an = storm_anvil(sc, sp);
+      let xa = dw0 - at * lean;
+      let lc = an.z + max(xa, 0.0) * mix(0.42, 0.28, sup);
+      let ax_s = select(an.y, an.x, xa > 0.0);
+      let qn = vec2f(xa / ax_s, cx / lc);
+      let rn0 = length(qn);
+      // Organic lobed planform via trig-free harmonics so the anvil never reads
+      // as a geometric ellipse, skipped outside its radial/height band.
+      var rn = rn0;
+      let wob_fade = smoothstep(0.25, 0.85, rn0);
+      if (rn0 > 0.25 && rn0 < 1.32 && hb > ab_min - k_anv) {
+        let u = qn / rn0;
+        let ph = seed * 6.2831853;
+        let cp = cos(ph);
+        let sp_ = sin(ph);
+        let ur = vec2f(u.x * cp - u.y * sp_, u.x * sp_ + u.y * cp);
+        let c2 = ur.x * ur.x - ur.y * ur.y;
+        let s2 = 2.0 * ur.x * ur.y;
+        let c3 = c2 * ur.x - s2 * ur.y;
+        let s3 = s2 * ur.x + c2 * ur.y;
+        let s5 = s3 * c2 + c3 * s2;
+        let awob = (0.09 * s2 + 0.06 * c3 + 0.045 * s5) * mix(1.0, 0.55, sup * smoothstep(0.1 * R, -0.4 * R, xa));
+        rn = max(rn0 + awob * wob_fade, 0.0);
+      }
+      let edge = max(1.0 - rn, 0.0);
+      var ab = at - th * smoothstep(0.0, 0.48, edge) * (0.78 + 0.22 * edge) - 150.0;
+      var atop = at + 420.0 * edge;
+      if (edge > 0.0 && hb > ab_min) {
+        // Gentle convective undulations on the anvil canopy near the core.
+        atop += 180.0 * edge * sin(xa / (0.65 * R) + seed * 13.0) * cos(cx / (0.65 * R) + seed * 29.0);
+      }
+      if (sup > 0.0) {
+        let en = clamp(edge / mix(0.3, 0.22, smoothstep(0.2 * R, -0.5 * R, xa)), 0.0, 1.0);
+        let nose = sqrt(en * (2.0 - en));
+        ab = mix(ab, at - th * nose * (0.8 + 0.2 * edge) - 150.0, sup);
+        atop -= 0.45 * th * (1.0 - nose) * sup;
+        if (xa > 0.0 && hb > ab_min - 500.0 && hb < at + 200.0) {
+          let mreg = sup * smoothstep(0.06 * an.x, 0.2 * an.x, xa) * (1.0 - smoothstep(0.45 * an.x, 0.8 * an.x, xa)) * smoothstep(0.1, 0.35, edge);
+          if (mreg > 0.0) {
+            let nz = textureSampleLevel(t_noise, s_repeat, vec3f(dw0, cx, seed * 9000.0) / 7000.0 + vec3f(0.43, 0.19, 0.77), 0.0);
+            let pouch = smoothstep(0.42, 0.85, nz.g * 0.75 + nz.b * 0.25);
+            ab -= mreg * (300.0 + 450.0 * nz.r) * pouch * (2.0 - pouch);
+            g_wall = min(g_wall, -mreg * smoothstep(0.0, 0.25, pouch));
+          }
         }
       }
+      let lat_scale = max(4500.0, min(ax_s, lc));
+      let sa = min(min(hb - ab, atop - hb), (1.0 - rn) * lat_scale);
+      // The overshooting top: only rises out of the core near anvil height.
+      var so = sd;
+      if (hb > 0.70 * at) {
+        let jo = round(clamp(cxl, -L2, L2) / (2.6 * R));
+        let ro = length(vec2f(dw0 - min(hb, at) * lean, cxl - jo * 2.6 * R));
+        let Ro = R * mix(mix(0.45, 0.58, size), 0.44, sup) * sqrt(smoothstep(0.3 * at, 0.75 * at, hb));
+        let hf = select(1.0, 0.3 + 0.7 * fract(sin(jo * 7.13 + seed * 31.0) * 43758.5), L2 > 0.0);
+        let ho = at + sp.z * hf * sqrt(max(1.0 - (ro / max(Ro, 1.0)) * (ro / max(Ro, 1.0)), 0.0));
+        so = max(sd, min(min(ho - hb, Ro - ro), hb - select(0.3, 0.74, L2 > 0.0) * at));
+      }
+      g_anvil = mature * max(smoothstep(-500.0, 500.0, sa - so), smoothstep(0.82, 0.97, hc) * select(1.0, 0.0, L2 > 0.0)) * (1.0 - sup * smoothstep(at + 100.0, at + 600.0, hb) * smoothstep(-300.0, 300.0, so - sa));
+      // Smooth fillet where the rising tower spreads continuously into the anvil.
+      sd = smooth_max(so, sa, k_anv);
     }
-    let sa = min(min(hb - ab, atop - hb), (1.0 - rn) * 4000.0);
-    // The overshooting top: a dome on a column that leans with the tower and
-    // rounds off inside it lower down. (As an upright cylinder with no bottom
-    // it poked out of the tower's leaning flank as a straight-walled drum and
-    // hung under the base as a flat-bottomed dark slab down to STORM_BELOW.)
-    // Along a squall line, one every 2.6 R, each overshooting by its own height.
-    let jo = round(clamp(cxl, -L2, L2) / (2.6 * R));
-    let ro = length(vec2f(dw0 - min(hb, at) * lean, cxl - jo * 2.6 * R));
-    let Ro = R * mix(mix(0.45, 0.6, size), 0.42, sup) * sqrt(smoothstep(0.3 * at, 0.75 * at, hb));
-    let hf = select(1.0, 0.3 + 0.7 * fract(sin(jo * 7.13 + seed * 31.0) * 43758.5), L2 > 0.0);
-    let ho = at + sp.z * hf * sqrt(max(1.0 - (ro / max(Ro, 1.0)) * (ro / max(Ro, 1.0)), 0.0));
-    // (A squall line's overshooting tops rise out of the anvil itself: from its
-    // low core they stood under it as bare stems with a cap, mushrooms.)
-    let so = max(sd, min(min(ho - hb, Ro - ro), hb - select(0.3, 0.76, L2 > 0.0) * at));
-    // Where the anvil is the part of the envelope that counts (cloud_shape_f
-    // smooths it there instead of growing turrets, which hung from its underside
-    // in pillars when this went by height alone).
-    // The head the tower flares into counts as anvil too: with the tower's
-    // turret noise and crisp edge it broke up into floating popcorn.
-    // (Not a squall line's: its towers billow right up into the anvil, and as
-    // smooth, thin ice their tops left a gap of sky under it.)
-    // (A supercell's overshooting dome billows like the tower under it: a
-    // hard cauliflower dome over the flat anvil, not a smooth swell in it.)
-    g_anvil = mature * max(smoothstep(-400.0, 400.0, sa - so), smoothstep(0.8, 0.97, hc) * select(1.0, 0.0, L2 > 0.0)) * (1.0 - sup * smoothstep(at + 100.0, at + 600.0, hb) * smoothstep(-300.0, 300.0, so - sa));
-    sd = max(so, sa);
   }
   // Under the base (only big, mature cells): a wall cloud under the updraft, a
   // little upwind of the core. (A shelf cloud along a lone cell's gust front was
@@ -845,7 +870,7 @@ fn storm_sd(pp: vec3f, hb: f32, sc: vec4f, sp: vec4f, full: bool) -> f32 {
     let u = R * (SHELF_F + 0.12 * sin(cxl / 9000.0 + seed * 40.0) + 0.07 * sin(cxl / 3700.0 + seed * 17.0)) - dw0;
     let Ws = SHELF_W * R;
     var lump = 1.0;
-    if (full && select((rw < ww * 1.1 || (sup > 0.0 && dt < 0.15 * R)), (u > -SHELF_AHEAD * R - 900.0 && u < 2.0 * Ws), line)) {
+    if (select((rw < ww * 1.1 || (sup > 0.0 && dt < 0.15 * R)), (u > -SHELF_AHEAD * R - 900.0 && u < 2.0 * Ws), line)) {
       let nz = textureSampleLevel(t_noise, s_repeat, (pp + G.weather.xyz) / select(3200.0, 1700.0, line) + vec3f(0.27, 0.61, 0.09), 0.0);
       lump = nz.g * 0.65 + nz.b * 0.35;
     }
@@ -919,18 +944,9 @@ fn storm_sd(pp: vec3f, hb: f32, sc: vec4f, sp: vec4f, full: bool) -> f32 {
 }
 
 // A circle (horizontal) holding all of storm cell i: xyz its centre on the ground
-// (planet-centred), w its radius (m). Covers the anvil streaming downwind, the
-// flanking line upwind, the tower's lean and the turrets.
-fn storm_bound(i: u32) -> vec4f {
-  let c = G.storm_cells[2u * i];
-  let sp = G.storm_cells[2u * i + 1u];
-  let an = storm_anvil(c, sp);
-  let up = normalize(c.xyz - G.weather.xyz * 0.001);
-  let lean = (0.22 + 0.08 * storm_super(sp)) * (sp.y - G.cloud.y);
-  let cen = up * G.planet.w + G.storm.xyz * (0.5 * (an.x - an.y) + lean * 0.5);
-  let rb = max(max(0.5 * (an.x + an.y) + lean * 0.5, an.z + an.x * 0.45), 0.5 * (an.x - an.y) + c.w * 3500.0) + c.w * 600.0 + 2500.0;
-  return vec4f(cen, rb);
-}
+// (planet-centred), w its radius (m). Precomputed once per frame on the CPU
+// (storm.rs `bound`) to avoid repeating the trig/normalize math on every ray step.
+fn storm_bound(i: u32) -> vec4f { return G.storm_bounds[i]; }
 // A squall line's half-length, m (0 for a lone cell): its bound is a capsule,
 // that circle drawn out across the wind.
 fn storm_len2(i: u32) -> f32 { return floor(G.storm_cells[2u * i + 1u].w) * 500.0; }
@@ -960,85 +976,452 @@ fn ray_box2(o: vec2f, d: vec2f, hx: vec2f, tmax: f32) -> vec2f {
 // the cloud march passes only those its ray can meet. Picks the cell whose
 // envelope reaches furthest here, so where two cells' anvils meet they merge
 // instead of one cutting the other off.
+// Ultra-fast conservative upper bound on storm_sd(..., true) for cell picking
+// and clear-air step sizing: zero trig, zero loops, zero texture reads, with
+// the planet-frame basis (q_s, X) hoisted once per storm_find call.
+fn storm_sd_bound(q_s: vec3f, X: vec3f, hb: f32, sc: vec4f, sp: vec4f, ci: u32) -> f32 {
+  g_anvil = 0.0;
+  if (sc.w <= 0.0) { return -1e6; }
+  let R = sc.w * 1000.0;
+  let L2 = floor(sp.w) * 500.0;
+  let mature = smoothstep(0.5, 0.8, sp.x);
+  let sup = storm_super(sp);
+  let lean = storm_lean(sp);
+  let at = sp.y - G.cloud.y;
+  let htop = at * storm_top(sp.x);
+  let dv = (q_s - sc.xyz) * 1000.0;
+  let dw0 = dot(dv, G.storm.xyz);
+  let cxl = dot(dv, X);
+  let cx = sign(cxl) * max(abs(cxl) - L2, 0.0);
+  let hc = clamp(hb / max(htop, 1.0), 0.0, 1.2);
+  let flare = mature * smoothstep(0.66, 1.0, hc);
+  let dw = dw0 - hb * lean;
+  let r = length(vec2f(dw, cx));
+  let rmax = R * (select(select(1.65, 1.25, sup > 0.5), 1.48, L2 > 0.0) + select(0.30, 0.58, sup > 0.5) * flare);
+  var sd = min(rmax - r, htop + sp.z - hb);
+  if (hb > -150.0) {
+    if (L2 <= 0.0 && hb < htop * 0.65 + 2200.0) {
+      let fc = vec2f(dw0 - hb * 0.1, cx);
+      let kf = clamp(R * 0.15, 600.0, 1600.0);
+      let base_f = 8u * ci + 5u;
+      for (var k = 0u; k < 3u; k++) {
+        let t = G.storm_turrets[base_f + k];
+        let sf = min(t.z - length(fc - t.xy), t.w - hb);
+        sd = smooth_max(sd, sf, kf);
+      }
+    }
+    sd = min(sd, hb + 30.0);
+    if (mature > 0.0) {
+      let size = smoothstep(4000.0, 13000.0, R);
+      let lend = smoothstep(L2 + 0.5 * R, L2 - 3.0 * R, abs(cxl));
+      let th = mix(mix(1800.0, 3800.0, size), 3600.0, sup) * mature * select(1.0, mix(0.45, 1.0, lend), L2 > 0.0);
+      let ab = at - th - 150.0 - 750.0 * sup;
+      let atop = at + 600.0;
+      let an = storm_anvil(sc, sp);
+      let xa = dw0 - at * lean;
+      let lc = an.z + max(xa, 0.0) * mix(0.42, 0.28, sup);
+      let ax_s = select(an.y, an.x, xa > 0.0);
+      let rn0 = length(vec2f(xa / ax_s, cx / lc));
+      let rn = max(rn0 - 0.195 * smoothstep(0.25, 0.85, rn0), 0.0);
+      let sa = min(min(hb - ab, atop - hb), (1.0 - rn) * max(4500.0, min(ax_s, lc)));
+      let k_anv = clamp(R * 0.20, 1100.0, 2400.0) * mature;
+      if (sa > sd + 400.0) { g_anvil = mature; }
+      sd = smooth_max(sd, sa, k_anv);
+    }
+  } else {
+    sd = min(sd, hb + 30.0);
+  }
+  if (hb < 0.0 && mature > 0.0 && R > 1500.0) {
+    var swc = -1e6;
+    if (L2 > 0.0) {
+      let u0 = R * SHELF_F - dw0;
+      let Ws = SHELF_W * R;
+      swc = min(min(hb + SHELF_D * 1.15, -hb), min(u0 + (SHELF_AHEAD + 0.25) * R, 1.95 * Ws - u0));
+      swc = min(swc, L2 + 0.4 * R - abs(cxl));
+    } else {
+      let rw = length(vec2f(dw0 + R * 0.35, cx));
+      let sub_d = select(680.0, 1080.0, sup > 0.0);
+      swc = min(min(hb + sub_d, -hb), select(0.86, 0.96, sup > 0.0) * R - rw);
+    }
+    if (swc > sd) { g_anvil = 0.0; sd = swc; }
+  }
+  return sd;
+}
+
 const ALL_STORMS = 0xffffffffu;
 fn storm_find(pp: vec3f, hb: f32, mask: u32) -> Weather {
   var w = no_weather();
   let n = u32(G.storm.w);
+  let valid = select((1u << n) - 1u, 0xffffffffu, n >= 32u);
+  var rem = mask & valid;
+  if (rem == 0u) {
+    g_storm_sd = -1e6;
+    g_storm_sd2 = -1e6;
+    g_storm_r = 0.0;
+    g_anvil = 0.0;
+    return w;
+  }
+  let un = normalize(pp);
+  let X = normalize(cross(un, G.storm.xyz));
+  let q_s = un * 6371.0 + G.weather.xyz * 0.001;
+  let inv_rg = 1.0 / G.planet.w;
   var best = -1e7;
-  for (var i = 0u; i < n; i++) {
-    if ((mask & (1u << i)) == 0u) { continue; }
+  var best2 = -1e7;
+  var best_anv = 0.0;
+  var best_r = 0.0;
+  var best_i = -1;
+  while (rem != 0u) {
+    let i = firstTrailingBit(rem);
+    rem &= rem - 1u;
     let c = G.storm_cells[2u * i];
     let p = G.storm_cells[2u * i + 1u];
-    // Far outside a cell's bounding circle, the distance to that circle will do.
-    // (Per-ray spans of these circles in a private array were tried instead: the
-    // array cost ~5-10% fps everywhere, storms or not.)
+    // Far outside a cell's bounding circle (or well above its top), skip bound SDF.
     let bd = storm_bound(i);
-    var v = bd.w - length(storm_hoff(pp - bd.xyz, normalize(bd.xyz), floor(p.w) * 500.0));
-    if (v > max(best, -6000.0)) { v = storm_sd(pp, hb, c, p, false); }
-    if (v > best) { best = v; w.sc = c; w.sp = p; }
+    var v = bd.w - length(storm_hoff(pp - bd.xyz, bd.xyz * inv_rg, floor(p.w) * 500.0));
+    let top_i = (p.y - G.cloud.y) * storm_top(p.x) + p.z + 600.0;
+    v = min(v, top_i - hb);
+    var anv_i = 0.0;
+    if (v > max(best, -6000.0)) {
+      v = storm_sd_bound(q_s, X, hb, c, p, i);
+      anv_i = g_anvil;
+    }
+    if (v > best) {
+      best2 = best;
+      best = v;
+      best_anv = anv_i;
+      best_r = c.w;
+      best_i = i32(i);
+      if (best > 3000.0) { best2 = 3000.0; break; }
+    } else if (v > best2) {
+      best2 = v;
+    }
   }
   w.cb = smoothstep(-2500.0, 600.0, best);
-  w.sd = best;
+  g_storm_sd = best;
+  g_storm_sd2 = best2;
+  g_storm_r = best_r;
+  g_anvil = best_anv;
+  // Only carry the winning cell into binary search / light march / sky occlusion
+  // when close enough to matter: cumulus puffs > 2.6 km below an anvil or away
+  // from a tower skip storm_sd completely.
+  let keep_d = select(-2600.0, -3500.0, G.nimbo[0].w > 0.0);
+  if (best > keep_d) {
+    w.ci = best_i;
+  }
   return w;
 }
-// Bit i set when the ray from the camera (planet-centred oc, direction rd, up to
-// tmax metres) passes within reach of storm cell i: the tower, its lobes and the
-// anvil streaming downwind. g_storm_top: the highest any of them reaches (m above
-// sea level, overshooting top and turrets included), so rays near young towers
-// only march up as far as those. g_storm_end: where the ray has left all of
-// their bounds for good (beyond it only the ordinary layer is left to march).
+// Horizontal cylinder (radius rad around cen, vertical axis up) intersection,
+// clipped to [0, tmax]. Returns x >= y on a miss.
+fn ray_cyl_h(oc: vec3f, rd: vec3f, cen: vec3f, up: vec3f, rad: f32, tmax: f32) -> vec2f {
+  let v = cen - oc;
+  let vh = v - up * dot(v, up);
+  let rh = rd - up * dot(rd, up);
+  let a = dot(rh, rh);
+  let b = dot(vh, rh);
+  let cc = dot(vh, vh) - rad * rad;
+  if (a > 1e-7) {
+    let disc = b * b - a * cc;
+    if (disc <= 0.0) { return vec2f(1.0, 0.0); }
+    let sq = sqrt(disc);
+    return vec2f(max((b - sq) / a, 0.0), min((b + sq) / a, tmax));
+  }
+  return select(vec2f(1.0, 0.0), vec2f(0.0, tmax), cc < 0.0);
+}
+// Ray interval inside spherical altitude shell [h_lo, h_hi], clipped to [0, tmax].
+fn ray_shell(oc: vec3f, rd: vec3f, alt0: f32, h_lo: f32, h_hi: f32, tmax: f32) -> vec2f {
+  let rg = G.planet.w;
+  let s_hi = ray_sphere(oc, rd, rg + h_hi);
+  if (s_hi.y <= 0.0) { return vec2f(1.0, 0.0); }
+  var t0 = 0.0;
+  var t1 = s_hi.y;
+  if (alt0 > h_hi) {
+    if (s_hi.x <= 0.0) { return vec2f(1.0, 0.0); }
+    t0 = s_hi.x;
+    if (h_lo > 0.0) {
+      let s_lo = ray_sphere(oc, rd, rg + h_lo);
+      if (s_lo.x > 0.0 && s_lo.y >= tmax) { t1 = min(t1, s_lo.x); }
+    }
+  } else if (alt0 < h_lo) {
+    let s_lo = ray_sphere(oc, rd, rg + h_lo);
+    if (s_lo.y <= 0.0) { return vec2f(1.0, 0.0); }
+    t0 = s_lo.y;
+  } else if (h_lo > 0.0) {
+    let s_lo = ray_sphere(oc, rd, rg + h_lo);
+    if (s_lo.x > 0.0 && s_lo.y >= tmax) { t1 = min(t1, s_lo.x); }
+  }
+  return vec2f(max(t0, 0.0), min(t1, tmax));
+}
+// Bit i set when the ray from oc (planet-centred) along rd (up to tmax m)
+// passes within reach of storm cell i's 3D cloud envelope: tight tower core,
+// oriented flanking-line box, oriented anvil box clipped strictly to its
+// altitude shell, and tight sub-cloud wall/shelf cloud volume. Rain shafts
+// below the cloud base are tracked separately in g_rain_mask so sub-cloud
+// rays that only cross rain never drag the cloud march down below the base.
 var<private> g_storm_top: f32;
+var<private> g_storm_start: f32;
 var<private> g_storm_end: f32;
+var<private> g_storm_low: bool;
+var<private> g_low_bot: f32;
+var<private> g_rain_mask: u32;
 fn storm_mask(oc: vec3f, rd: vec3f, tmax: f32) -> u32 {
   var m = 0u;
   g_storm_top = 0.0;
+  g_storm_start = tmax;
   g_storm_end = 0.0;
+  g_storm_low = false;
+  g_low_bot = G.cloud.y;
+  g_rain_mask = 0u;
   let n = u32(G.storm.w);
-  let w = G.weather.xyz * 0.001;
+  let rg = G.planet.w;
+  let base = G.cloud.y;
+  let alt0 = length(oc) - rg;
+  let has_nimbo = G.nimbo[0].w > 0.0;
+  var has_sub = alt0 < base;
+  if (!has_sub && dot(oc, rd) < 0.0) {
+    let s_base_ray = ray_sphere(oc, rd, rg + base);
+    has_sub = s_base_ray.x > 0.0 && s_base_ray.x < tmax;
+  }
   for (var i = 0u; i < n; i++) {
-    let c = G.storm_cells[2u * i];
+    let sp = G.storm_cells[2u * i + 1u];
+    let L2 = floor(sp.w) * 500.0;
     let bd = storm_bound(i);
-    let up = normalize(bd.xyz);
-    let rb = bd.w;
-    let v = bd.xyz - oc;
-    let vh = v - up * dot(v, up);
-    let rh = rd - up * dot(rd, up);
-    let a = dot(rh, rh);
-    let b = dot(vh, rh);
-    let cc = dot(vh, vh) - rb * rb;
-    var sp2 = vec2f(0.0, tmax);
-    var hit = cc < 0.0;
-    let L2 = storm_len2(i);
+    let rel_b = bd.xyz - oc;
+    let proj = dot(rel_b, rd);
+    let rad_b = bd.w + L2 + 22000.0;
+    if (proj < -rad_b || proj > tmax + rad_b) { continue; }
+    if (dot(rel_b, rel_b) - proj * proj > rad_b * rad_b) { continue; }
+    let c = G.storm_cells[2u * i];
+    let R = c.w * 1000.0;
+    let mature = smoothstep(0.5, 0.8, sp.x);
+    let sup = storm_super(sp);
+    let lean = storm_lean(sp);
+    let at = sp.y - base;
+    let htop = at * storm_top(sp.x);
+    let bulge = storm_bulge(c);
+    let keep = select(0.56 * bulge + 350.0, 3550.0, has_nimbo);
+    let h_top = base + htop + sp.z + 0.56 * bulge + 600.0;
+    let up0 = normalize(c.xyz - G.weather.xyz * 0.001);
+    let cen0 = up0 * rg;
+    let X0 = normalize(cross(up0, G.storm.xyz));
+    let Y0 = cross(X0, up0);
+    var t0_i = tmax;
+    var t1_i = 0.0;
+    var hit_i = false;
+    var top_i = 0.0;
+    // 1. Core + turrets (2-tier for lone cells so lower-altitude rays avoid
+    //    the upper flared crown cylinder; cloud base - 150 m up to h_top).
     if (L2 > 0.0) {
-      // A squall line: the box round its capsule (along the line, across it).
-      let X = normalize(cross(up, G.storm.xyz));
-      sp2 = ray_box2(vec2f(dot(-vh, X), dot(-vh, cross(X, up))), vec2f(dot(rh, X), dot(rh, cross(X, up))), vec2f(L2 + rb, rb), tmax);
-      hit = sp2.y > sp2.x;
-    } else if (a > 1e-7) {
-      let disc = b * b - a * cc;
-      let sq = sqrt(max(disc, 0.0));
-      sp2 = vec2f(max((b - sq) / a, 0.0), min((b + sq) / a, tmax));
-      hit = disc > 0.0 && sp2.y > sp2.x;
+      let s_ch = ray_shell(oc, rd, alt0, base - 150.0, h_top, tmax);
+      if (s_ch.y > s_ch.x) {
+        let y_min = -(1.55 * R + keep);
+        let y_max = 1.55 * R + htop * lean + keep;
+        let cen_c = cen0 + Y0 * (0.5 * (y_min + y_max));
+        let v = cen_c - oc;
+        let vh = v - up0 * dot(v, up0);
+        let rh = rd - up0 * dot(rd, up0);
+        var iv = ray_box2(vec2f(dot(-vh, X0), dot(-vh, Y0)), vec2f(dot(rh, X0), dot(rh, Y0)), vec2f(L2 + 1.55 * R + keep, 0.5 * (y_max - y_min)), tmax);
+        iv = vec2f(max(iv.x, s_ch.x), min(iv.y, s_ch.y));
+        if (iv.y > iv.x) {
+          hit_i = true;
+          t0_i = min(t0_i, iv.x);
+          t1_i = max(t1_i, iv.y);
+          top_i = max(top_i, h_top);
+        }
+      }
+    } else {
+      let h_mid = base + 0.66 * htop;
+      let s_lo = ray_shell(oc, rd, alt0, base - 150.0, h_mid, tmax);
+      if (s_lo.y > s_lo.x) {
+        let sh_lo = 0.33 * htop * lean;
+        let r_lo = select(1.65, 1.25, sup > 0.5) * R + sh_lo + keep;
+        var iv = ray_cyl_h(oc, rd, cen0 + Y0 * sh_lo, up0, r_lo, tmax);
+        iv = vec2f(max(iv.x, s_lo.x), min(iv.y, s_lo.y));
+        if (iv.y > iv.x) {
+          hit_i = true;
+          t0_i = min(t0_i, iv.x);
+          t1_i = max(t1_i, iv.y);
+          top_i = max(top_i, h_mid);
+        }
+      }
+      let s_hi = ray_shell(oc, rd, alt0, h_mid, h_top, tmax);
+      if (s_hi.y > s_hi.x) {
+        let sh_hi = 0.83 * htop * lean;
+        let r_hi = select(1.96, 1.85, sup > 0.5) * R + 0.17 * htop * lean + max(at - htop, 0.0) * lean + keep;
+        var iv = ray_cyl_h(oc, rd, cen0 + Y0 * sh_hi, up0, r_hi, tmax);
+        iv = vec2f(max(iv.x, s_hi.x), min(iv.y, s_hi.y));
+        if (iv.y > iv.x) {
+          hit_i = true;
+          t0_i = min(t0_i, iv.x);
+          t1_i = max(t1_i, iv.y);
+          top_i = max(top_i, h_top);
+        }
+      }
     }
-    if (hit) {
+    // 2. Flanking line (lone cells only): tight oriented box along fl = (-0.75, -0.66).
+    if (L2 <= 0.0) {
+      let fh0 = htop * 0.64 * mix(0.65, 1.0, mature) + 450.0;
+      let h_fl_hi = base + fh0 + keep;
+      let s_fh = ray_shell(oc, rd, alt0, base - 150.0, h_fl_hi, tmax);
+      if (s_fh.y > s_fh.x) {
+        let fl_w = normalize(Y0 * (-0.75) + X0 * (-0.66));
+        let fl_p = cross(up0, fl_w);
+        let cen_fl = cen0 + fl_w * (1.82 * R) + Y0 * (0.05 * fh0);
+        let v = cen_fl - oc;
+        let vh = v - up0 * dot(v, up0);
+        let rh = rd - up0 * dot(rd, up0);
+        let hx = vec2f(1.90 * R + 0.05 * fh0 + keep, (0.32 + 0.58 * (1.0 - 0.35 * sup)) * R + 0.05 * fh0 + keep);
+        var iv = ray_box2(vec2f(dot(-vh, fl_w), dot(-vh, fl_p)), vec2f(dot(rh, fl_w), dot(rh, fl_p)), hx, tmax);
+        iv = vec2f(max(iv.x, s_fh.x), min(iv.y, s_fh.y));
+        if (iv.y > iv.x) {
+          hit_i = true;
+          t0_i = min(t0_i, iv.x);
+          t1_i = max(t1_i, iv.y);
+          top_i = max(top_i, base + fh0 + 0.56 * bulge + 400.0);
+        }
+      }
+    }
+    // 3. Anvil canopy (mature cells only): tight oriented 2D box clipped to altitude shell.
+    if (mature > 0.0) {
+      let size = smoothstep(4000.0, 13000.0, R);
+      let th_max = mix(mix(1800.0, 3800.0, size), 3600.0, sup) * mature;
+      let k_anv = clamp(R * 0.20, 1100.0, 2400.0) * mature;
+      let ab_min = at - th_max - 150.0 - 750.0 * sup;
+      let sreach_anv = 0.09 * bulge + 100.0;
+      let low_anv = has_nimbo && (base + ab_min - 3550.0 < base + G.cloud.z);
+      let m_anv = max(sreach_anv + 0.25 * k_anv, select(0.0, 3550.0, low_anv)) + 200.0;
+      let h_anv_lo = base + ab_min - m_anv;
+      let h_anv_hi = base + at + 600.0 + sreach_anv;
+      let s_ah = ray_shell(oc, rd, alt0, h_anv_lo, h_anv_hi, tmax);
+      if (s_ah.y > s_ah.x) {
+        let an = storm_anvil(c, sp);
+        let y_min = at * lean - 1.20 * an.y - m_anv;
+        let y_max = at * lean + 1.20 * an.x + m_anv;
+        let x_half = L2 + 1.20 * an.z + 0.72 * an.x * mix(0.42, 0.28, sup) + m_anv;
+        let cen_a = cen0 + Y0 * (0.5 * (y_min + y_max));
+        let v = cen_a - oc;
+        let vh = v - up0 * dot(v, up0);
+        let rh = rd - up0 * dot(rd, up0);
+        var iv = ray_box2(vec2f(dot(-vh, X0), dot(-vh, Y0)), vec2f(dot(rh, X0), dot(rh, Y0)), vec2f(x_half, 0.5 * (y_max - y_min)), tmax);
+        iv = vec2f(max(iv.x, s_ah.x), min(iv.y, s_ah.y));
+        if (iv.y > iv.x) {
+          hit_i = true;
+          t0_i = min(t0_i, iv.x);
+          t1_i = max(t1_i, iv.y);
+          top_i = max(top_i, h_anv_hi);
+        }
+      }
+    }
+    // 4. Sub-cloud wall / shelf cloud (only when the ray enters h < base).
+    if (has_sub && mature > 0.0 && R > 1500.0) {
+      let sub_d = select(min(select(680.0, 1080.0, sup > 0.0) + 0.08 * bulge + 320.0, SHELF_BELOW), SHELF_BELOW, L2 > 0.0);
+      let sub_bot = base - sub_d;
+      let s_sub = ray_shell(oc, rd, alt0, sub_bot, base, tmax);
+      if (s_sub.y > s_sub.x) {
+        var iv = vec2f(1.0, 0.0);
+        if (L2 > 0.0) {
+          let y_min = R * (SHELF_F - 1.9 * SHELF_W - 0.22) - 600.0;
+          let y_max = R * (SHELF_F + SHELF_AHEAD + 0.22) + 1200.0;
+          let cen_s = cen0 + Y0 * (0.5 * (y_min + y_max));
+          let v = cen_s - oc;
+          let vh = v - up0 * dot(v, up0);
+          let rh = rd - up0 * dot(rd, up0);
+          iv = ray_box2(vec2f(dot(-vh, X0), dot(-vh, Y0)), vec2f(dot(rh, X0), dot(rh, Y0)), vec2f(L2 + 0.4 * R + 500.0, 0.5 * (y_max - y_min)), tmax);
+        } else {
+          let r_w = select(0.86, 0.96, sup > 0.0) * R + 0.08 * bulge + 380.0;
+          iv = ray_cyl_h(oc, rd, cen0 - Y0 * (0.35 * R), up0, r_w, tmax);
+        }
+        iv = vec2f(max(iv.x, s_sub.x), min(iv.y, s_sub.y));
+        if (iv.y > iv.x) {
+          hit_i = true;
+          g_storm_low = true;
+          g_low_bot = min(g_low_bot, sub_bot);
+          t0_i = min(t0_i, iv.x);
+          t1_i = max(t1_i, iv.y);
+          top_i = max(top_i, base);
+        }
+      }
+    }
+    // 5. Sub-cloud rain shaft (tracked separately in g_rain_mask).
+    if (has_sub && htop > 1800.0 && R > 800.0) {
+      let s_rn = ray_shell(oc, rd, alt0, -500.0, base, tmax);
+      if (s_rn.y > s_rn.x) {
+        let cen_r = cen0 + G.storm.xyz * (R * mix(0.45, 0.32, sup)) + X0 * (R * 0.28 * sup);
+        var iv = vec2f(1.0, 0.0);
+        if (L2 > 0.0) {
+          let v = cen_r - oc;
+          let vh = v - up0 * dot(v, up0);
+          let rh = rd - up0 * dot(rd, up0);
+          iv = ray_box2(vec2f(dot(-vh, X0), dot(-vh, Y0) + 1.4 * R), vec2f(dot(rh, X0), dot(rh, Y0)), vec2f(L2 + 1.2 * R, 2.6 * R + base * 0.15), tmax);
+        } else {
+          let rt = R * mix(0.8, 0.42, sup) * 1.75 + base * 0.15;
+          iv = ray_cyl_h(oc, rd, cen_r, up0, rt, tmax);
+        }
+        iv = vec2f(max(iv.x, s_rn.x), min(iv.y, s_rn.y));
+        if (iv.y > iv.x) { g_rain_mask |= 1u << i; }
+      }
+    }
+    if (hit_i) {
       m |= 1u << i;
-      g_storm_end = max(g_storm_end, sp2.y);
-      let sp = G.storm_cells[2u * i + 1u];
-      g_storm_top = max(g_storm_top, G.cloud.y + (sp.y - G.cloud.y) * storm_top(sp.x) + sp.z + storm_bulge(c) + 400.0);
+      g_storm_start = min(g_storm_start, t0_i);
+      g_storm_end = max(g_storm_end, t1_i);
+      g_storm_top = max(g_storm_top, top_i);
     }
   }
   return m;
 }
+// Pack the slowly-varying ordinary cloud weather (16-1700 km scales) into a
+// single u32 so the cloud march and shadow map can reuse it across short steps
+// (< 400 m) without re-sampling four 3D textures every 40 m.
+fn cloud_ord_pack(pp: vec3f, hb: f32) -> u32 {
+  let un = normalize(pp);
+  let q = un * 6371.0;  // km on the sphere
+  let w = G.weather.xyz * 0.001;
+  let big = textureSampleLevel(t_noise, s_repeat, q / 1700.0 + vec3f(0.13, 0.71, 0.37), 0.0);
+  let mid = textureSampleLevel(t_noise, s_repeat, (q + w) / 173.0, 0.0);
+  let cell = textureSampleLevel(t_noise, s_repeat, (q + w) / 29.0 + vec3f(0.53, 0.21, 0.87), 0.0);
+  let c = G.cloud.x + (big.r - 0.5) * 0.4 + (mid.r - 0.5) * 0.45 + (cell.g - 0.62) * 0.2;
+  let c0 = clamp(c, 0.0, 1.0);
+  let typ = clamp(1.0 - smoothstep(0.68, 0.98, c0) + (big.g - 0.62) * 0.6, 0.0, 1.0);
+  let tower = smoothstep(0.25, 0.95, c0 * 0.75 + cell.r * 0.55 - 0.1) * (1.0 - 0.75 * smoothstep(0.7, 0.92, c0));
+  let cu_top = 0.28 + 0.72 * tower * tower;
+  let top = mix(mix(0.1, 0.22, smoothstep(0.0, 0.5, typ)), cu_top, smoothstep(0.4, 1.0, typ));
+  var cellv = 0.0;
+  if (typ < 0.9 && (hb < G.cloud.z * top + 400.0 || G.nimbo[0].w > 0.0)) {
+    cellv = textureSampleLevel(t_noise, s_repeat, (pp + G.weather.xyz - un * (hb * 0.85)) / 16000.0 + vec3f(0.41, 0.77, 0.19), 0.0).g;
+  }
+  return pack4x8unorm(vec4f(clamp(c * 0.5 + 0.25, 0.0, 1.0), typ, top, cellv));
+}
+fn cloud_weather_unpack(pp: vec3f, hs: f32, mask: u32, packed: u32) -> Weather {
+  g_storm_sd = -1e6;
+  g_storm_sd2 = -1e6;
+  g_storm_r = 0.0;
+  var st = no_weather();
+  if (mask != 0u && G.storm.w > 0.0) { st = storm_find(pp, hs, mask); }
+  if (hs >= G.cloud.z || hs < 0.0) { return Weather(0.0, 0.0, 0.0, st.cb, st.ci, 0.0, 0.0); }
+  let u = unpack4x8unorm(packed);
+  let c = u.x * 2.0 - 0.5;
+  var ns = 0.0;
+  if (G.nimbo[0].w > 0.0) { ns = nimbo_area(pp); }
+  let cov = clamp(mix(c * (1.0 - st.cb), 1.1, ns), 0.0, 1.0);
+  let typ = max(u.y, st.cb * 0.5) * (1.0 - ns);
+  var top = u.z;
+  if (ns > 0.0) { top = mix(top, clamp((G.nimbo[2].w - G.cloud.y) / G.cloud.z, 0.05, 1.0), ns); }
+  return Weather(cov, typ, top, st.cb, st.ci, u.w, ns);
+}
 fn cloud_weather(pp: vec3f) -> Weather { return cloud_weather_m(pp, ALL_STORMS); }
 fn cloud_weather_m(pp: vec3f, mask: u32) -> Weather {
-  let q = normalize(pp) * 6371.0;  // km on the sphere
-  let w = G.weather.xyz * 0.001;
   let hs = length(pp) - G.planet.w - G.cloud.y;
-  let hb = max(hs, 0.0);
+  g_storm_sd = -1e6;
+  g_storm_sd2 = -1e6;
+  g_storm_r = 0.0;
   var st = no_weather();
   if (mask != 0u && G.storm.w > 0.0) { st = storm_find(pp, hs, mask); }
   // Above the ordinary layer (or under its base) only storm cells reach.
-  if (hs >= G.cloud.z || hs < 0.0) { return Weather(0.0, 0.0, 0.0, st.cb, st.sc, st.sp, 0.0, st.sd, 0.0); }
+  if (hs >= G.cloud.z || hs < 0.0) { return Weather(0.0, 0.0, 0.0, st.cb, st.ci, 0.0, 0.0); }
+  let un = normalize(pp);
+  let q = un * 6371.0;  // km on the sphere
+  let w = G.weather.xyz * 0.001;
+  let hb = max(hs, 0.0);
   // The rain deck closes the sky over its area (its edge breaks up as the
   // cover there allows).
   var ns = 0.0;
@@ -1049,17 +1432,11 @@ fn cloud_weather_m(pp: vec3f, mask: u32) -> Weather {
   // Regional coverage: the slider, pushed around by weather systems and clearings.
   let c = G.cloud.x + (big.r - 0.5) * 0.4 + (mid.r - 0.5) * 0.45 + (cell.g - 0.62) * 0.2;
   // Storm towers take over their surroundings (and the air around them sinks):
-  // no ordinary cumulus inside or against them, which used to show as a
-  // straight-walled block on the tower's face with a seam at the layer top.
-  // (The rain deck is not pushed aside: it runs on up to the tower, and
-  // cloud_shape_f lifts it against the tower's foot. Cut out by the storm's
-  // loose bound it left a round hole around each tower with a straight step.)
+  // no ordinary cumulus inside or against them.
   let cov = clamp(mix(c * (1.0 - st.cb), 1.1, ns), 0.0, 1.0);
   // Broken skies grow cumulus; as it closes in the cloud flattens into stratocumulus, then stratus.
   let typ = clamp(1.0 - smoothstep(0.68, 0.98, cov) + (big.g - 0.62) * 0.6, 0.0, 1.0) * (1.0 - ns);
   // How tall the cumulus in this area grow: mostly fair-weather puffs, some towers.
-  // Towers need broken sky around them; a closed deck caps the convection (storm
-  // cells are separate and still punch through).
   let tower = smoothstep(0.25, 0.95, cov * 0.75 + cell.r * 0.55 - 0.1) * (1.0 - 0.75 * smoothstep(0.7, 0.92, cov));
   let cu_top = 0.28 + 0.72 * tower * tower;
   var top = mix(mix(0.1, 0.22, smoothstep(0.0, 0.5, typ)), cu_top, smoothstep(0.4, 1.0, typ));
@@ -1068,12 +1445,14 @@ fn cloud_weather_m(pp: vec3f, mask: u32) -> Weather {
   // Stratocumulus decks are a mosaic of cells 1-2 km across (Worley, columnar so each
   // cell is one lump). Looked up per column, so light probes reuse it.
   var cellv = 0.0;
-  if (typ < 0.9) { cellv = textureSampleLevel(t_noise, s_repeat, (pp + G.weather.xyz - normalize(pp) * (hb * 0.85)) / 16000.0 + vec3f(0.41, 0.77, 0.19), 0.0).g; }
-  return Weather(cov, typ, top, st.cb, st.sc, st.sp, cellv, st.sd, ns);
+  if (typ < 0.9 && (hb < G.cloud.z * top || ns > 0.0)) { cellv = textureSampleLevel(t_noise, s_repeat, (pp + G.weather.xyz - un * (hb * 0.85)) / 16000.0 + vec3f(0.41, 0.77, 0.19), 0.0).g; }
+  return Weather(cov, typ, top, st.cb, st.ci, cellv, ns);
 }
 // Height of a column's cloud above the base, metres: storm cores reach their anvil.
 fn column_top(wx: Weather) -> f32 {
-  return mix(G.cloud.z * wx.top, (wx.sp.y - G.cloud.y) * storm_top(wx.sp.x), smoothstep(0.3, 0.8, wx.cb));
+  if (wx.ci < 0) { return G.cloud.z * wx.top; }
+  let sp = G.storm_cells[2u * u32(wx.ci) + 1u];
+  return mix(G.cloud.z * wx.top, (sp.y - G.cloud.y) * storm_top(sp.x), smoothstep(0.3, 0.8, wx.cb));
 }
 // Cloud density (0..1) given the weather of its column. detail = erode the edges with
 // fine noise; fine = how much of the close-up octave to add (0 when far away).
@@ -1113,23 +1492,30 @@ fn cloud_shape_f(pp: vec3f, h: f32, wx: Weather, detail: bool, fine: f32) -> f32
   var storm = false;
   var sd = -1e6;
   var bulge = 0.0;
-  if (wx.sc.w > 0.0) {
-    sd = storm_sd(pp, hs, wx.sc, wx.sp, true);
+  var anv0 = 0.0;
+  var sc = vec4f(0.0);
+  var sp = vec4f(0.0);
+  if (wx.ci >= 0 && !g_skip_storm) {
+    let ci = u32(wx.ci);
+    sc = G.storm_cells[2u * ci];
+    sp = G.storm_cells[2u * ci + 1u];
+    sd = storm_sd(pp, hs, ci);
+    g_storm_sd_full = sd;
+    anv0 = g_anvil;
     // The envelope's distance goes out packed with the anvil weight, for the
     // cloud march to tell the rain deck from the towers standing in it by
-    // (16 m steps, out to 4 km). (One more value kept through its light
-    // march, or one more storm_sd, cost ~18% of the cloud pass in every view.)
-    // (+256: a supercell's laminar rotating updraft, which the cloud march
-    // shades from the shadow map: under the anvil it stood in full sun, a
-    // white flying saucer.)
-    g_anvil = round(clamp(-sd, 0.0, 4080.0) * 0.0625) + 0.99 * g_anvil + select(0.0, 256.0, g_wall < -0.3 && wx.sp.x > 1.0 && hs < 0.5 * (wx.sp.y - G.cloud.y));
-    bulge = storm_bulge(wx.sc);
-    storm = sd > -storm_reach(wx.sc, hs);
+    // (16 m steps, out to 4 km). (+256: a supercell's laminar rotating updraft.)
+    g_anvil = round(clamp(-sd, 0.0, 4080.0) * 0.0625) + 0.99 * anv0 + select(0.0, 256.0, g_wall < -0.3 && sp.x > 1.0 && hs < 0.5 * (sp.y - G.cloud.y));
+    bulge = storm_bulge(sc);
+    // Tighter reach on the smooth anvil than on the billowing flanks skips
+    // ~1 km of empty-air noise fetches above and below wide anvils.
+    let sreach = select(mix(0.56, 0.14, anv0), 0.08, hs < 0.0) * bulge + mix(320.0, 180.0, anv0);
+    storm = sd > -sreach;
   }
   let ctop0 = G.cloud.z * wx.top;
   var swell = 0.0;
   if (wx.ns > 0.0 && sd > -DECK_SWELL_D) { swell = deck_swell(sd, wx); }
-  let hn = hb / (ctop0 + swell);  // 0 at the base, 1 at the top of this column
+  let hn = hb / max(ctop0 + swell, 1.0);  // 0 at the base, 1 at the top of this column
   let cumulus = hb > 0.0 && hn < 1.0 && wx.cov > 0.02;
   if (!storm && !cumulus) { return 0.0; }
   let wind = G.weather.xyz;
@@ -1143,35 +1529,47 @@ fn cloud_shape_f(pp: vec3f, h: f32, wx: Weather, detail: bool, fine: f32) -> f32
   // Cumulus (cuw = 1) and stratocumulus / stratus take different noise; both only
   // where the types blend.
   let cuw = select(0.0, smoothstep(0.5, 0.8, wx.typ), cumulus);
+  let un = normalize(pp);
   var n = vec4f(0.5);
   if (cuw < 1.0 || storm) {
     // The base shape, stretched upwards (half the vertical frequency) as it turns
     // cumulus-like, so a lump keeps its footprint as it climbs.
-    n = textureSampleLevel(t_noise, s_repeat, (pp + wind - normalize(pp) * (max(hb, 0.0) * 0.5 * tyc)) / CLOUD_SHAPE, 0.0);
+    n = textureSampleLevel(t_noise, s_repeat, (pp + wind - un * (max(hb, 0.0) * 0.5 * tyc)) / CLOUD_SHAPE, 0.0);
   }
   let fbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
   let base = remap(n.r, fbm - 1.0, 1.0, 0.0, 1.0);
-  // Curl-like warp for the erosion (below); its Worley octaves (~360 m) also bulge
-  // the cumulus outlines into cauliflower lobes.
-  var wv = vec3f(0.0);
-  if (detail) { wv = textureSampleLevel(t_noise, s_repeat, (pp + wind * 1.15) / 2900.0 + vec3f(0.31, 0.62, 0.17), 0.0).gba - 0.62; }
-  else if (g_mean_erode) { wv = vec3f(EF_MEAN - 0.62); }
+  // Pre-test cumulus puff threshold before reading the warp texture, so ONE
+  // single early warp lookup serves cumulus, nimbo, and storm-base branches
+  // while still skipping the 3D fetch on clear-air cumulus steps.
+  var cu_diff = -1.0;
+  var cu_hk = 1.0;
+  if (cuw > 0.0) {
+    let m = textureSampleLevel(t_noise, s_repeat, (pp + wind - un * (hb * 0.8)) / CU_SHAPE + vec3f(0.29, 0.53, 0.71), 0.0);
+    let puff = 1.0 - (1.0 - m.g) * (1.0 - m.g) * 1.15;
+    let ch = pow(smoothstep(0.3, 0.8, m.r), 1.6);
+    let hc = G.cloud.z * clamp(wx.top * mix(0.3, 1.7, ch), 0.07, 1.0);
+    cu_hk = hb / hc;
+    if (cu_hk < 1.0) {
+      let p0 = mix(0.8, 0.28, wx.cov) - (m.r - 0.5) * 0.2;
+      cu_diff = puff - (p0 + (1.0 - p0) * pow(cu_hk, mix(2.4, 1.7, ch)));
+    }
+  }
+  let lowz = select(0.0, (1.0 - smoothstep(0.0, 1500.0, hs)) * smoothstep(-STORM_BELOW, -STORM_BELOW + 250.0, hs), storm);
+  let need_wv_pre = (cu_diff > -0.20) || (cumulus && cuw < 1.0 && wx.ns > 0.0) || (lowz > 0.0 && anv0 < 0.99);
+  var wv = select(vec3f(0.0), vec3f(EF_MEAN - 0.62), g_mean_erode);
+  var have_wv = !detail;
+  if (detail && need_wv_pre) {
+    wv = textureSampleLevel(t_noise, s_repeat, (pp + wind * 1.15) / 2900.0 + vec3f(0.31, 0.62, 0.17), 0.0).gba - 0.62;
+    have_wv = true;
+  }
   var d = 0.0;
   if (cumulus && cuw < 1.0) {
-    // Flat bases; tops that round off as only the strongest cores reach them.
-    // Stratus stays a slab with a soft top. The profile scales the coverage, so
-    // the threshold rises with height and every lump keeps a crisp, dense edge.
-    // Stratocumulus: each cell of the deck is thickest (darkest from below) in the
-    // middle and thins towards its edges, where gaps open as the cover drops.
     let stw = 1.0 - smoothstep(0.45, 0.9, wx.typ);
     var tl = mix(1.0, mix(0.55, 1.0, smoothstep(0.25, 0.8, wx.cell)), stw);
     var bv = mix(base, base * 0.5 + wx.cell * 0.55 + 0.05, stw);
     var bottom = smoothstep(0.0, mix(150.0, 70.0, wx.typ), hb);
     var tf = tl * 0.7;
     if (wx.ns > 0.0) {
-      // Nimbostratus: one deep, dense sheet with a gently lumpy top, and a
-      // ragged base that hangs down in tatters of scud as far as G.nimbo[3].z
-      // below its mean height wherever the noise says.
       tl = mix(tl, 0.9 + 0.1 * wx.cell, wx.ns);
       tf = mix(tf, tl - 0.12, wx.ns);
       let rag = G.nimbo[3].z;
@@ -1184,126 +1582,257 @@ fn cloud_shape_f(pp: vec3f, h: f32, wx: Weather, detail: bool, fine: f32) -> f32
     let prof = bottom * mix(smoothstep(tl, tf, hn), dome, wx.typ);
     let cv = mix(min(wx.cov * 1.15, 1.0), wx.cov, wx.typ);
     d = remap(bv, min(1.0 - cv * prof, 0.999), 1.0, 0.0, 1.0) * (1.0 - cuw);
-    // The rain deck stops at a storm tower's envelope: inside it the tower's
-    // own billowed surface is what shows.
     if (wx.ns > 0.0 && sd > -300.0) { d *= 1.0 - smoothstep(-300.0, 300.0, sd) * wx.ns; }
   }
-  if (cuw > 0.0) {
-    // Cumulus: each cloud is one cell of a columnar Worley field (cells ~2.4 km,
-    // with 1.2 and 0.6 km sub-cells for its turrets) and gets its own height from
-    // a smoother noise (~5 km), heavy-tailed: mostly flat puffs, some mediocris,
-    // the odd towering cumulus, side by side. The cell's cross-section shrinks
-    // with height, so every cloud rounds off into its own dome. (A shared,
-    // height-rising threshold on a nearly column-constant noise topped every
-    // cloud out at about the same height: a flat shelf across the field.)
-    let m = textureSampleLevel(t_noise, s_repeat, (pp + wind - normalize(pp) * (hb * 0.8)) / CU_SHAPE + vec3f(0.29, 0.53, 0.71), 0.0);
-    // Rounded (not conical) peaks: Worley falls off linearly from its cell centre.
-    let puff = 1.0 - (1.0 - m.g) * (1.0 - m.g) * 1.15;
-    let ch = pow(smoothstep(0.3, 0.8, m.r), 1.6);
-    let hc = G.cloud.z * clamp(wx.top * mix(0.3, 1.7, ch), 0.07, 1.0);
-    let hk = hb / hc;
-    if (hk < 1.0) {
-      let p0 = mix(0.8, 0.28, wx.cov) - (m.r - 0.5) * 0.2;
-      let thr = p0 + (1.0 - p0) * pow(hk, mix(2.4, 1.7, ch));
-      let bottom = smoothstep(0.0, 60.0, hb);
-      let lobe = (wv.x * 0.7 + wv.y * 0.3) * 0.5 * smoothstep(0.05, 0.3, hk);
-      d = max(d, clamp((puff - thr + lobe) / 0.5, 0.0, 1.0) * bottom * cuw);
-    }
+  if (cu_diff > -0.20) {
+    let bottom = smoothstep(0.0, 60.0, hb);
+    let lobe = (wv.x * 0.7 + wv.y * 0.3) * 0.5 * smoothstep(0.05, 0.3, cu_hk);
+    d = max(d, clamp((cu_diff + lobe) / 0.5, 0.0, 1.0) * bottom * cuw);
   }
-  // Storm cell: the smooth envelope pushed in and out by billowy turrets (Worley
-  // bulges ~2.5 km and ~1 km), strongest on the tower's upper flanks and the
-  // overshooting top; the anvil (where the envelope is a thin slab high up) is a
-  // smoother ice sheet.
+  // Storm cell: the smooth envelope pushed in and out by billowy turrets
+  // (Worley bulges ~2.5-3.5 km and ~1 km), strongest on the tower's flanks and
+  // overshooting top; the anvil keeps subtle glaciated structure and fibrous edges.
   var anvil = 0.0;
   if (storm) {
-    let at = wx.sp.y - G.cloud.y;
-    anvil = fract(g_anvil) / 0.99;
-    // Billows: Worley fbm (cells ~2.5 km, octaves down to ~0.6 km), rounded at the
-    // cell centres and creased between them (1 - (1 - w)^2), so the turrets bulge
-    // out as cauliflower lobes rather than cones or smooth swells.
-    // Smaller towers (showers) get proportionally smaller billows, the noise
-    // scaled about the cell's centre (so it holds still as a cell grows): with
-    // billows as big as a giant's, a 4 km tower stood as a straight-walled drum.
-    let un = normalize(pp);
-    let rel = (un * 6371.0 + G.weather.xyz * 0.001 - wx.sc.xyz) * 1000.0 + un * hs;
-    let tq = (pp + wind) / 20000.0 + rel * ((1.0 / clamp(wx.sc.w / 5.0, 0.4, 1.0) - 1.0) / 20000.0);
+    let at = sp.y - G.cloud.y;
+    anvil = anv0;
+    let rel = (un * 6371.0 + G.weather.xyz * 0.001 - sc.xyz) * 1000.0 + un * hs;
+    let tq = (pp + wind) / 20000.0 + rel * ((1.0 / clamp(sc.w / 7.0, 0.45, 1.35) - 1.0) / 20000.0);
     let tn = textureSampleLevel(t_noise, s_repeat, tq + vec3f(0.71, 0.33, 0.12), 0.0);
     let tw = tn.g * 0.5 + tn.b * 0.3 + n.g * 0.2;
     let bl = 1.0 - (1.0 - tw) * (1.0 - tw);
-    // Flat, rain-free base: the turrets only bulge out higher up.
-    // Under the base (the wall cloud) ragged scud: the finer base noise as well,
-    // and a soft edge, or it hangs as a box with straight walls. (Not more bulge:
-    // everything under the base sits within ~30 m of the envelope there, and
-    // stronger noise filled the whole band under it with cloud.)
     let under = 1.0 - smoothstep(-200.0, 0.0, hs);
-    // The flanks between the foot and the head swell out in turrets a km or
-    // two proud of the envelope (with the weaker swell there the tower stood as
-    // a straight-walled drum from afar).
-    let hcf = hs / max(at * storm_top(wx.sp.x), 1.0);
-    // A young tower (a shower, towering cumulus) billows right down its walls to
-    // the flat base (not under it): with the swell faded out over the lowest
-    // 2 km it stood on a smooth, straight-walled plinth.
-    let wallq = (1.0 - smoothstep(0.4, 0.6, wx.sp.x)) * smoothstep(0.0, 400.0, hs + 30.0 - sd);
-    let flank = max(smoothstep(0.08, 0.3, hcf), wallq) * (1.0 - smoothstep(0.6, 0.82, hcf)) * (1.0 - anvil);
-    // (Only outwards: deeper creases cut the turrets off into floating balls.)
+    let hcf = hs / max(at * storm_top(sp.x), 1.0);
+    let wallq = (1.0 - smoothstep(0.4, 0.6, sp.x)) * smoothstep(0.0, 400.0, hs + 30.0 - sd);
+    let flank = max(smoothstep(0.08, 0.3, hcf), wallq) * (1.0 - smoothstep(0.6, 0.84, hcf)) * (1.0 - anvil);
     let bo = mix(bl, base * 0.6 + bl * 0.4, under) - 0.78;
-    // (A squall line's shelf: its upper face smooth and laminar, lam; storm_sd.)
-    // Its underside (lineu) is torn into ragged scud with a crisp edge.
     let lam = max(-g_wall, 0.0);
     let lineu = max(g_wall - 1.0, 0.0);
-    // (A supercell's rotating updraft and its mammatus are smooth too, lam
-    // above the base.)
-    var sdn = sd + bo * bulge * mix(1.3, 0.12, anvil) * (1.0 + 0.9 * flank * step(0.0, bo)) * (1.0 - 0.85 * lam) * select(mix(0.3, 1.0, max(smoothstep(0.0, 2000.0, hs), wallq)), mix(0.1, 0.25, min(abs(g_wall), 1.0)) * (1.0 - 0.15 * lineu), hs < 0.0);
-    // Low down (the lower flanks, the base, the wall cloud) the big billows are
-    // weak, and with nothing finer the outline ran straight for kilometres:
-    // lumps a few hundred metres across break it up into ragged scud, fading
-    // out towards the bottom of the band under the base.
-    let lowz = (1.0 - smoothstep(0.0, 1500.0, hs)) * smoothstep(-STORM_BELOW, -STORM_BELOW + 250.0, hs);
-    sdn += (wv.x * 0.7 + wv.y * 0.3 + 0.08) * 650.0 * lowz * (1.0 - anvil) * (1.0 - 0.9 * lam) * (1.0 - 0.3 * lineu);
-    // The anvil's underside is a soft, sagging veil, not a crisp wall.
-    let env = smoothstep(0.0, mix(mix(mix(mix(220.0, 500.0, anvil), 700.0, under), 150.0, lam), 120.0, lineu), sdn);
-    // Anvils are smooth ice sheets; the tower is solid and keeps the noise.
-    let body = mix(0.6 + base * 0.6, 0.55 + base * 0.3, anvil);
+    var sdn = sd + bo * bulge * mix(1.3, 0.36, anvil) * (1.0 + 0.9 * flank * step(0.0, bo)) * (1.0 - 0.85 * lam) * select(mix(0.3, 1.0, max(smoothstep(0.0, 2000.0, hs), wallq)), mix(0.1, 0.25, min(abs(g_wall), 1.0)) * (1.0 - 0.15 * lineu), hs < 0.0);
+    if (lowz > 0.0 && anvil < 0.99 && lam < 0.99) {
+      sdn += (wv.x * 0.7 + wv.y * 0.3 + 0.08) * 650.0 * lowz * (1.0 - anvil) * (1.0 - 0.9 * lam) * (1.0 - 0.3 * lineu);
+    }
+    let env = smoothstep(0.0, mix(mix(mix(mix(220.0, 380.0, anvil), 700.0, under), 150.0, lam), 120.0, lineu), sdn);
+    let body = mix(0.6 + base * 0.6, 0.55 + base * 0.35, anvil);
     d = max(d, mix(remap(body * env, 0.2, 1.0, 0.0, 1.0), body * env, anvil));
   }
   if (d <= 0.0) { return smooth_d * far; }
+  let edge_w = mix(0.22, 0.16, tyc);
   if (detail || g_mean_erode) {
-    var ef = EF_MEAN;
-    if (detail) {
-      // Curl-like warp so the erosion swirls instead of looking like stamped noise.
-      let pe = pp + wind * 1.3 + wv * 420.0;
-      let e = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_DETAIL, 0.0);
-      ef = e.g * 0.625 + e.b * 0.25 + e.a * 0.125;
-      // In the anvil the ice is drawn out along the wind into fibres: the same
-      // noise stretched 4x downwind. (A stretch scaled by the anvil weight would
-      // slide the noise by kilometres wherever that weight changes.)
-      if (anvil > 0.02) {
-        let ps = pe - G.storm.xyz * (dot(pe, G.storm.xyz) * 0.75);
-        let ea = textureSampleLevel(t_noise, s_repeat, ps / CLOUD_DETAIL + vec3f(0.37, 0.11, 0.73), 0.0);
-        ef = mix(ef, ea.g * 0.5 + ea.b * 0.3 + ea.a * 0.2, anvil);
+    let erode_k = mix(mix(0.5, 0.62, tyc), 0.6, cuw) * mix(1.0, 0.50, anvil) * mix(0.35, 1.0, g_erode) * (1.0 - 0.7 * max(-g_wall, 0.0) * select(0.0, 1.0, storm));
+    // Exact saturation check: whenever d >= erode_k + edge_w * (1 - erode_k),
+    // even maximum erosion (ed = 1) leaves smoothstep(0, edge_w, remap(d, ...))
+    // identically 1.0, so all detail/anvil/fine 3D texture reads can be skipped.
+    if (d < erode_k + edge_w * (1.0 - erode_k)) {
+      var ef = EF_MEAN;
+      if (detail) {
+        if (!have_wv) {
+          wv = textureSampleLevel(t_noise, s_repeat, (pp + wind * 1.15) / 2900.0 + vec3f(0.31, 0.62, 0.17), 0.0).gba - 0.62;
+        }
+        // Curl-like warp so the erosion swirls instead of looking like stamped noise.
+        let pe = pp + wind * 1.3 + wv * 420.0;
+        let e = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_DETAIL, 0.0);
+        ef = e.g * 0.625 + e.b * 0.25 + e.a * 0.125;
+        // In the anvil the ice is drawn out along the wind into fibres.
+        if (anvil > 0.02) {
+          let ps = pe - G.storm.xyz * (dot(pe, G.storm.xyz) * 0.75);
+          let ea = textureSampleLevel(t_noise, s_repeat, ps / CLOUD_DETAIL + vec3f(0.37, 0.11, 0.73), 0.0);
+          ef = mix(ef, ea.g * 0.5 + ea.b * 0.3 + ea.a * 0.2, anvil);
+        }
+        if (fine > 0.0) {
+          // Close up, a finer octave keeps the billows crisp instead of going soft.
+          let e2 = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_FINE + vec3f(0.17, 0.59, 0.43), 0.0);
+          ef = mix(ef, ef * 0.72 + (e2.g * 0.7 + e2.b * 0.3) * 0.28, fine);
+        }
       }
-      if (fine > 0.0) {
-        // Close up, a finer octave keeps the billows crisp instead of going soft.
-        let e2 = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_FINE + vec3f(0.17, 0.59, 0.43), 0.0);
-        ef = mix(ef, ef * 0.72 + (e2.g * 0.7 + e2.b * 0.3) * 0.28, fine);
-      }
+      let low = select(1.0 - smoothstep(0.02, 0.13, hn), 1.0 - smoothstep(-STORM_BELOW, 300.0, hs), storm);
+      let wisp = max(low * 0.8, anvil);
+      let ed = mix(1.0 - ef, ef, wisp);
+      d = remap(d, ed * erode_k, 1.0, 0.0, 1.0);
+    } else {
+      d = 1.0;
     }
-    // Worley is brightest at cell centres. Eroding by its inverse keeps round
-    // bulges (cauliflower billows); eroding by it directly leaves ragged, wispy
-    // strands, which suits the undersides and the anvil's fibrous ice.
-    let low = select(1.0 - smoothstep(0.02, 0.13, hn), 1.0 - smoothstep(-STORM_BELOW, 300.0, hs), storm);
-    let wisp = max(low * 0.8, anvil);
-    let ed = mix(1.0 - ef, ef, wisp);
-    d = remap(d, ed * mix(mix(0.5, 0.62, tyc), 0.6, cuw) * mix(1.0, 0.35, anvil) * mix(0.35, 1.0, g_erode) * (1.0 - 0.7 * max(-g_wall, 0.0) * select(0.0, 1.0, storm)), 1.0, 0.0, 1.0);
   }
   // Real cloud edges are abrupt: a few tens of metres from clear air to dense.
-  d = smoothstep(0.0, mix(0.22, 0.16, tyc), d) * mix(0.55, 1.0, max(wx.typ, min(wx.cb * 4.0, 1.0)));
+  d = smoothstep(0.0, edge_w, d) * mix(0.55, 1.0, max(wx.typ, min(wx.cb * 4.0, 1.0)));
   // Anvil ice scatters less per metre than the tower's water droplets: light gets
   // deeper in, so the sheet glows instead of hanging as a dark slab.
   d *= 1.0 - 0.5 * anvil;
   return mix(d, smooth_d, far);
 }
 fn cloud_shape(pp: vec3f, h: f32, wx: Weather, detail: bool) -> f32 { return cloud_shape_f(pp, h, wx, detail, 0.0); }
+// Specialized ordinary-cloud density evaluator for zero-storm, zero-rain-deck
+// scenes (clouds.wgsl `fs_plain` and `cshadow_ray_plain`): identical cumulus /
+// stratocumulus / stratus math without compiling storm_sd or nimbo into the
+// pipeline, halving register footprint and boosting GPU occupancy.
+// ow: vec4f(cov, typ, top, cellv).
+fn cloud_shape_plain(pp: vec3f, h: f32, ow: vec4f, detail: bool, fine: f32) -> f32 {
+  let hb = h - G.cloud.y;
+  if (hb <= 0.0 || ow.x <= 0.02) { return 0.0; }
+  let hn = hb / max(G.cloud.z * ow.z, 1.0);
+  if (hn >= 1.0) { return 0.0; }
+  let far = smoothstep(40000.0, 400000.0, G.up.w);
+  let smooth_d = ow.x * ow.x * 0.5 * smoothstep(0.0, 0.2, hn) * smoothstep(1.0, 0.6, hn);
+  if (far >= 1.0) { return smooth_d; }
+  let wind = G.weather.xyz;
+  let cuw = smoothstep(0.5, 0.8, ow.y);
+  let un = normalize(pp);
+  var cu_diff = -1.0;
+  var cu_hk = 1.0;
+  if (cuw > 0.0) {
+    let m = textureSampleLevel(t_noise, s_repeat, (pp + wind - un * (hb * 0.8)) / CU_SHAPE + vec3f(0.29, 0.53, 0.71), 0.0);
+    let puff = 1.0 - (1.0 - m.g) * (1.0 - m.g) * 1.15;
+    let ch = pow(smoothstep(0.3, 0.8, m.r), 1.6);
+    let hc = G.cloud.z * clamp(ow.z * mix(0.3, 1.7, ch), 0.07, 1.0);
+    cu_hk = hb / hc;
+    if (cu_hk < 1.0) {
+      let p0 = mix(0.8, 0.28, ow.x) - (m.r - 0.5) * 0.2;
+      cu_diff = puff - (p0 + (1.0 - p0) * pow(cu_hk, mix(2.4, 1.7, ch)));
+    }
+  }
+  var wv = select(vec3f(0.0), vec3f(EF_MEAN - 0.62), g_mean_erode);
+  var have_wv = !detail;
+  if (detail && cu_diff > -0.20) {
+    wv = textureSampleLevel(t_noise, s_repeat, (pp + wind * 1.15) / 2900.0 + vec3f(0.31, 0.62, 0.17), 0.0).gba - 0.62;
+    have_wv = true;
+  }
+  var d = 0.0;
+  if (cuw < 1.0) {
+    let n = textureSampleLevel(t_noise, s_repeat, (pp + wind - un * (hb * 0.5 * ow.y)) / CLOUD_SHAPE, 0.0);
+    let fbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
+    let base = remap(n.r, fbm - 1.0, 1.0, 0.0, 1.0);
+    let stw = 1.0 - smoothstep(0.45, 0.9, ow.y);
+    let tl = mix(1.0, mix(0.55, 1.0, smoothstep(0.25, 0.8, ow.w)), stw);
+    let bv = mix(base, base * 0.5 + ow.w * 0.55 + 0.05, stw);
+    let bottom = smoothstep(0.0, mix(150.0, 70.0, ow.y), hb);
+    let dome = 1.0 - pow(hn, mix(3.0, 1.6, ow.y));
+    let prof = bottom * mix(smoothstep(tl, tl * 0.7, hn), dome, ow.y);
+    let cv = mix(min(ow.x * 1.15, 1.0), ow.x, ow.y);
+    d = remap(bv, min(1.0 - cv * prof, 0.999), 1.0, 0.0, 1.0) * (1.0 - cuw);
+  }
+  if (cu_diff > -0.20) {
+    let bottom = smoothstep(0.0, 60.0, hb);
+    let lobe = (wv.x * 0.7 + wv.y * 0.3) * 0.5 * smoothstep(0.05, 0.3, cu_hk);
+    d = max(d, clamp((cu_diff + lobe) / 0.5, 0.0, 1.0) * bottom * cuw);
+  }
+  if (d <= 0.0) { return smooth_d * far; }
+  let edge_w = mix(0.22, 0.16, ow.y);
+  if (detail || g_mean_erode) {
+    let erode_k = mix(mix(0.5, 0.62, ow.y), 0.6, cuw) * mix(0.35, 1.0, g_erode);
+    if (d < erode_k + edge_w * (1.0 - erode_k)) {
+      var ef = EF_MEAN;
+      if (detail) {
+        if (!have_wv) {
+          wv = textureSampleLevel(t_noise, s_repeat, (pp + wind * 1.15) / 2900.0 + vec3f(0.31, 0.62, 0.17), 0.0).gba - 0.62;
+        }
+        let pe = pp + wind * 1.3 + wv * 420.0;
+        let e = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_DETAIL, 0.0);
+        ef = e.g * 0.625 + e.b * 0.25 + e.a * 0.125;
+        if (fine > 0.0) {
+          let e2 = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_FINE + vec3f(0.17, 0.59, 0.43), 0.0);
+          ef = mix(ef, ef * 0.72 + (e2.g * 0.7 + e2.b * 0.3) * 0.28, fine);
+        }
+      }
+      let low = 1.0 - smoothstep(0.02, 0.13, hn);
+      let ed = mix(1.0 - ef, ef, low * 0.8);
+      d = remap(d, ed * erode_k, 1.0, 0.0, 1.0);
+    } else {
+      d = 1.0;
+    }
+  }
+  d = smoothstep(0.0, edge_w, d) * mix(0.55, 1.0, ow.y);
+  return mix(d, smooth_d, far);
+}
+// Storm cell quality tier from Globals.detail.w: 1 Low, 2 Medium, 3 High, 4 Ultra
+// (0 falls back to High so zeroed Globals keep full quality).
+fn storm_tier() -> i32 {
+  let w = abs(G.detail.w); // negative for --still shots
+  return select(i32(w + 0.5), 3, w < 0.5);
+}
+// Pure storm-cell density evaluator (zero ordinary cumulus/stratocumulus/nimbo)
+// for the decoupled storm pass (`clouds.wgsl` `fs_storm`): keeps register
+// footprint small so the GPU runs at high occupancy while rendering full storms.
+fn cloud_shape_storm_only(pp: vec3f, h: f32, ci: u32, cb: f32, detail: bool, fine: f32) -> f32 {
+  let hs = h - G.cloud.y;
+  if (hs <= -SHELF_BELOW || h >= G.cloud.w) { return 0.0; }
+  let sc = G.storm_cells[2u * ci];
+  let sp = G.storm_cells[2u * ci + 1u];
+  let sd = storm_sd(pp, hs, ci);
+  g_storm_sd_full = sd;
+  let anvil = g_anvil;
+  let bulge = storm_bulge(sc);
+  let lowz = (1.0 - smoothstep(0.0, 1500.0, hs)) * smoothstep(-STORM_BELOW, -STORM_BELOW + 250.0, hs);
+  let sreach = select(mix(0.55, 0.085, anvil), 0.08, hs < 0.0) * bulge + 300.0 * lowz * (1.0 - anvil) + 40.0;
+  if (sd <= -sreach) { return 0.0; }
+  let far = smoothstep(40000.0, 400000.0, G.up.w);
+  if (far >= 1.0) { return 0.0; }
+  g_meso = g_wall < -0.3 && sp.x > 1.0 && hs < 0.5 * (sp.y - G.cloud.y);
+  let wind = G.weather.xyz;
+  let un = normalize(pp);
+  let n = textureSampleLevel(t_noise, s_repeat, (pp + wind - un * (max(hs, 0.0) * 0.5 * cb)) / CLOUD_SHAPE, 0.0);
+  let fbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
+  let base = remap(n.r, fbm - 1.0, 1.0, 0.0, 1.0);
+  let at = sp.y - G.cloud.y;
+  let rel = (un * 6371.0 + G.weather.xyz * 0.001 - sc.xyz) * 1000.0 + un * hs;
+  let tq = (pp + wind) / 20000.0 + rel * ((1.0 / clamp(sc.w / 7.0, 0.45, 1.35) - 1.0) / 20000.0);
+  let tn = textureSampleLevel(t_noise, s_repeat, tq + vec3f(0.71, 0.33, 0.12), 0.0);
+  let tw = tn.g * 0.5 + tn.b * 0.3 + n.g * 0.2;
+  let bl = 1.0 - (1.0 - tw) * (1.0 - tw);
+  let under = 1.0 - smoothstep(-200.0, 0.0, hs);
+  let hcf = hs / max(at * storm_top(sp.x), 1.0);
+  let wallq = (1.0 - smoothstep(0.4, 0.6, sp.x)) * smoothstep(0.0, 400.0, hs + 30.0 - sd);
+  let flank = max(smoothstep(0.08, 0.3, hcf), wallq) * (1.0 - smoothstep(0.6, 0.84, hcf)) * (1.0 - anvil);
+  let bo = mix(bl, base * 0.6 + bl * 0.4, under) - 0.78;
+  let lam = max(-g_wall, 0.0);
+  let lineu = max(g_wall - 1.0, 0.0);
+  var sdn = sd + bo * bulge * mix(1.3, 0.36, anvil) * (1.0 + 0.9 * flank * step(0.0, bo)) * (1.0 - 0.85 * lam) * select(mix(0.3, 1.0, max(smoothstep(0.0, 2000.0, hs), wallq)), mix(0.1, 0.25, min(abs(g_wall), 1.0)) * (1.0 - 0.15 * lineu), hs < 0.0);
+  var wv = select(vec3f(0.0), vec3f(EF_MEAN - 0.62), g_mean_erode);
+  var have_wv = !detail;
+  if (lowz > 0.0 && anvil < 0.99 && lam < 0.99) {
+    if (detail) {
+      wv = textureSampleLevel(t_noise, s_repeat, (pp + wind * 1.15) / 2900.0 + vec3f(0.31, 0.62, 0.17), 0.0).gba - 0.62;
+      have_wv = true;
+    }
+    sdn += (wv.x * 0.7 + wv.y * 0.3 + 0.08) * 650.0 * lowz * (1.0 - anvil) * (1.0 - 0.9 * lam) * (1.0 - 0.3 * lineu);
+  }
+  let env = smoothstep(0.0, mix(mix(mix(mix(220.0, 380.0, anvil), 700.0, under), 150.0, lam), 120.0, lineu), sdn);
+  let body = mix(0.6 + base * 0.6, 0.55 + base * 0.35, anvil);
+  var d = mix(remap(body * env, 0.2, 1.0, 0.0, 1.0), body * env, anvil);
+  if (d <= 0.0) { return 0.0; }
+  let edge_w = mix(0.22, 0.16, cb);
+  if (detail || g_mean_erode) {
+    let erode_k = mix(0.5, 0.62, cb) * mix(1.0, 0.50, anvil) * mix(0.35, 1.0, g_erode) * (1.0 - 0.7 * lam);
+    if (d < erode_k + edge_w * (1.0 - erode_k)) {
+      var ef = EF_MEAN;
+      if (detail) {
+        if (!have_wv) {
+          wv = textureSampleLevel(t_noise, s_repeat, (pp + wind * 1.15) / 2900.0 + vec3f(0.31, 0.62, 0.17), 0.0).gba - 0.62;
+        }
+        let pe = pp + wind * 1.3 + wv * 420.0;
+        let e = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_DETAIL, 0.0);
+        ef = e.g * 0.625 + e.b * 0.25 + e.a * 0.125;
+        if (anvil > 0.02 && storm_tier() >= 2) {
+          let ps = pe - G.storm.xyz * (dot(pe, G.storm.xyz) * 0.75);
+          let ea = textureSampleLevel(t_noise, s_repeat, ps / CLOUD_DETAIL + vec3f(0.37, 0.11, 0.73), 0.0);
+          ef = mix(ef, ea.g * 0.5 + ea.b * 0.3 + ea.a * 0.2, anvil);
+        }
+        if (fine > 0.0) {
+          let e2 = textureSampleLevel(t_noise, s_repeat, pe / CLOUD_FINE + vec3f(0.17, 0.59, 0.43), 0.0);
+          ef = mix(ef, ef * 0.72 + (e2.g * 0.7 + e2.b * 0.3) * 0.28, fine);
+        }
+      }
+      let low = 1.0 - smoothstep(-STORM_BELOW, 300.0, hs);
+      let wisp = max(low * 0.8, anvil);
+      let ed = mix(1.0 - ef, ef, wisp);
+      d = remap(d, ed * erode_k, 1.0, 0.0, 1.0);
+    } else {
+      d = 1.0;
+    }
+  }
+  d = smoothstep(0.0, edge_w, d) * mix(0.55, 1.0, min(cb * 4.0, 1.0));
+  d *= (1.0 - 0.5 * anvil) * (1.0 - far);
+  return d;
+}
 fn cloud_density(pp: vec3f, h: f32, cheap: bool) -> f32 {
   if (h <= G.cloud.y - SHELF_BELOW || h >= G.cloud.w) { return 0.0; }
   return cloud_shape(pp, h, cloud_weather(pp), !cheap);
@@ -1339,17 +1868,15 @@ fn cs_fetch(uv: vec2f, layer: i32, hq: bool) -> vec4f {
   return g0.y * (g0.x * textureSampleLevel(t_cshadow, s_clamp, c0, layer, 0.0) + g1.x * textureSampleLevel(t_cshadow, s_clamp, vec2f(c1.x, c0.y), layer, 0.0))
        + g1.y * (g0.x * textureSampleLevel(t_cshadow, s_clamp, vec2f(c0.x, c1.y), layer, 0.0) + g1.x * textureSampleLevel(t_cshadow, s_clamp, c1, layer, 0.0));
 }
-fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
+fn cloud_sun_at(pc: vec3f, r: f32, h: f32, hq: bool) -> CloudSun {
   var o = CloudSun(1.0, 0.0);
   let base = G.cs[3].x;
   let top = G.cs[3].y;
-  let r = length(pc);
-  let h = r - G.planet.w;
   if (G.cs[4].w < 0.5 || G.start.x > 0.0 || h >= top) { return o; }
   // The sun the maps were drawn for (it differs from this frame's by a fraction
   // of a degree while the clock runs fast).
   let sun = G.cs[4].xyz;
-  let mu = dot(pc / r, sun);
+  let mu = dot(pc, sun) / r;
   let R = G.planet.w + base;
   // Exactly along the sun (a low sun's rays cross the base tens of km away): forward
   // to the base from below it, back down to it from inside the layer.
@@ -1383,6 +1910,10 @@ fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
   o.vis = mix(t + (1.0 - t) * 0.22 / (1.0 + 0.12 * od + 0.01 * od * od), 1.0, fade);
   o.closed = v.w * (1.0 - fade) * (1.0 - smoothstep(base, base + 600.0, h));
   return o;
+}
+fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
+  let r = length(pc);
+  return cloud_sun_at(pc, r, r - G.planet.w, hq);
 }
 // High cirrus: a thin streaky sheet at CIRRUS_H. Returns optical thickness.
 fn cirrus(pp: vec3f) -> f32 {
@@ -1466,10 +1997,13 @@ fn shadow_at(P: vec3f, N: vec3f) -> f32 {
   return shadow_world(P, N) * plane_shadow(P, N);
 }
 fn shadow_world(P: vec3f, N: vec3f) -> f32 {
+  let cmask = u32(G.lite.w);
+  if (cmask == 0u) { return 1.0; }
   var acc = 0.0;
   var rem = 1.0;
   let texel = 1.0 / f32(textureDimensions(t_shadow).x);
   for (var c = 0; c < 3; c++) {
+    if ((cmask & (1u << u32(c))) == 0u) { continue; }
     let tex = G.csm[c];
     let q = G.shadow_vp[c] * vec4f(P + N * tex * 1.8 + G.sun_dir.xyz * tex * 0.8, 1.0);
     let uv = q.xy * vec2f(0.5, -0.5) + 0.5;
@@ -1494,7 +2028,7 @@ fn crater_field(P: vec3f) -> vec4f {
   var o = vec4f(0.0);
   for (var i = 0; i < 8; i++) {
     let c = G.crater[i];
-    if (c.w <= 0.0) { continue; }
+    if (c.w <= 0.0) { break; }
     let v = P - c.xyz;
     if (abs(v.x) > c.w * 2.0 || abs(v.y) > c.w * 2.0 || abs(v.z) > c.w * 2.0) { continue; }
     let upn = normalize(c.xyz - G.planet.xyz);
@@ -1820,8 +2354,10 @@ fn storm_shade(pp: vec3f) -> f32 {
   let q = un * 6371.0 + G.weather.xyz * 0.001;
   var dark = 0.0;
   let n = u32(G.storm.w);
-  for (var i = 0u; i < n; i++) {
-    if ((m & (1u << i)) == 0u) { continue; }
+  var rem = m & select((1u << n) - 1u, 0xffffffffu, n >= 32u);
+  while (rem != 0u) {
+    let i = firstTrailingBit(rem);
+    rem &= rem - 1u;
     let c = G.storm_cells[2u * i];
     let sp = G.storm_cells[2u * i + 1u];
     let R = c.w * 1000.0;
@@ -1832,7 +2368,7 @@ fn storm_shade(pp: vec3f) -> f32 {
     let rc = length(vec2f(dw0 - 0.25 * R, cx)) / R;
     let core = (1.0 - smoothstep(0.7, 1.7, rc)) * smoothstep(0.3, 0.75, sp.x) * smoothstep(1500.0, 4000.0, R);
     let an = storm_anvil(c, sp);
-    let lc = an.z + max(dw0, 0.0) * mix(0.45, 0.3, storm_super(sp));
+    let lc = an.z + max(dw0, 0.0) * mix(0.42, 0.28, storm_super(sp));
     let rn = length(vec2f(dw0 / select(an.y, an.x, dw0 > 0.0), cx / lc));
     let lid = (1.0 - smoothstep(0.5, 1.05, rn)) * 0.55 * smoothstep(0.5, 0.8, sp.x);
     dark = max(dark, max(core, lid));
@@ -1863,7 +2399,9 @@ fn light_at_nv(P: vec3f) -> Light {
   let upn = pp / r;
   let h = r - G.planet.w;
   let mu = dot(upn, G.sun_dir.xyz);
-  let sun = sun_trans(h, mu) * G.sun_dir.w * cloud_sun(pp, true).vis;
+  let st = sun_trans(h, mu);
+  var sun = st * G.sun_dir.w;
+  if (sun.x + sun.y + sun.z > 0.0) { sun *= cloud_sun_at(pp, r, h, true).vis; }
   // Skylight falls off steeply once the sun is down: about half a decade per
   // 3 degrees of twilight (the exp term), so a street at blue hour is far
   // darker than the glowing sky above it rather than as bright as overcast day.
@@ -1881,11 +2419,11 @@ fn light_at_nv(P: vec3f) -> Light {
   let mum = dot(upn, G.moon.xyz);
   let night = 1.0 - smoothstep(-0.12, 0.02, mu);
   amb += vec3f(0.30, 0.45, 0.85) * 0.16 * smoothstep(-0.1, 0.35, mum) * G.moon.w * mix(1.0, 0.7, G.cloud.x);
-  amb += vec3f(0.0016, 0.0024, 0.0048) * night;
+  amb += vec3f(0.0011, 0.0021, 0.0052) * night;
   // The towns' light sent back down by the haze and the cloud base above.
   var cup = vec3f(0.0);
   if (glow_on()) { cup = city_up(P, 600.0) * (GLOW_GAIN / PI); }
-  amb += cup * (0.012 + 0.05 * clamp(G.cloud.x, 0.0, 1.0));
+  amb += cup * (0.0025 + 0.032 * clamp(G.cloud.x, 0.0, 1.0));
   var sun_s = sun;
   if (G.nimbo[0].w > 0.0) {
     // Under the rain deck: only the flat grey light diffusing through it (the
@@ -1908,7 +2446,7 @@ fn light_at_nv(P: vec3f) -> Light {
 fn env_reflect(P: vec3f, R: vec3f, upn: vec3f, clouds: bool) -> vec3f {
   let ru = dot(R, upn);
   var sky = sky_lut(normalize(R + upn * max(0.015 - ru, 0.0)));
-  if (clouds && ru > 0.02) {
+  if (clouds && ru > 0.02 && G.cloud.x > 0.001 && G.lite.y > 0.5) {
     let pp = P - G.planet.xyz;
     let h = length(pp) - G.planet.w;
     let mid = G.cloud.y + 400.0;
@@ -1935,7 +2473,28 @@ fn env_reflect(P: vec3f, R: vec3f, upn: vec3f, clouds: bool) -> vec3f {
 // Light of a fire: a glowing ball of radius light_pos.w whose light falls off
 // with the square of the distance beyond it.
 fn point_light(P: vec3f, N: vec3f) -> vec3f {
-  return fire_light(P, N) + spot_light(P, N);
+  return fire_light(P, N) + spot_light(P, N) + flood_light(P, N);
+}
+// Apron floodlights on their masts (G.flood): wide beams aimed down at the
+// apron, bright pools under each mast fading into the dark beyond, falling
+// off with the square of the distance. No shadows: what stands under them is
+// lit where it faces the mast.
+fn flood_light(P: vec3f, N: vec3f) -> vec3f {
+  var c = 0.0;
+  for (var i = 0; i < 8; i++) {
+    let s = G.flood[2 * i];
+    if (s.w <= 0.0) { break; }
+    let b = G.flood[2 * i + 1];
+    let d = s.xyz - P;
+    let r2 = max(dot(d, d), 25.0);
+    let l = d * inverseSqrt(r2);
+    let ca = dot(-l, b.xyz);
+    if (ca <= b.w) { continue; }
+    let x = (ca - b.w) / (1.0 - b.w);
+    let beam = x * x * (3.0 - 2.0 * x) * (0.4 + 0.6 * x);
+    c += s.w * beam * max(dot(N, l), 0.0) / r2 * exp(-sqrt(r2) * 2.5e-5 * max(G.weather.w, 0.2));
+  }
+  return vec3f(1.0, 0.88, 0.70) * c;
 }
 // The one burning light (a crash's fire, the afterburners).
 fn fire_light(P: vec3f, N: vec3f) -> vec3f {
@@ -2101,9 +2660,19 @@ fn snow_track_at(P: vec3f, dist: f32, fw: f32) -> vec4f {
 fn shade(P: vec3f, N: vec3f, albedo: vec3f) -> vec3f {
   let l = light_at(P);
   let ndl = max(dot(N, G.sun_dir.xyz), 0.0);
-  let sh = shadow_at(P, N);
+  var sh = 1.0;
+  if (ndl > 0.0 && (l.sun.x + l.sun.y + l.sun.z) > 0.0) { sh = shadow_at(P, N); }
+  return shade_lit(P, N, albedo, l, sh);
+}
+// The same with the light at P (light_at) and its shadow for N (shadow_at)
+// already in hand: both cost texture reads (shadow_at up to 36 compares), and
+// the drivers do not merge a second identical call.
+fn shade_lit(P: vec3f, N: vec3f, albedo: vec3f, l: Light, sh: f32) -> vec3f {
+  let ndl = max(dot(N, G.sun_dir.xyz), 0.0);
   let sky = 0.55 + 0.45 * dot(N, l.upn);
-  let moon = moon_light(l.upn, l.h) * max(dot(N, G.moon.xyz), 0.0);
+  let ndm = max(dot(N, G.moon.xyz), 0.0);
+  var moon = vec3f(0.0);
+  if (ndm > 0.0 && G.moon.w > 0.0) { moon = moon_light(l.upn, l.h) * ndm; }
   // Light bounced off the ground: what keeps walls and overhangs from going
   // flat blue-black in shade.
   let mu = max(dot(l.upn, G.sun_dir.xyz), 0.0);

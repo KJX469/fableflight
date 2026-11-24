@@ -5,9 +5,6 @@ use egui::{pos2, vec2, Align2, Color32, Rect, RichText, Sense, Stroke};
 
 // the flight panel's pieces.
 
-/// the panel's width.
-pub const PANEL_W: f32 = 344.0;
-
 /// a section's tag and a hairline.
 pub fn pane_section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(14.0);
@@ -15,41 +12,6 @@ pub fn pane_section(ui: &mut egui::Ui, title: &str) {
     let r = ui.available_rect_before_wrap();
     ui.painter().hline(r.x_range(), r.top() + 3.0, Stroke::new(1.0, menu::LINE));
     ui.add_space(8.0);
-}
-
-/// a word at the left, its value at the right.
-pub fn kv(ui: &mut egui::Ui, key: &str, value: &str, col: Color32) {
-    let w = ui.available_width();
-    ui.allocate_ui_with_layout(vec2(w, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_width(w);
-        ui.label(RichText::new(key).font(menu::caption()).color(SOFT));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add(egui::Label::new(RichText::new(value).font(num_s()).color(col)).truncate());
-        });
-    });
-}
-
-/// the key numbers as tiles, two to a row.
-pub fn tiles(ui: &mut egui::Ui, items: &[(&str, String, &str, Color32)]) {
-    let gap = 8.0;
-    let w = (ui.available_width() - gap) * 0.5;
-    for pair in items.chunks(2) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for (k, v, unit, col) in pair {
-                let (r, _) = ui.allocate_exact_size(vec2(w, 58.0), Sense::hover());
-                let p = ui.painter();
-                p.rect_filled(r, R_IN, Color32::from_white_alpha(7));
-                paint_tag(p, r.left_top() + vec2(10.0, 15.0), Align2::LEFT_CENTER, k);
-                let g = p.layout_no_wrap(v.clone(), num_l(), *col);
-                let base = r.left_bottom() + vec2(10.0, -19.0);
-                let vw = g.size().x;
-                p.galley(pos2(base.x, base.y - g.size().y * 0.5), g, *col);
-                p.text(pos2(base.x + vw + 5.0, base.y + 3.0), Align2::LEFT_CENTER, *unit, num_s(), SOFT);
-            }
-        });
-        ui.add_space(gap - ui.spacing().item_spacing.y);
-    }
 }
 
 /// a small button, yellow when chosen.
@@ -70,44 +32,184 @@ pub fn chip(ui: &mut egui::Ui, text: &str, mono: bool, on: bool) -> egui::Respon
     resp
 }
 
-/// a list entry; the right part is laid out first so the name never runs under it.
-pub fn list_row(ui: &mut egui::Ui, code: &str, name: &str, detail: &str, right: impl FnOnce(&mut egui::Ui)) {
+/// a button `w` by `h`, filled yellow when on.
+pub fn key(ui: &mut egui::Ui, text: &str, on: bool, w: f32, h: f32) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, text));
+    let lit = menu::ease(ui.ctx(), resp.id, resp.hovered() || resp.has_focus());
+    let p = ui.painter();
+    if on {
+        p.rect_filled(r, R_IN, menu::mix(LIT, menu::ACCENT_HI, lit));
+    } else {
+        p.rect_filled(r, R_IN, white(0.07 + 0.1 * lit));
+        p.rect_stroke(r, R_IN, Stroke::new(1.0, white(0.2 + 0.2 * lit)), egui::StrokeKind::Inside);
+    }
+    p.text(r.center(), Align2::CENTER_CENTER, text, menu::semibold(14.0), if on { menu::ON_ACCENT } else { Color32::WHITE });
+    resp
+}
+
+// the flight card: one frosted card in the middle, its pages laid out in tiles.
+
+/// the card's width.
+pub const CARD_W: f32 = 660.0;
+/// the gap between tiles.
+pub const GAP: f32 = 8.0;
+
+/// a row of `n` equal tiles `h` tall, `add` fills tile `i`.
+pub fn cells(ui: &mut egui::Ui, n: usize, h: f32, mut add: impl FnMut(&mut egui::Ui, usize)) {
     let w = ui.available_width();
-    ui.allocate_ui_with_layout(vec2(w, 42.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.set_min_width(w);
-        ui.spacing_mut().item_spacing.x = 4.0;
-        right(ui);
-        ui.add_space(8.0);
-        let room = ui.available_width();
-        ui.allocate_ui_with_layout(vec2(room, 42.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.set_width(room);
-            ui.spacing_mut().item_spacing.y = 1.0;
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(RichText::new(code).font(num_m()).color(Color32::WHITE));
-                ui.add(egui::Label::new(RichText::new(name).font(menu::caption()).color(TEXT)).truncate());
-            });
-            if !detail.is_empty() {
-                ui.add(egui::Label::new(RichText::new(detail).font(num_s()).color(SOFT)).truncate());
+    let (row, resp) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let cw = (w - GAP * (n as f32 - 1.0)) / n as f32;
+    for i in 0..n {
+        let r = Rect::from_min_size(pos2(row.left() + i as f32 * (cw + GAP), row.top()), vec2(cw, h));
+        tile_bg(ui.painter(), r);
+        let inner = r.shrink2(vec2(12.0, 10.0));
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)).id_salt(resp.id.with(i)));
+        c.set_clip_rect(r.intersect(ui.clip_rect()));
+        c.spacing_mut().item_spacing = vec2(6.0, 4.0);
+        add(&mut c, i);
+    }
+    ui.add_space(GAP - ui.spacing().item_spacing.y);
+}
+
+/// one tile across the card, as tall as what it holds.
+pub fn wide_tile<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let r = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+        add(ui)
+    });
+    let rect = r.response.rect;
+    ui.painter().set(slot, egui::Shape::Vec(vec![
+        egui::Shape::rect_filled(rect, R_IN, white(0.045)),
+        egui::Shape::rect_stroke(rect, R_IN, Stroke::new(1.0, white(0.07)), egui::StrokeKind::Inside),
+    ]));
+    ui.add_space(GAP - ui.spacing().item_spacing.y);
+    r.inner
+}
+
+fn tile_bg(p: &egui::Painter, r: Rect) {
+    p.rect_filled(r, R_IN, white(0.045));
+    p.rect_stroke(r, R_IN, Stroke::new(1.0, white(0.07)), egui::StrokeKind::Inside);
+}
+
+/// a tile's name in spaced capitals.
+pub fn tag(ui: &mut egui::Ui, s: &str) {
+    ui.label(tag_text(s));
+}
+
+/// a big figure and its unit.
+pub fn big(ui: &mut egui::Ui, value: &str, unit: &str, col: Color32) {
+    let w = ui.available_width();
+    ui.allocate_ui_with_layout(vec2(w, 30.0), egui::Layout::left_to_right(egui::Align::Max), |ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        ui.label(RichText::new(value).font(num_l()).color(col));
+        if !unit.is_empty() {
+            ui.add_space(-1.0);
+            ui.label(RichText::new(unit).font(num_s()).color(SOFT));
+        }
+    });
+}
+
+/// a short line in grey, cut at the tile's edge.
+pub fn note(ui: &mut egui::Ui, s: &str) {
+    ui.add(egui::Label::new(RichText::new(s).font(menu::caption()).color(SOFT)).truncate());
+}
+
+/// a thin bar `frac` full.
+pub fn meter(ui: &mut egui::Ui, frac: f32, col: Color32) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 4.0), Sense::hover());
+    ui.painter().rect_filled(r, 2, white(0.1));
+    ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * frac.clamp(0.0, 1.0), r.height())), 2, col);
+}
+
+/// a pick from a list: a code, a name and a figure, lit when it is the one in use.
+pub fn pick_row(ui: &mut egui::Ui, code: &str, name: &str, right: &str, on: bool) -> egui::Response {
+    let w = ui.available_width();
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, name));
+    let lit = menu::ease(ui.ctx(), resp.id, resp.hovered() || resp.has_focus());
+    let p = ui.painter();
+    if on {
+        p.rect_filled(r, R_IN, LIT.gamma_multiply(0.16));
+    } else if lit > 0.0 {
+        p.rect_filled(r, R_IN, white(0.07 * lit));
+    }
+    let col = if on { LIT } else { Color32::WHITE };
+    let cg = p.layout_no_wrap(code.to_string(), num_s(), col);
+    let rg = p.layout_no_wrap(right.to_string(), menu::caption(), SOFT);
+    let left = r.left() + 10.0;
+    let name_x = left + cg.size().x.max(58.0) + 8.0;
+    let room = (r.right() - 10.0 - rg.size().x - 8.0 - name_x).max(0.0);
+    p.galley(pos2(left, r.center().y - cg.size().y * 0.5), cg, col);
+    p.galley(pos2(r.right() - 10.0 - rg.size().x, r.center().y - rg.size().y * 0.5), rg, SOFT);
+    let mut job = egui::text::LayoutJob::simple_singleline(name.to_string(), menu::caption(), TEXT);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+    let ng = p.layout_job(job);
+    p.galley(pos2(name_x, r.center().y - ng.size().y * 0.5), ng, TEXT);
+    resp
+}
+
+/// the card's header: the page's icon and name, the pages as icons, and a close button.
+/// gives back the page asked for, and whether close was pressed.
+pub fn card_header(ui: &mut egui::Ui, page: Page) -> (Option<Page>, bool, egui::Response) {
+    let mut to = None;
+    let mut close = false;
+    let mut close_resp = None;
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(26.0, 30.0), Sense::hover());
+        menu::icon(ui.painter(), page_icon(page), r.center(), 22.0, LIT);
+        ui.add_space(2.0);
+        ui.label(RichText::new(page.label()).font(menu::page_title()).color(Color32::WHITE));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let x = icon_key(ui, None, "×", false, t!("flight.close_tab"));
+            if x.clicked() {
+                close = true;
+            }
+            close_resp = Some(x);
+            ui.add_space(10.0);
+            for p in Page::INFO.into_iter().rev() {
+                if icon_key(ui, Some(page_icon(p)), "", p == page, p.label()).clicked() && p != page {
+                    to = Some(p);
+                }
             }
         });
     });
-    let r = ui.available_rect_before_wrap();
-    ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, Color32::from_white_alpha(10)));
-    ui.add_space(4.0);
+    (to, close, close_resp.expect("close button"))
 }
 
-/// a button `w` wide.
-pub fn pane_button(ui: &mut egui::Ui, text: &str, w: f32) -> egui::Response {
-    let (r, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
+/// a square icon button, yellow when on.
+fn icon_key(ui: &mut egui::Ui, icon: Option<Icon>, text: &str, on: bool, hint: &str) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, hint));
     let lit = menu::ease(ui.ctx(), resp.id, resp.hovered() || resp.has_focus());
     let p = ui.painter();
-    p.rect_filled(r, R_IN, white(0.08 + 0.1 * lit));
-    p.rect_stroke(r, R_IN, Stroke::new(1.0, white(0.28 + 0.2 * lit)), egui::StrokeKind::Inside);
-    p.text(r.center(), Align2::CENTER_CENTER, text, menu::medium(14.5), Color32::WHITE);
-    resp
+    if on {
+        p.rect_filled(r, R_IN, LIT);
+    } else {
+        p.rect_filled(r, R_IN, white(0.04 + 0.1 * lit));
+    }
+    let col = if on { menu::ON_ACCENT } else { menu::mix(SOFT, Color32::WHITE, lit) };
+    match icon {
+        Some(i) => menu::icon(p, i, r.center(), 18.0, col),
+        None => {
+            p.text(r.center(), Align2::CENTER_CENTER, text, menu::medium(18.0), col);
+        }
+    }
+    resp.on_hover_text(hint)
+}
+
+/// the icon each page goes by.
+pub fn page_icon(p: Page) -> Icon {
+    match p {
+        Page::Places => Icon::GoTo,
+        Page::Radio => Icon::Radio,
+        Page::Autopilot => Icon::Autopilot,
+        Page::Weather => Icon::Weather,
+        _ => Icon::Flight,
+    }
 }
 
 /// what the hud's buttons asked for.
@@ -167,7 +269,7 @@ impl Game {
         }
         if !notes.is_empty() {
             // under the heading strip.
-            let y = HEADING_H + 34.0;
+            let y = HEADING_TOP + HEADING_H + 34.0;
             egui::Area::new(egui::Id::unique("notices")).anchor(Align2::CENTER_TOP, [0.0, y]).interactable(false).show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 ui.vertical_centered(|ui| {
@@ -175,7 +277,7 @@ impl Game {
                         // a scope so each notice takes its own room.
                         ui.scope(|ui| {
                             ui.multiply_opacity(*a);
-                            frosted(ui, glass().inner_margin(egui::Margin::symmetric(18, 10)), |ui| {
+                            panel(ui, glass().inner_margin(egui::Margin::symmetric(18, 10)), |ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                                 for (text, font, col) in lines {
@@ -198,7 +300,7 @@ impl Game {
         if !self.ap.on && !flash {
             return;
         }
-        frosted(ui, glass().inner_margin(egui::Margin::symmetric(16, 8)), |ui| {
+        panel(ui, glass().inner_margin(egui::Margin::symmetric(16, 8)), |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
@@ -235,31 +337,31 @@ impl Game {
             ui.end_row();
         };
         let r = egui::Area::new(egui::Id::unique("systems")).anchor(Align2::LEFT_TOP, [14.0, 12.0]).interactable(false).show(ctx, |ui| {
-            frosted(ui, glass(), |ui| {
+            panel(ui, glass(), |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if let Some((name, _, _)) = p.engines() {
                     ui.label(tag_text(&format!("{}  {}", p.stage_name().unwrap_or(""), name)));
                     egui::Grid::new("rocket").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
-                        let apo = p.apogee().map_or(t!("escape", "libération").to_string(), |a| format!("{:.0} km", a.max(0.0) / 1000.0));
+                        let apo = p.apogee().map_or(t!("flight.escape").to_string(), |a| format!("{:.0} km", a.max(0.0) / 1000.0));
                         let high = if base_up < 3000.0 { format!("{:.0} m", base_up.max(0.0)) } else { format!("{:.1} km", base_up / 1000.0) };
-                        row(ui, t!("Throttle", "Poussée"), format!("{:.0}%  ·  {:.0} MN", p.throttle * 100.0, p.thrust_now() / 1.0e6), TEXT);
-                        row(ui, t!("Climb, speed", "Montée, vitesse"), format!("{:+.0} m/s  ·  {:.0} m/s", vs, p.vel.length()), TEXT);
-                        row(ui, t!("Height", "Hauteur"), high, TEXT);
-                        row(ui, t!("Apogee", "Apogée"), apo, TEXT);
-                        row(ui, t!("Downrange", "Distance"), format!("{:.0} km", p.downrange() / 1000.0), TEXT);
+                        row(ui, t!("flight.throttle"), format!("{:.0}%  ·  {:.0} MN", p.throttle * 100.0, p.thrust_now() / 1.0e6), TEXT);
+                        row(ui, t!("flight.climb_speed"), format!("{:+.0} m/s  ·  {:.0} m/s", vs, p.vel.length()), TEXT);
+                        row(ui, t!("flight.height"), high, TEXT);
+                        row(ui, t!("flight.apogee"), apo, TEXT);
+                        row(ui, t!("flight.downrange"), format!("{:.0} km", p.downrange() / 1000.0), TEXT);
                         if let Some(t) = p.burnout() {
-                            row(ui, t!("Burnout", "Fin de combustion"), format!("{}:{:02}", t as u32 / 60, t as u32 % 60), TEXT);
+                            row(ui, t!("flight.burnout"), format!("{}:{:02}", t as u32 / 60, t as u32 % 60), TEXT);
                         }
-                        row(ui, t!("Mass, load", "Masse, facteur"), format!("{:.0} t  ·  {:.1} g", p.mass() / 1000.0, p.g_load), TEXT);
+                        row(ui, t!("flight.mass_load"), format!("{:.0} t  ·  {:.1} g", p.mass() / 1000.0, p.g_load), TEXT);
                     });
                 }
                 if self.missiles_ok() {
                     let armed = self.weapons.armed;
                     let power = p.sys.powered();
-                    ui.label(tag_text(t!("Weapons", "Armement")));
+                    ui.label(tag_text(t!("flight.weapons")));
                     egui::Grid::new("weapons").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
                         let arm_col = if !armed { DIM } else if power { menu::OK } else { amber };
-                        row(ui, t!("Master arm", "Armement général"), if armed { "ON".into() } else { "OFF".into() }, arm_col);
+                        row(ui, t!("flight.master_arm"), if armed { "ON".into() } else { "OFF".into() }, arm_col);
                         let (mut left, mut right) = (0u8, 0u8);
                         for (i, st) in self.weapons.stations.iter().enumerate() {
                             if self.weapons.loaded(i) {
@@ -268,19 +370,19 @@ impl Game {
                         }
                         row(ui, "AIM-9", format!("L {left}  ·  R {right}"), TEXT);
                         let (line, col) = if !armed {
-                            (t!("safe", "sécurisé").to_string(), DIM)
+                            (t!("flight.safe").to_string(), DIM)
                         } else if !power {
-                            (t!("no power", "pas d'alimentation").to_string(), amber)
+                            (t!("flight.no_power").to_string(), amber)
                         } else if let Some(v) = &self.weapons.target_view {
                             if self.weapons.lock >= 1.0 {
-                                (t!("lock  {:.1} km", "verrouillé  {:.1} km", v.range / 1000.0), menu::OK)
+                                (t!("flight.lock_km", v.range / 1000.0), menu::OK)
                             } else {
-                                (t!("track  {:.1} km", "poursuite  {:.1} km", v.range / 1000.0), amber)
+                                (t!("flight.track_km", v.range / 1000.0), amber)
                             }
                         } else {
-                            (t!("search", "recherche").to_string(), DIM)
+                            (t!("flight.search").to_string(), DIM)
                         };
-                        row(ui, t!("Seeker", "Autodirecteur"), line, col);
+                        row(ui, t!("flight.seeker"), line, col);
                     });
                 }
             });
@@ -289,25 +391,22 @@ impl Game {
     }
 }
 
-// the hud sits at the edges, in frosted glass, and leaves the middle to the world.
+// the hud sits at the edges in the menus' dark panels and leaves the middle to the world.
 
-/// the heading strip's height.
+/// the heading strip's height, and its gap from the top edge (layout below it uses both).
 pub const HEADING_H: f32 = 46.0;
+pub const HEADING_TOP: f32 = 10.0;
 /// the tapes' sizes.
 const TAPE_H: f32 = 352.0;
 const SPEED_W: f32 = 124.0;
 const ALT_W: f32 = 118.0;
-/// corner radii.
-pub(crate) const R_HUD: u8 = 14;
-pub(crate) const R_IN: u8 = 7;
+/// corner radii: square, like the menus.
+pub(crate) const R_HUD: u8 = 0;
+pub(crate) const R_IN: u8 = 0;
 /// inset inside a panel.
 const PAD: f32 = 12.0;
-/// room the flight panel leaves for the altitude tape.
-pub const RIGHT_EDGE: f32 = ALT_W + 14.0;
-/// the radio instruments' height.
-pub const NAV_H: f32 = 156.0;
 
-const AMBER: Color32 = Color32::from_rgb(255, 196, 80);
+pub const AMBER: Color32 = Color32::from_rgb(255, 196, 80);
 /// the hud's accent: the game's yellow.
 pub const LIT: Color32 = menu::ACCENT;
 /// soft white for secondary text.
@@ -332,11 +431,11 @@ fn num_minor() -> egui::FontId {
 fn num_s() -> egui::FontId {
     menu::medium(13.5)
 }
-fn tag() -> egui::FontId {
+fn tag_font() -> egui::FontId {
     menu::medium(11.5)
 }
 fn tag_text(s: &str) -> RichText {
-    RichText::new(s.to_uppercase()).font(tag()).color(white(0.62)).extra_letter_spacing(1.1)
+    RichText::new(s.to_uppercase()).font(tag_font()).color(white(0.62)).extra_letter_spacing(1.1)
 }
 /// spaced capitals at a point.
 pub(crate) fn paint_tag(p: &egui::Painter, at: egui::Pos2, align: Align2, s: &str) {
@@ -344,7 +443,7 @@ pub(crate) fn paint_tag(p: &egui::Painter, at: egui::Pos2, align: Align2, s: &st
 }
 fn paint_tag_col(p: &egui::Painter, at: egui::Pos2, align: Align2, s: &str, col: Color32) {
     let mut job = egui::text::LayoutJob::default();
-    job.append(&s.to_uppercase(), 0.0, egui::TextFormat { font_id: tag(), color: col, extra_letter_spacing: 1.1, ..Default::default() });
+    job.append(&s.to_uppercase(), 0.0, egui::TextFormat { font_id: tag_font(), color: col, extra_letter_spacing: 1.1, ..Default::default() });
     let g = p.layout_job(job);
     let size = g.size() - vec2(1.1, 0.0);
     p.galley(align.anchor_size(at, size).min, g, col);
@@ -362,14 +461,9 @@ pub struct HudIn {
     pub local: f64,
 }
 
-// frosted glass.
+// the panels.
 
-/// the blurred frame's texture for this frame.
-pub fn set_frost(ctx: &egui::Context, id: Option<egui::TextureId>) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("flightui frost"), id));
-}
-
-/// a rounded rectangle's outline.
+/// a rectangle's outline with corner radii `cr` (the minimap clips to it).
 pub(crate) fn rounded(r: Rect, cr: egui::CornerRadius) -> Vec<egui::Pos2> {
     let mut pts = Vec::new();
     let corners = [
@@ -391,49 +485,35 @@ pub(crate) fn rounded(r: Rect, cr: egui::CornerRadius) -> Vec<egui::Pos2> {
     pts
 }
 
-/// the world behind blurred, a light veil and a bright edge.
-fn frost_shapes(ctx: &egui::Context, r: Rect, cr: egui::CornerRadius) -> Vec<egui::Shape> {
-    let mut out = Vec::new();
-    let screen = ctx.content_rect();
-    let pts = rounded(r, cr);
-    if let Some(id) = ctx.data(|d| d.get_temp::<Option<egui::TextureId>>(egui::Id::unique("flightui frost"))).flatten() {
-        let mut mesh = egui::Mesh::with_texture(id);
-        let uv = |p: egui::Pos2| pos2((p.x - screen.left()) / screen.width(), (p.y - screen.top()) / screen.height());
-        let c = r.center();
-        mesh.vertices.push(egui::epaint::Vertex { pos: c, uv: uv(c), color: Color32::WHITE });
-        for p in &pts {
-            mesh.vertices.push(egui::epaint::Vertex { pos: *p, uv: uv(*p), color: Color32::WHITE });
-        }
-        let n = pts.len() as u32;
-        for k in 0..n {
-            mesh.add_triangle(0, 1 + k, 1 + (k + 1) % n);
-        }
-        out.push(egui::Shape::mesh(mesh));
-    }
-    // the veil, then the edge.
-    out.push(egui::Shape::convex_polygon(pts.clone(), Color32::from_rgba_premultiplied(10, 14, 22, 82), Stroke::NONE));
-    out.push(egui::Shape::closed_line(pts, Stroke::new(1.0, white(0.28))));
-    out
+/// the panels' fill and edge, the start screen's tiles.
+const PANEL_FILL: Color32 = Color32::from_rgba_premultiplied(12, 16, 22, 226);
+const PANEL_EDGE: Color32 = Color32::from_rgba_premultiplied(26, 26, 26, 26);
+
+/// a dark panel in `r` with a hairline edge.
+fn panel_shapes(r: Rect) -> Vec<egui::Shape> {
+    vec![
+        egui::Shape::rect_filled(r, 0, PANEL_FILL),
+        egui::Shape::rect_stroke(r, 0, Stroke::new(1.0, PANEL_EDGE), egui::StrokeKind::Inside),
+    ]
 }
 
-/// paints frosted glass in `r`.
-fn frost_rect(p: &egui::Painter, r: Rect, cr: egui::CornerRadius) {
-    for s in frost_shapes(p.ctx(), r, cr) {
+/// paints a panel in `r`.
+fn panel_rect(p: &egui::Painter, r: Rect) {
+    for s in panel_shapes(r) {
         p.add(s);
     }
 }
 
 /// a frame for the hud's panels.
 pub fn glass() -> egui::Frame {
-    egui::Frame::new().corner_radius(R_HUD).inner_margin(PAD)
+    egui::Frame::new().inner_margin(PAD)
 }
 
-/// shows `frame` with frosted glass behind it.
-pub fn frosted<R>(ui: &mut egui::Ui, frame: egui::Frame, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+/// shows `frame` on a panel.
+pub fn panel<R>(ui: &mut egui::Ui, frame: egui::Frame, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
     let slot = ui.painter().add(egui::Shape::Noop);
-    let cr = frame.corner_radius;
     let resp = frame.show(ui, add);
-    ui.painter().set(slot, egui::Shape::Vec(frost_shapes(ui.ctx(), resp.response.rect, cr)));
+    ui.painter().set(slot, egui::Shape::Vec(panel_shapes(resp.response.rect)));
     resp
 }
 
@@ -494,10 +574,10 @@ fn grouped(v: f32) -> String {
 /// the time of day in words.
 fn period(h: f64) -> &'static str {
     match h.rem_euclid(24.0) {
-        h if (5.0..11.0).contains(&h) => t!("Morning", "Matin"),
-        h if (11.0..17.0).contains(&h) => t!("Afternoon", "Après-midi"),
-        h if (17.0..21.0).contains(&h) => t!("Evening", "Soirée"),
-        _ => t!("Night", "Nuit"),
+        h if (5.0..11.0).contains(&h) => t!("flight.morning"),
+        h if (11.0..17.0).contains(&h) => t!("flight.afternoon"),
+        h if (17.0..21.0).contains(&h) => t!("flight.evening"),
+        _ => t!("flight.night"),
     }
 }
 
@@ -577,12 +657,12 @@ impl Game {
         // the tapes' centre line, a little above the middle.
         let cy = screen.center().y - 36.0;
         self.heading_strip(ctx, h.hdg as f32);
-        if !self.info_open {
-            self.conditions_card(ctx, h);
-        }
+        self.conditions_card(ctx, h);
         self.speed_tape(ctx, h, cy);
         self.altitude_tape(ctx, h, cy);
-        self.path_marker(ctx);
+        if self.path_marker {
+            self.flight_path_marker(ctx);
+        }
         self.minimap.top = cy + TAPE_H * 0.5 + 12.0;
         self.minimap.bottom = 14.0;
     }
@@ -590,39 +670,65 @@ impl Game {
     fn heading_strip(&self, ctx: &egui::Context, hdg: f32) {
         let screen = ctx.content_rect();
         let w = 540.0;
-        let at = pos2(screen.center().x - w * 0.5, screen.top());
+        let at = pos2(screen.center().x - w * 0.5, screen.top() + HEADING_TOP);
         egui::Area::new(egui::Id::unique("hud_heading")).fixed_pos(at).interactable(false).order(egui::Order::Background).show(ctx, |ui| {
             let (r, _) = ui.allocate_exact_size(vec2(w, HEADING_H + 26.0), Sense::hover());
             let strip = Rect::from_min_size(r.min, vec2(w, HEADING_H));
             let p = ui.painter();
-            // only the lower corners are round.
-            frost_rect(p, strip, egui::CornerRadius { nw: 0, ne: 0, sw: R_HUD, se: R_HUD });
-            let clip = p.with_clip_rect(strip.shrink(2.0));
-            const PPD: f32 = 8.4;
-            let lo = ((hdg - 40.0) / 10.0).floor() as i32 * 10;
-            let y = strip.center().y + 1.0;
-            for d in (lo..=lo + 80).step_by(10) {
-                let x = strip.center().x + (d as f32 - hdg) * PPD;
-                let dd = d.rem_euclid(360);
-                let edge = ((x - strip.left()).min(strip.right() - x) / 70.0).clamp(0.0, 1.0);
-                let near = 1.0 - ((x - strip.center().x).abs() / 42.0).min(1.0);
-                // the one under the index grows.
-                let font = egui::FontId::new(17.0 + 5.0 * near, egui::FontFamily::Name(if near > 0.5 { menu::SEMIBOLD } else { menu::MEDIUM }.into()));
-                let label = match dd { 0 => "N".to_string(), 90 => "E".to_string(), 180 => "S".to_string(), 270 => t!("W", "O").to_string(), _ => format!("{dd:03}") };
-                clip.text(pos2(x, y), Align2::CENTER_CENTER, label, font, white((0.7 + 0.3 * near) * edge));
-            }
-            // the index.
-            p.rect_filled(Rect::from_center_size(pos2(strip.center().x, strip.bottom() - 4.0), vec2(34.0, 2.5)), 1, Color32::WHITE);
-            // track, heading and the aircraft under it.
-            let ty = strip.bottom() + 12.0;
+            panel_rect(p, strip);
+            let clip = p.with_clip_rect(strip.shrink(1.0));
             let pl = &self.plane;
             let (e, n, _) = crate::geo::enu(pl.pos);
-            let trk = pl.vel.dot(e).atan2(pl.vel.dot(n)).to_degrees().rem_euclid(360.0);
-            if pl.vel.length() > 3.0 {
-                paint_tag(p, pos2(strip.left() + 16.0, ty), Align2::LEFT_CENTER, &t!("Track {:03.0}°", "Route {:03.0}°", trk));
+            let trk = pl.vel.dot(e).atan2(pl.vel.dot(n)).to_degrees().rem_euclid(360.0) as f32;
+            let moving = pl.vel.length() > 3.0;
+            // a scale of ticks along the foot, figures every 10°, the cardinal points in yellow.
+            const PPD: f32 = 6.0;
+            let cx = strip.center().x;
+            let base = strip.bottom() - 1.0;
+            let lo = ((hdg - 50.0) / 5.0).floor() as i32 * 5;
+            for d in (lo..=lo + 100).step_by(5) {
+                let x = cx + (d as f32 - hdg) * PPD;
+                let edge = ((x - strip.left()).min(strip.right() - x) / 60.0).clamp(0.0, 1.0);
+                if edge <= 0.0 {
+                    continue;
+                }
+                let dd = d.rem_euclid(360);
+                let big = dd % 10 == 0;
+                clip.line_segment([pos2(x, base), pos2(x, base - if big { 9.0 } else { 5.0 })], Stroke::new(1.2, white(if big { 0.8 } else { 0.45 } * edge)));
+                // nothing under the readout.
+                if !big || (x - cx).abs() < 40.0 {
+                    continue;
+                }
+                let (label, col) = match dd {
+                    0 => ("N".to_string(), LIT),
+                    90 => ("E".to_string(), LIT),
+                    180 => ("S".to_string(), LIT),
+                    270 => (t!("flight.w").to_string(), LIT),
+                    _ => (format!("{:02}", dd / 10), Color32::WHITE),
+                };
+                clip.text(pos2(x, base - 20.0), Align2::CENTER_CENTER, label, num_s(), col.gamma_multiply(0.85 * edge));
             }
-            paint_tag(p, pos2(strip.center().x, ty), Align2::CENTER_CENTER, t!("Heading", "Cap"));
-            paint_tag(p, pos2(strip.right() - 16.0, ty), Align2::RIGHT_CENTER, self.spec.name);
+            // the track: a hollow yellow caret on the scale.
+            if moving {
+                let mut dt = (trk - hdg + 540.0).rem_euclid(360.0) - 180.0;
+                dt = dt.clamp(-40.0, 40.0);
+                let x = cx + dt * PPD;
+                let tri = vec![pos2(x, base - 10.0), pos2(x - 5.0, base - 1.0), pos2(x + 5.0, base - 1.0)];
+                clip.add(egui::Shape::closed_line(tri, Stroke::new(1.5, LIT)));
+            }
+            // the readout, boxed in the middle, and the index under it.
+            let rb = Rect::from_center_size(pos2(cx, strip.top() + 17.0), vec2(66.0, 26.0));
+            p.rect_filled(rb, 0, BOX);
+            p.rect_stroke(rb, 0, Stroke::new(1.0, LIT), egui::StrokeKind::Inside);
+            p.text(rb.center(), Align2::CENTER_CENTER, format!("{:03.0}°", hdg.rem_euclid(360.0).round() % 360.0), menu::semibold(17.0), Color32::WHITE);
+            p.line_segment([pos2(cx, rb.bottom()), pos2(cx, base)], Stroke::new(1.5, LIT));
+            // track, heading and the aircraft under it.
+            let ty = strip.bottom() + 12.0;
+            if moving {
+                paint_tag(p, pos2(strip.left() + 2.0, ty), Align2::LEFT_CENTER, &t!("flight.track_03_0", trk));
+            }
+            paint_tag(p, pos2(cx, ty), Align2::CENTER_CENTER, t!("flight.heading"));
+            paint_tag(p, pos2(strip.right() - 2.0, ty), Align2::RIGHT_CENTER, self.spec.name);
         });
     }
 
@@ -632,42 +738,42 @@ impl Game {
         let night = !(6.0..19.5).contains(&h.local.rem_euclid(24.0));
         let cloudy = wx.clouds > 0.6 || wx.rain > 0.1 || wx.storms > 0.3;
         let sky = if wx.storms > 0.3 {
-            t!("Storms", "Orages")
+            t!("flight.storms")
         } else if wx.rain > 0.1 {
-            t!("Rain", "Pluie")
+            t!("flight.rain")
         } else if wx.clouds < 0.15 {
-            t!("Clear", "Dégagé")
+            t!("flight.clear")
         } else if wx.clouds < 0.45 {
-            t!("Some cloud", "Quelques nuages")
+            t!("flight.some_cloud")
         } else if wx.clouds < 0.8 {
-            t!("Cloudy", "Nuageux")
+            t!("flight.cloudy")
         } else {
-            t!("Overcast", "Couvert")
+            t!("flight.overcast")
         };
         let breeze = match wind_kt {
-            w if w < 3.0 => t!("no wind", "sans vent"),
-            w if w < 11.0 => t!("a light breeze", "brise légère"),
-            w if w < 21.0 => t!("a moderate breeze", "brise modérée"),
-            w if w < 34.0 => t!("a strong wind", "vent fort"),
-            _ => t!("a gale", "tempête"),
+            w if w < 3.0 => t!("flight.no_wind"),
+            w if w < 11.0 => t!("flight.a_light_breeze"),
+            w if w < 21.0 => t!("flight.a_moderate_breeze"),
+            w if w < 34.0 => t!("flight.a_strong_wind"),
+            _ => t!("flight.a_gale"),
         };
-        let sub = t!("{} with {}", "{}, {}", sky, breeze);
+        let sub = t!("flight.with", sky, breeze);
         let oat = 15.0 - 0.0065 * h.alt.clamp(-500.0, 11_000.0);
         let w = 284.0;
         egui::Area::new(egui::Id::unique("hud_conditions")).anchor(Align2::RIGHT_TOP, [-14.0, 12.0]).interactable(false).order(egui::Order::Background).show(ctx, |ui| {
             let (r, _) = ui.allocate_exact_size(vec2(w, 126.0), Sense::hover());
             let p = ui.painter();
-            frost_rect(p, r, R_HUD.into());
+            panel_rect(p, r);
             // the head.
             let hy = r.top() + 19.0;
             glyph(p, Glyph::Menu, pos2(r.left() + 22.0, hy), 14.0, white(0.75));
             let hint = if padui::active() {
                 match crate::padmap::spec_of("flight_panel") {
-                    k if k.is_empty() => t!("Menu: pause", "Menu : pause").to_string(),
-                    k => t!("{}: flight menu", "{} : menu de vol", k),
+                    k if k.is_empty() => t!("flight.menu_pause").to_string(),
+                    k => t!("flight.flight_menu", k),
                 }
             } else {
-                t!("Tab: flight menu", "Tab : menu de vol").to_string()
+                t!("flight.tab_flight_menu").to_string()
             };
             paint_tag(p, pos2(r.left() + 38.0, hy), Align2::LEFT_CENTER, &hint);
             p.hline(r.x_range(), r.top() + 38.0, Stroke::new(1.0, white(0.16)));
@@ -687,7 +793,7 @@ impl Game {
             p.text(pos2(x, fy), Align2::LEFT_CENTER, format!("{:03.0}°", wx.wind_from), num_s(), white(0.85));
             x += 58.0;
             glyph(p, Glyph::Sock, pos2(x, fy), 15.0, white(0.8));
-            p.text(pos2(x + 14.0, fy), Align2::LEFT_CENTER, t!("{:.0} knots", "{:.0} nœuds", wind_kt), num_s(), white(0.85));
+            p.text(pos2(x + 14.0, fy), Align2::LEFT_CENTER, t!("flight.0_knots", wind_kt), num_s(), white(0.85));
             p.text(pos2(r.right() - 16.0, fy), Align2::RIGHT_CENTER, menu::hhmm(h.local), num_s(), white(0.85));
             glyph(p, Glyph::Clock, pos2(r.right() - 62.0, fy), 16.0, white(0.8));
         });
@@ -713,7 +819,7 @@ impl Game {
             let pt = ui.painter();
             // ground speed over it.
             paint_tag(pt, pos2(panel.left() + 14.0, panel.top() - 12.0), Align2::LEFT_CENTER, &format!("G/S  {:.0}", kt(p.vel.length())));
-            frost_rect(pt, panel, egui::CornerRadius { nw: 0, sw: 0, ne: R_HUD, se: R_HUD });
+            panel_rect(pt, panel);
             // figures fade towards the ends.
             let tape = Rect::from_min_max(pos2(panel.left(), panel.top() + 8.0), pos2(panel.right() - 46.0, panel.bottom() - 8.0));
             let clip = pt.with_clip_rect(tape);
@@ -776,7 +882,7 @@ impl Game {
             }
             // the throttle.
             let col_r = Rect::from_min_max(pos2(panel.right() - 40.0, panel.top() + 12.0), pos2(panel.right() - 12.0, panel.bottom() - 12.0));
-            paint_tag(pt, pos2(col_r.center().x, col_r.top() + 6.0), Align2::CENTER_CENTER, t!("Thr", "Gaz"));
+            paint_tag(pt, pos2(col_r.center().x, col_r.top() + 6.0), Align2::CENTER_CENTER, t!("flight.thr"));
             let track = Rect::from_min_max(pos2(col_r.center().x - 3.0, col_r.top() + 20.0), pos2(col_r.center().x + 3.0, col_r.bottom() - 26.0));
             pt.rect_filled(track, 3, white(0.14));
             let thr = (p.throttle as f32).clamp(0.0, 1.0);
@@ -805,7 +911,7 @@ impl Game {
                 let col = if agl < 300.0 { AMBER } else { white(0.62) };
                 paint_tag_col(&pt, pos2(panel.right() - 14.0, panel.bottom() + 12.0), Align2::RIGHT_CENTER, &format!("{:.0} ft AGL", agl), col);
             }
-            frost_rect(&pt, panel, egui::CornerRadius { nw: R_HUD, sw: R_HUD, ne: 0, se: 0 });
+            panel_rect(&pt, panel);
             let tape = Rect::from_min_max(pos2(panel.left() + 30.0, panel.top() + 8.0), pos2(panel.right(), panel.bottom() - 8.0));
             let c = pos2(tape.center().x, cy);
             let clip = pt.with_clip_rect(tape);
@@ -836,8 +942,9 @@ impl Game {
         });
     }
 
-    /// where the aircraft is going.
-    fn path_marker(&self, ctx: &egui::Context) {
+    /// the flight path marker: a ring where the aircraft is actually going
+    /// (its velocity, not where the nose points). Off unless set in Settings.
+    fn flight_path_marker(&self, ctx: &egui::Context) {
         let Some((vp, cam)) = self.live_view else { return };
         let p = &self.plane;
         if p.vel.length() < 15.0 || p.on_ground {
@@ -854,31 +961,30 @@ impl Game {
             return;
         }
         let painter = ctx.layer_painter(egui::LayerId::background());
-        for (w, col) in [(3.0, Color32::from_black_alpha(90)), (1.5, Color32::from_white_alpha(235))] {
+        // a ring with a short wing each side; a dark edge keeps it legible on bright sky.
+        for (w, col) in [(3.0, Color32::from_black_alpha(90)), (1.5, LIT)] {
             let st = Stroke::new(w, col);
-            painter.line_segment([at + vec2(-9.0, 0.0), at + vec2(9.0, 0.0)], st);
-            painter.line_segment([at + vec2(0.0, -9.0), at + vec2(0.0, 9.0)], st);
+            painter.circle_stroke(at, 6.0, st);
+            painter.line_segment([at + vec2(-14.0, 0.0), at + vec2(-6.0, 0.0)], st);
+            painter.line_segment([at + vec2(6.0, 0.0), at + vec2(14.0, 0.0)], st);
         }
     }
 
     /// the approach line, alerts and damage, bottom centre.
-    pub(crate) fn alerts(&self, ctx: &egui::Context, warn: &[(&str, Color32)], report: &[String], guidance: Option<&(String, u8)>, lift: f32) {
+    pub(crate) fn alerts(&self, ctx: &egui::Context, warn: &[(&str, Color32)], report: &[String], guidance: Option<&(String, u8)>) {
         let ap = self.ap.on || self.real - self.ap_off_t < 4.0;
         if warn.is_empty() && report.is_empty() && guidance.is_none() && !ap {
             return;
         }
-        egui::Area::new(egui::Id::unique("hud_alerts")).anchor(Align2::CENTER_BOTTOM, [0.0, -16.0 - lift]).interactable(false).show(ctx, |ui| {
+        egui::Area::new(egui::Id::unique("hud_alerts")).anchor(Align2::CENTER_BOTTOM, [0.0, -16.0]).interactable(false).show(ctx, |ui| {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 if let Some((text, col)) = guidance {
-                    let col = match col { 1 => Color32::from_rgb(64, 200, 96), 2 => AMBER, 3 => menu::BAD, _ => Color32::WHITE };
-                    frosted(ui, glass().inner_margin(egui::Margin::symmetric(16, 8)), |ui| {
+                    // no dot, only a caution or warning tints the line.
+                    let col = match col { 2 => AMBER, 3 => menu::BAD, _ => Color32::WHITE };
+                    panel(ui, glass().inner_margin(egui::Margin::symmetric(16, 8)), |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                            ui.painter().circle_filled(r.center(), 4.0, col);
-                            ui.label(RichText::new(text).font(num_s()).color(Color32::WHITE));
-                        });
+                        ui.label(RichText::new(text).font(num_s()).color(col));
                     });
                 }
                 self.ap_strip(ui);
@@ -886,16 +992,16 @@ impl Game {
                     ui.horizontal(|ui| {
                         for (w, col) in warn {
                             // a lit plate.
-                            egui::Frame::new().fill(col.gamma_multiply(0.92)).corner_radius(R_HUD).inner_margin(egui::Margin::symmetric(16, 7)).shadow(egui::Shadow { offset: [0, 0], blur: 22, spread: 2, color: col.gamma_multiply(0.55) }).show(ui, |ui| {
+                            egui::Frame::new().fill(col.gamma_multiply(0.92)).stroke(Stroke::new(1.0, *col)).inner_margin(egui::Margin::symmetric(16, 7)).show(ui, |ui| {
                                 ui.label(RichText::new(w.to_uppercase()).font(menu::semibold(14.0)).color(Color32::WHITE).extra_letter_spacing(1.0));
                             });
                         }
                     });
                 }
                 if !report.is_empty() {
-                    frosted(ui, glass(), |ui| {
+                    panel(ui, glass(), |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        ui.label(tag_text(t!("Damage", "Dégâts")).color(AMBER));
+                        ui.label(tag_text(t!("flight.damage")).color(AMBER));
                         // at most six lines, then how many more.
                         for l in report.iter().take(6) {
                             ui.label(RichText::new(l.as_str()).font(num_s()).color(Color32::WHITE));
@@ -920,7 +1026,14 @@ pub struct Radial {
     pub since: f64,
     /// the item under the pointer or the pad's focus.
     pub hover: Option<usize>,
+    /// the item the gamepad points at (d-pad round the ring, or the right stick).
+    pub pad: Option<usize>,
+    /// A pressed: pick the pad's item on the next frame.
+    pub pick: bool,
 }
+
+/// how many items the flight menu has.
+pub const RADIAL_N: usize = 7;
 
 /// ring radii: the hub, the ring's inside and outside.
 const HUB_R: f32 = 58.0;
@@ -928,22 +1041,14 @@ const RING_IN: f32 = 70.0;
 const RING_OUT: f32 = 156.0;
 
 /// an annulus sector from `a0` to `a1` (radians) as a triangle strip.
-fn sector(c: egui::Pos2, r0: f32, r1: f32, a0: f32, a1: f32, col: Color32, tex: Option<(egui::TextureId, Rect)>) -> egui::Mesh {
-    let mut m = match tex {
-        Some((id, _)) => egui::Mesh::with_texture(id),
-        None => egui::Mesh::default(),
-    };
+fn sector(c: egui::Pos2, r0: f32, r1: f32, a0: f32, a1: f32, col: Color32) -> egui::Mesh {
+    let mut m = egui::Mesh::default();
     let n = 24;
-    let uv = |p: egui::Pos2| match tex {
-        Some((_, s)) => pos2((p.x - s.left()) / s.width(), (p.y - s.top()) / s.height()),
-        None => egui::epaint::WHITE_UV,
-    };
     for i in 0..=n {
         let a = a0 + (a1 - a0) * i as f32 / n as f32;
         let d = vec2(a.cos(), a.sin());
         for r in [r0, r1] {
-            let p = c + d * r;
-            m.vertices.push(egui::epaint::Vertex { pos: p, uv: uv(p), color: col });
+            m.colored_vertex(c + d * r, col);
         }
     }
     for i in 0..n as u32 {
@@ -970,8 +1075,10 @@ impl Game {
         } else if self.info_open {
             self.info_open = false;
         } else {
-            self.radial = Radial { open: true, since: self.real, hover: None };
+            self.radial = Radial { open: true, since: self.real, ..Default::default() };
             self.pad_home = true;
+            // the menu takes the mouse: a look drag in progress stops here.
+            self.drag = false;
         }
     }
 
@@ -986,16 +1093,16 @@ impl Game {
         None
     }
 
-    fn radial_items(&self) -> [(Icon, &'static str, Bar, bool); 7] {
+    fn radial_items(&self) -> [(Icon, &'static str, Bar, bool); RADIAL_N] {
         let page = |p: Page| self.info_open && self.info_page == p;
         [
-            (Icon::Flight, t!("Flight", "Vol"), Bar::Page(Page::Flight), page(Page::Flight)),
-            (Icon::GoTo, t!("Go to", "Aller à"), Bar::Page(Page::Places), page(Page::Places)),
-            (Icon::Radio, t!("Radio", "Radio"), Bar::Page(Page::Radio), page(Page::Radio)),
-            (Icon::Autopilot, t!("Autopilot", "Pilote auto"), Bar::Page(Page::Autopilot), page(Page::Autopilot)),
-            (Icon::Weather, t!("Weather", "Météo"), Bar::Page(Page::Weather), page(Page::Weather)),
-            (Icon::Map, t!("Map", "Carte"), Bar::Map, self.minimap.visible),
-            (Icon::Camera, if self.cam_mode == 1 { t!("Cockpit", "Cockpit") } else { t!("Chase", "Extérieur") }, Bar::Camera, false),
+            (Icon::Flight, t!("flight.flight"), Bar::Page(Page::Flight), page(Page::Flight)),
+            (Icon::GoTo, t!("flight.go_to"), Bar::Page(Page::Places), page(Page::Places)),
+            (Icon::Radio, t!("flight.radio"), Bar::Page(Page::Radio), page(Page::Radio)),
+            (Icon::Autopilot, t!("flight.autopilot"), Bar::Page(Page::Autopilot), page(Page::Autopilot)),
+            (Icon::Weather, t!("flight.weather"), Bar::Page(Page::Weather), page(Page::Weather)),
+            (Icon::Map, t!("flight.map"), Bar::Map, self.minimap.visible),
+            (Icon::Camera, match self.cam_mode { 1 => "Cockpit", crate::settings::TAIL_VIEW => t!("flight.fixed_rear"), _ => t!("flight.chase") }, Bar::Camera, false),
         ]
     }
 
@@ -1020,7 +1127,6 @@ impl Game {
         // item 0 sits at the top, the rest clockwise.
         let mid = |i: usize| -std::f32::consts::FRAC_PI_2 + step * i as f32;
         let gap = 0.035;
-        let frost = ctx.data(|d| d.get_temp::<Option<egui::TextureId>>(egui::Id::unique("flightui frost"))).flatten();
         let mut pick: Option<usize> = None;
         let mut close = false;
         egui::Area::new(egui::Id::unique("flight_menu")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
@@ -1038,38 +1144,37 @@ impl Game {
                     hover = Some(((a + step * 0.5) / step) as usize % n);
                 }
             }
-            // the pad: one focusable spot per icon, the first picked out when it opens.
-            let mut focused = None;
+            // one clickable spot per icon. The gamepad picks its item
+            // directly (Radial::pad), not through egui's focus.
             for (i, (_, label, _, _)) in items.iter().enumerate() {
                 let at = c + vec2(mid(i).cos(), mid(i).sin()) * (r0 + r1) * 0.5;
                 let r = ui.interact(Rect::from_center_size(at, vec2(44.0, 44.0)), ui.scope_id().with(("radial", i)), Sense::click());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, *label));
-                if i == 0 {
-                    self.pad_home_focus(&r);
-                }
-                if r.has_focus() {
-                    focused = Some(i);
-                }
                 if r.clicked() {
                     pick = Some(i);
                 }
             }
-            let hover = focused.or(hover);
+            let hover = if crate::padui::active() { self.radial.pad.or(hover) } else { hover };
             self.radial.hover = hover;
+            if std::mem::take(&mut self.radial.pick) {
+                match hover {
+                    Some(i) => pick = Some(i),
+                    None => close = true,
+                }
+            }
             if back.clicked() {
                 match hover {
                     Some(i) => pick = Some(i),
                     None => close = true,
                 }
             }
-            // the ring: a frosted sector per item, the hovered one lit.
+            // the ring: a dark panel sector per item, the hovered one yellow.
             for (i, (ic, _, _, on)) in items.iter().enumerate() {
                 let (a0, a1) = (mid(i) - step * 0.5 + gap, mid(i) + step * 0.5 - gap);
                 let lit = menu::ease(ctx, ui.scope_id().with(("radial_lit", i)), hover == Some(i));
                 let grow = 6.0 * lit;
-                p.add(sector(c, r0, r1 + grow, a0, a1, Color32::WHITE, frost.map(|id| (id, screen))));
-                p.add(sector(c, r0, r1 + grow, a0, a1, menu::mix(Color32::from_rgba_premultiplied(10, 14, 22, 92), Color32::from_rgba_premultiplied(220, 177, 22, 225), lit), None));
-                p.add(egui::Shape::closed_line(sector_edge(c, r0, r1 + grow, a0, a1), Stroke::new(1.0, white(0.25 + 0.35 * lit))));
+                p.add(sector(c, r0, r1 + grow, a0, a1, menu::mix(PANEL_FILL, LIT, lit)));
+                p.add(egui::Shape::closed_line(sector_edge(c, r0, r1 + grow, a0, a1), Stroke::new(1.0, menu::mix(PANEL_EDGE, LIT, lit))));
                 let at = c + vec2(mid(i).cos(), mid(i).sin()) * ((r0 + r1 + grow) * 0.5);
                 menu::icon(&p, *ic, at, 26.0 + 4.0 * lit, menu::mix(Color32::WHITE, menu::ON_ACCENT, lit));
                 // what is open or on: a small yellow dot by the outer edge.
@@ -1078,14 +1183,13 @@ impl Game {
                 }
             }
             // the hub: the pointed item's name, else what this is.
-            for s in frost_shapes(ctx, Rect::from_center_size(c, vec2(hub * 2.0, hub * 2.0)), (hub as u8).into()) {
-                p.add(s);
-            }
+            p.circle_filled(c, hub, PANEL_FILL);
+            p.circle_stroke(c, hub, Stroke::new(1.0, PANEL_EDGE));
             match hover {
                 Some(i) => {
                     p.text(c, Align2::CENTER_CENTER, items[i].1, menu::semibold(16.0), Color32::WHITE);
                 }
-                None => paint_tag(&p, c, Align2::CENTER_CENTER, t!("Flight", "Vol")),
+                None => paint_tag(&p, c, Align2::CENTER_CENTER, t!("flight.flight")),
             }
         });
         if let Some(i) = pick {

@@ -233,13 +233,16 @@ fn photo_windows(P: vec3f, N: vec3f, upn: vec3f, tag: u32, albedo: vec3f) -> vec
     on = step(1.0 - litp, hash3(vec3f(id.y * 3.1, face, occ * 17.0))) * step(0.1, hw);
     bright *= 0.6;
     lc = mix(vec3f(0.82, 0.9, 1.0), vec3f(1.0, 0.85, 0.65), step(0.72, h2));
-    far_c = vec3f(1.0, 0.86, 0.68);
+    far_c = mix(vec3f(0.76, 0.88, 1.0), vec3f(1.0, 0.84, 0.62), step(0.68, hash3(vec3f(floor(id.y * 0.5) * 4.7, face, occ * 13.0))));
   }
   // Glass in the photograph is darker than the wall round it: lean on that.
   let dark = clamp(1.4 - lum * 3.0, 0.5, 1.2);
   let aa = clamp(1.0 - max(fw.x, fw.y) * 1.7, 0.0, 1.0);
   let near = lc * on * bright * glass * dark;
-  let far = far_c * litp * winfrac * select(0.36, 0.26, tall);
+  let baa = clamp(1.0 - fw.y / 2.0 * 1.3, 0.0, 1.0);
+  let bband = step(1.0 - litp * 1.05, hash3(vec3f(floor(id.y * 0.5) * 4.3, face, occ * 19.0)));
+  let far_w = select(litp * 0.22, mix(litp * 0.10, bband * 0.36, baa), tall);
+  let far = far_c * far_w * winfrac * select(0.32, 0.22, tall);
   // (as bright as our own facades' rooms, facade.wgsl)
   return mix(far * 0.025, near * 0.015, aa) * wall * (1.0 - veg);
 }

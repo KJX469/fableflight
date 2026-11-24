@@ -640,6 +640,21 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     fcs: crate::aero::Fcs { g_law: true, alpha_max: 0.21, speed_hold: 1.0, flare_alpha: 0.15, damp: [0.0, 0.0, 3.0], damp_auth: 0.3, gear_q: 6000.0, ..crate::aero::Fcs::NONE },
     ..crate::aero::Rig::BASE
 };
+/// Paint schemes for the aircraft picker (`aircraft::liveries`). "Private"
+/// is the baked white jet (assets/g650_paint.jpg). The others are the 747's
+/// two FICTIONAL airlines (`b747::ORIVANTE`, `b747::KESTRALIS`), as a
+/// corporate shuttle in their colours: painted by plane.wgsl `livery_g650`
+/// over the same skin baked without its scheme (assets/g650_plain.jpg,
+/// `python assets/blender/g650_paint.py --plain`), whose panel lines,
+/// windows and doors show through. Colours: as the 747's, the fourth unused.
+pub const LIVERIES: &[Livery] = &[
+    Livery { name: "Private", colours: [[0.0; 4]; 4], title: "", paint: None, swatch: [[0.009, 0.018, 0.055], [0.47, 0.30, 0.085]], still: include_bytes!("../../../assets/aircraft/liveries/g650_private.png") },
+    Livery { name: "Orivante", colours: [b747::ORIVANTE[0], b747::ORIVANTE[1], b747::ORIVANTE[2], [0.0; 4]], title: "ORIVANTE", paint: Some(&PLAIN), swatch: [[0.004, 0.10, 0.11], [0.80, 0.24, 0.10]], still: include_bytes!("../../../assets/aircraft/liveries/g650_orivante.png") },
+    Livery { name: "Kestralis", colours: [b747::KESTRALIS[0], b747::KESTRALIS[1], b747::KESTRALIS[2], [0.0; 4]], title: "KESTRALIS", paint: Some(&PLAIN), swatch: [[0.006, 0.02, 0.10], [0.85, 0.36, 0.02]], still: include_bytes!("../../../assets/aircraft/liveries/g650_kestralis.png") },
+];
+/// The skin baked without its scheme: white all over, no registration.
+static PLAIN: Paint = Paint { jpg: include_bytes!("../../../assets/g650_plain.jpg"), ..PAINT };
+const PAINT: Paint = Paint { jpg: include_bytes!("../../../assets/g650_paint.jpg"), views: 4, span: 31.4, length: 31.8, centre: [(CG_D - 15.2) as f64, (3.9 - CG_H) as f64], relief: 1.0, sheen: 0.0 };
 
 pub static SPEC: Spec = Spec {
     id: 9,
@@ -651,7 +666,7 @@ pub static SPEC: Spec = Spec {
     ext: None,
     still: include_bytes!("../../../assets/aircraft/g650.png"),
     // (GUIDE_SPAN, GUIDE_LEN, GUIDE_Y, GUIDE_Z in g650.py)
-    paint: Some(Paint { jpg: include_bytes!("../../../assets/g650_paint.jpg"), views: 4, span: 31.4, length: 31.8, centre: [(CG_D - 15.2) as f64, (3.9 - CG_H) as f64], relief: 1.0, sheen: 0.0 }),
+    paint: Some(PAINT),
     build,
     // Estimates of how its empty mass (about 24 t) divides.
     groups: [("fuselage", 11_500.0), ("tail", 1_300.0), ("left wing", 3_900.0), ("right wing", 3_900.0), ("flight deck", 1_500.0), ("radome", 60.0), ("gear", 1_300.0)],
@@ -793,6 +808,7 @@ pub static SPEC: Spec = Spec {
     slats_at: 0,
     lever: None,
     gear_rate: 1.0 / 8.0,
+    electric_actuators: false,
     // VMO 340 KCAS (300 below 8,000 ft, which cannot be set here), MMO 0.925
     // (TCDS). Flutter sets in 15% past the dive speed, the margin CS 25.629
     // demands (the dive speed an estimate, VMO + 50 kt: 390 kt; it was dived

@@ -30,10 +30,7 @@ cargo build --release
 ./target/release/fablegame
 ```
 
-The game listens on `127.0.0.1:42761` by default.  `--mcp-port PORT` changes
-it; `--no-mcp` disables the service for one run.  The bridge uses the same
-default and reads `FABLEFLIGHT_MCP_PORT` if the port was changed, or accepts
-`--port PORT`.
+The game listens on `127.0.0.1:42761` by default and writes a per-session secret token to `<config dir>/fablegame/mcp-<port>.token` (mode `0600` on Unix).  `--mcp-port PORT` changes the port; `--no-mcp` disables the service for one run.  The bridge uses the same default port, reads the token automatically (or from `FABLEFLIGHT_MCP_TOKEN`), and reads `FABLEFLIGHT_MCP_PORT` if the port was changed, or accepts `--port PORT`.
 
 ## Client configuration
 

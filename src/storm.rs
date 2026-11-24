@@ -115,8 +115,8 @@ pub fn line_of(c: &[[f32; 4]; 2]) -> (f64, f64) {
 /// A squall line's shelf cloud: its leading edge (the gust front) this far
 /// ahead of the line's axis, and its width, x the line's radius (common.wgsl
 /// SHELF_F, SHELF_W).
-pub const SHELF_F: f64 = 1.4;
-const SHELF_W: f64 = 0.65;
+pub const SHELF_F: f64 = 1.42;
+const SHELF_W: f64 = 0.50;
 
 /// How far back from a squall line's gust front a point is, m (negative
 /// ahead of it); the front bows in and out along the line (common.wgsl storm_sd).
@@ -128,8 +128,8 @@ fn shelf_u(a: &At) -> f64 {
 /// much, and how much of that is the heavy curtain (clouds.wgsl line_rain).
 fn line_rain(u: f64, r: f64) -> (f64, f64) {
     let ws = SHELF_W * r;
-    let heavy = 1.0 - smoothstep(ws + 0.6 * r, ws + 1.2 * r, u);
-    let tail = 0.35 * (1.0 - smoothstep(ws + 1.2 * r, ws + 3.6 * r, u));
+    let heavy = 1.0 - smoothstep(ws + 0.45 * r, ws + 0.95 * r, u);
+    let tail = 0.35 * (1.0 - smoothstep(ws + 0.95 * r, ws + 3.2 * r, u));
     let on = smoothstep(0.7 * ws, 1.1 * ws, u);
     (on * (tail + (1.0 - tail) * heavy), on * heavy)
 }
@@ -138,7 +138,7 @@ fn line_rain(u: f64, r: f64) -> (f64, f64) {
 /// tower is a few km deep; a shower's light to moderate, an ordinary storm's
 /// heavy, a big mature one's the heaviest.
 fn shaft_amount(a: &At) -> f64 {
-    smoothstep(1800.0, 3500.0, a.htop) * smoothstep(900.0, 2200.0, a.r) * (0.35 + 0.4 * smoothstep(0.45, 0.8, a.age) + 0.25 * smoothstep(2500.0, 6000.0, a.r))
+    smoothstep(1800.0, 3500.0, a.htop) * smoothstep(800.0, 2000.0, a.r) * (0.35 + 0.4 * smoothstep(0.45, 0.8, a.age) + 0.25 * smoothstep(3000.0, 9000.0, a.r))
 }
 
 /// The storm cells' rain, cloud and air at a point (planet frame) `agl` metres
@@ -163,7 +163,7 @@ pub fn local(wx: &Weather, pos: DVec3, agl: f64, t: f64) -> Local {
             continue;
         }
         let mature = smoothstep(0.5, 0.8, a.age);
-        let size = smoothstep(2500.0, 8000.0, r);
+        let size = smoothstep(2200.0, 8500.0, r);
         let amt = shaft_amount(&a);
         // The rain shaft hangs under the downwind half of the base. Along a
         // squall line: a curtain right behind the shelf cloud, a long tail of
@@ -182,7 +182,7 @@ pub fn local(wx: &Weather, pos: DVec3, agl: f64, t: f64) -> Local {
         let hb = a.hb.max(0.0);
         let hc = (hb / a.htop.max(1.0)).min(1.2);
         let dw = a.dw0 - hb * (0.12 + 0.1 * mature + 0.08 * sup);
-        let rt = (0.82 - 0.2 * sup) * r * (1.0 - 0.28 * smoothstep(0.0, 0.9, hc));
+        let rt = (0.92 - 0.12 * sup) * r * (1.06 - 0.26 * smoothstep(0.0, 0.88, hc));
         let rr = dw.hypot(a.cx) / rt;
         let inside = if a.hb >= 0.0 && a.hb < a.htop { 1.0 - smoothstep(0.85, 1.08, rr) } else { 0.0 };
         o.cloud = o.cloud.max(inside);
@@ -272,6 +272,85 @@ pub fn local(wx: &Weather, pos: DVec3, agl: f64, t: f64) -> Local {
     o
 }
 
+/// A horizontal bounding circle holding all of storm cell `c`: xyz centre on
+/// the planet surface (planet frame, m) and w radius (m). Precomputed once per
+/// frame on the CPU for Globals.storm_bounds (common.wgsl `storm_bound`).
+pub fn bound(c: &[[f32; 4]; 2], cloud_off: DVec3, wind_dir: DVec3, base: f32) -> [f32; 4] {
+    let r = c[0][3] as f64 * 1000.0;
+    let age = c[1][0] as f64;
+    let mature = smoothstep(0.5, 0.8, age);
+    let sup = crate::weather::supercell(c);
+    let line = c[1][3] >= 1.0;
+    let reach = if line { 2.6 } else { 4.0 };
+    let ax = r * (1.0 + (reach + (7.8 - reach) * sup) * mature) * 1.22;
+    let ay = r * (0.9 + 0.35 * mature + 0.35 * sup) * 1.22;
+    let az = r * (1.1 + 0.65 * mature + 0.25 * sup) * 1.22;
+    let lean = (0.22 + 0.08 * sup) * (c[1][1] as f64 - base as f64).max(0.0);
+    let up = (DVec3::new(c[0][0] as f64, c[0][1] as f64, c[0][2] as f64) - cloud_off * 0.001).normalize();
+    let cen = up * geo::R + wind_dir * (0.5 * (ax - ay) + lean * 0.5);
+    let bulge = (r * 0.25).clamp(1000.0, 3200.0);
+    let rb = (0.5 * (ax + ay) + lean * 0.5).max(az + ax * 0.45).max(0.5 * (ax - ay) + lean * 0.5 + r * 4.2) + bulge + 2500.0;
+    [cen.x as f32, cen.y as f32, cen.z as f32, rb as f32]
+}
+
+/// Precomputed lone-cell turrets (slots 0..5: `[tc.x, tc.y, rk, ck]`) and
+/// flanking towers (slots 5..8: `[fo.x, fo.y, fr, ft]`) for `Globals.storm_turrets`
+/// (common.wgsl `storm_sd`), avoiding repeated 4D hashes and trig on every ray step.
+pub fn turrets(c: &[[f32; 4]; 2], base: f32) -> [[f32; 4]; 8] {
+    let mut out = [[0.0f32; 4]; 8];
+    let r = c[0][3] * 1000.0;
+    let sp = c[1];
+    let l2 = sp[3].floor() * 500.0;
+    if r <= 0.0 || l2 > 0.0 {
+        return out;
+    }
+    let seed = sp[3] - sp[3].floor();
+    let mature = smoothstep(0.5, 0.8, sp[0] as f64) as f32;
+    let sup = (sp[0] - 1.0).clamp(0.0, 1.0);
+    let at = sp[1] - base;
+    let htop = at * storm_top(sp[0] as f64) as f32;
+    let hash4 = |x: f32| -> [f32; 4] {
+        let f = |v: f32| v - v.floor();
+        let mut p = [f(x * 0.1031), f(x * 0.1030), f(x * 0.0973), f(x * 0.1099)];
+        let d = p[0] * (p[3] + 33.33) + p[1] * (p[2] + 33.33) + p[2] * (p[0] + 33.33) + p[3] * (p[1] + 33.33);
+        for v in &mut p {
+            *v += d;
+        }
+        [f((p[0] + p[1]) * p[2]), f((p[0] + p[2]) * p[1]), f((p[1] + p[2]) * p[3]), f((p[2] + p[3]) * p[0])]
+    };
+    if sup <= 0.5 {
+        let a0 = seed * 17.0;
+        let mut tdir = [a0.cos(), a0.sin()];
+        for (k, slot) in out[..5].iter_mut().enumerate() {
+            let fk = k as f32;
+            let hs = hash4(seed * 91.7 + fk * 12.989);
+            let rk = r * (0.48 + 0.22 * hs[2]);
+            let ft = htop * (0.46 + (0.92 - 0.46) * hs[3]) * (0.80 + 0.20 * mature);
+            let dj = 0.4775 * hs[0];
+            let dj2 = dj * dj;
+            let cd = 1.0 - 0.5 * dj2 + 0.041667 * dj2 * dj2;
+            let sd_ = dj * (1.0 - 0.166667 * dj2);
+            let dist = r * (0.58 + 0.30 * hs[1]);
+            let tc = [(tdir[0] * cd - tdir[1] * sd_) * dist, (tdir[0] * sd_ + tdir[1] * cd) * dist];
+            tdir = [tdir[0] * 0.309017 - tdir[1] * 0.9510565, tdir[0] * 0.9510565 + tdir[1] * 0.309017];
+            let ck = (ft - rk).max(0.0);
+            *slot = [tc[0], tc[1], rk, ck];
+        }
+    }
+    let fl = [-0.75f32, -0.66f32];
+    for k in 1..=3 {
+        let fk = k as f32;
+        let h = hash4(seed * 53.1 + fk * 17.37);
+        let fh4 = [h[0] * 2.0 - 1.0, h[1] * 2.0 - 1.0, h[2] * 2.0 - 1.0, h[3] * 2.0 - 1.0];
+        let a = r * (0.52 + 0.72 * fk + 0.12 * fh4[0]);
+        let fo = [fl[0] * a + fh4[1] * (r * 0.28), fl[1] * a + fh4[2] * (r * 0.28)];
+        let fr = r * (0.72 - 0.14 * fk) * (1.0 - 0.35 * sup);
+        let ft = htop * (0.74 - 0.16 * fk) * (0.65 + 0.35 * mature) * (0.9 + 0.18 * fh4[3]);
+        out[4 + k] = [fo[0], fo[1], fr, ft];
+    }
+    out
+}
+
 /// The storm cells (of those handed to the shaders) close enough to the camera
 /// to darken the ground in view, as a bit mask (Globals.stormfx.x).
 pub fn near_mask(wx: &Weather, cam: DVec3) -> u32 {
@@ -279,7 +358,7 @@ pub fn near_mask(wx: &Weather, cam: DVec3) -> u32 {
     for (i, c) in wx.cells.iter().enumerate().take(24) {
         let cen = DVec3::new(c[0][0] as f64, c[0][1] as f64, c[0][2] as f64) * 1000.0 - wx.cloud_off;
         let d = (cen.normalize() - cam.normalize()).length() * geo::R;
-        if d < c[0][3] as f64 * 1000.0 * 6.5 + 40_000.0 + line_of(c).0 {
+        if d < c[0][3] as f64 * 1000.0 * 6.0 + 50_000.0 + line_of(c).0 {
             m |= 1 << i;
         }
     }
@@ -291,9 +370,9 @@ fn anvil_lid(a: &At) -> f64 {
     let r = a.r;
     let mature = smoothstep(0.5, 0.8, a.age);
     let sup = a.sup;
-    let reach = if a.len2 > 0.0 { 2.8 } else { 4.5 };
-    let an = (r * (1.0 + (reach + (10.5 - reach) * sup) * mature), r * (0.8 + 0.35 * mature + 0.45 * sup), r * (1.0 + 0.6 * mature + 0.4 * sup));
-    let lc = an.2 + a.dw0.max(0.0) * (0.45 - 0.15 * sup);
+    let reach = if a.len2 > 0.0 { 2.6 } else { 4.0 };
+    let an = (r * (1.0 + (reach + (7.8 - reach) * sup) * mature), r * (0.9 + 0.35 * mature + 0.35 * sup), r * (1.1 + 0.65 * mature + 0.25 * sup));
+    let lc = an.2 + a.dw0.max(0.0) * (0.42 - 0.14 * sup);
     let rn = (a.dw0 / if a.dw0 > 0.0 { an.0 } else { an.1 }).hypot(a.cx / lc);
     (1.0 - smoothstep(0.5, 1.05, rn)) * 0.55 * mature
 }
@@ -596,7 +675,7 @@ impl Lightning {
             let r = c[0][3] as f64 * 1000.0;
             let age = c[1][0] as f64;
             let tall = smoothstep(LIGHTNING_TOP - 800.0, LIGHTNING_TOP + 800.0, c[1][1] as f64 - (c[1][1] as f64 - base) * (1.0 - storm_top(age)));
-            let strength = tall * smoothstep(0.5, 0.9, age) * (0.12 + 0.88 * smoothstep(2500.0, 8000.0, r)) * (0.5 + 0.5 * wx.storms.max(0.6) as f64);
+            let strength = tall * smoothstep(0.5, 0.9, age) * (0.12 + 0.88 * smoothstep(2200.0, 8500.0, r)) * (0.5 + 0.5 * wx.storms.max(0.6) as f64);
             // A big mature cell: ~10 flashes a minute; an ordinary one, one or two.
             // A squall line flashes all along its length, like a row of them.
             let (len2, _) = line_of(&c);

@@ -54,7 +54,7 @@ const INSET: f32 = 0.045;
 /// stations; two side windows each side, between these angles.
 const WS_A: f32 = FRAC_PI_4;
 const WS_Z: [f32; 2] = [-25.3, -23.7];
-const SW_A: [f32; 2] = [0.3927, 0.8836];
+const SW_A: [f32; 2] = [std::f32::consts::FRAC_PI_8, 0.8836];
 const SW_Z: [[f32; 2]; 2] = [[-23.45, -23.02], [-22.94, -22.5]];
 
 /// A point `inset` inside the skin at station z, at angle a round the section

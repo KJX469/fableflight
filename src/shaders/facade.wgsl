@@ -6,6 +6,9 @@ fn rect(cx: f32, fy: f32, w: f32, y0: f32, y1: f32, fw: vec2f) -> f32 {
   return box(cx, w * 0.5, fw.x) * box(fy - (y0 + y1) * 0.5, (y1 - y0) * 0.5, fw.y);
 }
 
+// Share of the city exposure drop (in stops) the facades' own lights make up.
+const CITY_LIGHTS_BACK = 0.7;
+
 struct Facade {
   albedo: vec3f,
   glass: f32,   // how much of this pixel is window glass
@@ -23,7 +26,7 @@ struct Facade {
   aa: f32,      // 1 when single windows are resolved on screen
 };
 
-fn facade(uv: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, fw_in: vec2f) -> Facade {
+fn facade(uv: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, fw_in: vec2f, want_lights: bool) -> Facade {
   let fw = max(fw_in, vec2f(0.0015));
   var floor_h = 3.0;
   var cell_w = 3.0 + seed * 1.2;
@@ -62,6 +65,10 @@ fn facade(uv: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, fw
   var coat = 0.04;
   var bays = 1.0;
   var tilt_k = 0.012;
+  // Office towers break every dozen or two storeys for a mechanical floor:
+  // louvres instead of glass, never lit.
+  let mper = 14.0 + floor(fract(seed * 3.7) * 12.0);
+  let mech = (ftype == 2u || ftype == 3u) && H >= 100.0 && id.y > 3.5 && top > floor_h * 2.0 && id.y - mper * floor(id.y / mper) > mper - 1.5;
 
   if (ftype == 0u) {
     // House: scattered windows, a front door, siding or brick or stucco.
@@ -146,6 +153,12 @@ fn facade(uv: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, fw
     open = vec4f(cell_w * 0.5 - 0.035, 1.05, 2.85, 0.12);
     bays = 3.0;
     coat = 0.06 + 0.06 * fract(seed * 13.0);
+    if (mech) {
+      glass = 0.0;
+      open = vec4f(0.0);
+      dark = box(fy - 1.95, 1.2, fw.y) * (0.6 + 0.4 * step(0.5, fract(uv.y / 0.15)) * fine);
+      darkcol = vec3f(0.15, 0.155, 0.16);
+    }
     if (uv.y < 4.2) {
       glass = box(uv.y - 2.0, 1.6, fw.y) * (1.0 - box((fract(uv.x / 2.4) - 0.5) * 2.4, 0.05, fw.x));
       ocx = (fract(uv.x / 2.4) - 0.5) * 2.4;
@@ -171,6 +184,14 @@ fn facade(uv: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, fw
     // Some towers are near mirrors, some show their insides.
     coat = mix(0.06, 0.4, smoothstep(0.35, 0.9, fract(seed * 7.77)));
     tilt_k = 0.022;
+    if (mech) {
+      // Louvre panels behind the mullion grid.
+      glass = 0.0;
+      span = 0.0;
+      open = vec4f(0.0);
+      dark = (1.0 - mull) * (0.7 + 0.3 * step(0.5, fract(fy / 0.12)) * fine);
+      darkcol = base * 0.3 + 0.05;
+    }
     if (uv.y < 5.0) {
       dark = 0.0;
       span = 0.0;
@@ -204,40 +225,89 @@ fn facade(uv: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, fw
   var a = mix(wall, trim, clamp(frame - glass, 0.0, 1.0));
   a = mix(a, darkcol, clamp(dark, 0.0, 1.0));
   a = mix(a, glasscol, glass);
-  let avg = mix(wall, glasscol, winfrac);
-  f.albedo = mix(avg, a, aa);
-  f.glass = mix(winfrac, glass, aa);
-  // Who is in tonight: some buildings nearly dark, some blazing. Offices
-  // light whole floors at a time; shop fronts stay lit for the street.
-  let occ = hash2(vec2f(seed * 53.0, 7.1));
-  let office = ftype == 2u || ftype == 3u;
-  let hw = hash2(id * 1.37 + seed * 91.0);
-  var litp = 0.32 * mix(0.1, 1.7, occ * occ);
-  var on = step(1.0 - litp, hw);
-  var bright = 0.4 + 0.9 * h2;
-  if (office) {
-    // After hours: a few floors where the cleaners are, behind tinted glass.
-    litp = 0.2 * mix(0.1, 2.2, occ * occ);
-    on = step(1.0 - litp, hash2(vec2f(id.y * 3.1, seed * 17.0))) * step(0.1, hw);
-    bright *= 0.6;
+  // Storeys stay resolvable much further out than single windows.
+  let faa = clamp(1.0 - fw.y / floor_h * 1.4, 0.0, 1.0);
+  var avg = mix(wall, glasscol, winfrac);
+  var wf = winfrac;
+  if (mech) {
+    avg = mix(avg, mix(wall, darkcol, 0.75), faa);
+    wf *= 1.0 - faa;
   }
-  if (ground && ftype == 5u) { on = step(0.2, hc); bright = 1.6; litp = 0.8; }
-  // Incandescent, warm LED, cold fluorescent; now and then a flickering TV.
-  let hk = hash2(id * 2.31 + seed * 7.0);
-  var lc = mix(vec3f(1.0, 0.6, 0.28), vec3f(1.0, 0.82, 0.6), smoothstep(0.3, 0.75, hk));
-  if (office) { lc = mix(vec3f(0.82, 0.9, 1.0), vec3f(1.0, 0.85, 0.65), step(0.72, hk)); }
-  else if (hk > 0.94) { lc = vec3f(0.45, 0.6, 1.0) * (0.65 + 0.45 * sin(G.time.x * 9.0 + hk * 80.0) * sin(G.time.x * 3.7 + h1 * 50.0)); }
-  // Lit from the ceiling: brighter toward the top of the window.
-  let room = 0.7 + 0.45 * smoothstep(0.6, 2.4, fy);
-  // From afar: the average, dimmed (a flat glow reads far brighter than the
-  // scattered points it stands for) and broken into lit and dark blocks of a
-  // floor or two in long runs, which stay resolvable much further out than
-  // single windows.
-  let bid = vec2f(floor(g.x / 9.0 + hash1(id.y + seed * 9.0) * 3.0), floor(g.y / 1.5));
-  let baa = clamp(1.0 - fw.y / (floor_h * 1.5) * 1.7, 0.0, 1.0);
-  let blocks = mix(1.0, smoothstep(0.3, 0.85, hash2(bid + seed * 23.0)) * 1.9 + 0.1, baa);
-  f.lit = mix(litp * winfrac * select(0.36, 0.26, office) * blocks, on * bright * room * glass, aa);
-  f.lcol = mix(select(vec3f(1.0, 0.72, 0.42), vec3f(1.0, 0.86, 0.68), office), lc, aa);
+  f.albedo = mix(avg, a, aa);
+  f.glass = mix(wf, glass, aa);
+  f.lit = 0.0;
+  f.lcol = vec3f(0.0);
+  f.on = 0.0;
+  if (want_lights) {
+    // Who is in tonight: some buildings nearly dark, some blazing. Offices
+    // light a floor at a time; shop fronts stay lit for the street.
+    let occ = hash2(vec2f(seed * 53.0, 7.1));
+    let office = ftype == 2u || ftype == 3u;
+    let lobby = office && H > 20.0 && uv.y < select(4.2, 5.0, ftype == 3u);
+    let hw = hash2(id * 1.37 + seed * 91.0);
+    var litp = 0.32 * mix(0.1, 1.7, occ * occ);
+    var on = step(1.0 - litp, hw);
+    var bright = 0.4 + 0.9 * h2;
+    // How much of the glass is lit as seen from far enough off that windows
+    // blend: the building's share, or once storeys are resolved, that floor's.
+    var far_l = litp;
+    if (office) {
+      // After hours, behind tinted glass: the floors where a tenant works late
+      // or the cleaners are, lit across most of the plate a lighting zone of a
+      // few bays at a time, and now and then a lone office on a dark floor.
+      litp = 0.2 * mix(0.1, 2.2, occ * occ);
+      let fon = hash2(vec2f(id.y * 3.1, seed * 17.0)) > 1.0 - litp;
+      let zw = cell_w * (5.0 + floor(hash1(id.y * 1.9 + seed * 7.0) * 8.0));
+      let zone = step(select(0.93, 0.28, fon), hash2(vec2f(floor(uv.x / zw + hash1(id.y + seed * 3.0)), id.y * 1.3 + seed * 29.0)));
+      on = zone * step(0.1, hw);
+      // One floor's fittings are all alike, but floors differ: full lighting
+      // where people work, a dim security level where the cleaners have gone.
+      let fb = 0.45 + 0.8 * hash1(id.y * 7.3 + seed * 41.0);
+      bright = fb * (0.85 + 0.3 * h2) * 0.6;
+      // A floor reads as a thin band of light once its zones blend; further out
+      // it stays broken into delicate lit bands over dark glass rather than a
+      // flat grey slab.
+      let fl = mix(select(0.015, 0.68, fon), zone, clamp(1.0 - fw.x / zw * 2.0, 0.0, 1.0)) * 0.9;
+      let baa = clamp(1.0 - fw.y / (floor_h * 2.0) * 1.3, 0.0, 1.0);
+      var far_band = 0.10 * litp;
+      if (faa < 1.0 && baa > 0.0) {
+        let by = floor(id.y * 0.5);
+        let band = step(1.0 - litp * 1.05, hash2(vec2f(by * 4.3, seed * 23.0))) * (0.4 + 0.6 * hash2(vec2f(floor(uv.x / 12.0), by + seed * 13.0)));
+        far_band = mix(far_band, band * select(0.42, 0.54, ftype == 3u), baa);
+      }
+      far_l = mix(far_band, fl * fb / 0.85, faa);
+      if (mech) { on = 0.0; far_l *= 1.0 - max(faa, baa * 0.8); }
+      // The lobby stays lit all night.
+      if (lobby) { on = 1.0; bright = 1.1; far_l = mix(far_l, 1.0, max(faa, baa)); }
+    } else {
+      // Homes light up flat by flat, not floor by floor: from afar only a
+      // gentle unevenness, storey by storey, staying dim beyond resolution.
+      let sv = hash2(vec2f(floor(g.x / 4.0 + hash1(id.y + seed * 9.0) * 3.0), id.y) + seed * 23.0);
+      far_l = litp * mix(0.22, 0.35 + 1.1 * sv, faa);
+    }
+    if (ground && ftype == 5u) { on = step(0.2, hc); bright = 1.6; far_l = mix(0.8, on, faa); }
+    // Incandescent, warm LED, cold fluorescent; now and then a flickering TV.
+    let hk = hash2(id * 2.31 + seed * 7.0);
+    var lc = mix(vec3f(1.0, 0.6, 0.28), vec3f(1.0, 0.82, 0.6), smoothstep(0.3, 0.75, hk));
+    if (lobby) { lc = vec3f(1.0, 0.8, 0.56); }
+    else if (office) { lc = mix(vec3f(0.82, 0.9, 1.0), vec3f(1.0, 0.85, 0.65), step(0.72, hk)); }
+    else if (hk > 0.94) { lc = vec3f(0.45, 0.6, 1.0) * (0.65 + 0.45 * sin(G.time.x * 9.0 + hk * 80.0) * sin(G.time.x * 3.7 + h1 * 50.0)); }
+    // Lit from the ceiling: brighter toward the top of the window.
+    let room = 0.7 + 0.45 * smoothstep(0.6, 2.4, fy);
+    // From afar: the lit share, dimmed (a flat glow reads far brighter than the
+    // scattered points it stands for), and on office floors kept to the band
+    // of vision glass once the storey is resolved.
+    var fg = wf;
+    if (ftype == 2u && !lobby) { fg = mix(wf, box(fy - 1.95, 0.9, fw.y) * wf * (3.7 / 1.8), faa); }
+    else if (ftype == 3u && !lobby) { fg = mix(wf, (1.0 - box(fy - 0.5, 0.45, fw.y)) * wf * (3.9 / 3.0), faa); }
+    f.lit = mix(far_l * fg * select(0.32, 0.26, office), on * bright * room * glass, aa);
+    var far_col = vec3f(1.0, 0.72, 0.42);
+    if (office && aa < 1.0) {
+      far_col = mix(vec3f(0.76, 0.88, 1.0), vec3f(1.0, 0.84, 0.62), step(0.68, hash1(floor(id.y * 0.5) * 4.7 + seed * 19.0)));
+    }
+    f.lcol = mix(far_col, lc, aa);
+    f.on = on * bright;
+  }
   f.cell = vec4f(ocx, ofy, ocw, floor_h);
   f.wid = id;
   f.open = open;
@@ -245,7 +315,6 @@ fn facade(uv: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, fw
   f.coat = coat;
   f.span = span * aa;
   f.bays = bays;
-  f.on = on * bright;
   f.aa = aa;
   return f;
 }
@@ -395,11 +464,12 @@ struct FShade { albedo: vec3f, extra: vec3f, N: vec3f, mirror: f32 };
 // rooms behind the windows, lights at night), the normal to shade with and
 // how much of it is mirror. N faces the viewer, Tw runs along the wall the
 // way uv.x grows; fw is the pixel footprint in uv. Smashed: the glass is out.
-fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, smashed: bool) -> FShade {
-  let l = light_at(P);
+// l and sh: light_at(P) and shadow_at(P, N), which the caller shades with too.
+fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, base: vec3f, ftype: u32, seed: f32, wealth: f32, H: f32, smashed: bool, l: Light, sh: f32) -> FShade {
   let night = night_at(l.upn);
   let dist = length(P);
-  var f = facade(uv, base, ftype, seed, wealth, H, fw);
+  let ck = city_k();
+  var f = facade(uv, base, ftype, seed, wealth, H, fw, night > 0.0 || dist < 750.0 * ck);
   if (smashed) {
     // Glass gone: dark empty openings in the frames, nothing lit behind them.
     f.albedo = mix(f.albedo, vec3f(0.02, 0.019, 0.018), f.glass * 0.9);
@@ -408,15 +478,20 @@ fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, b
     f.lit = 0.0;
     f.open.x = 0.0;
   }
+  // Over a city at night the exposure closes down to the lights around
+  // (main.rs `CITY_STOPS`): the moonlit walls and the haze drop away, the
+  // lit rooms and floodlights keep most of their brightness. (Not the street
+  // light washing the lowest floors: it must match the street it lights.)
+  let lg = exp2(G.misc.y * CITY_LIGHTS_BACK);
+  f.on *= lg;
+  f.lit *= lg;
   var albedo = f.albedo;
   // Facade frame: x along the wall (the way uv.x runs), y up, z into the building.
   let Bw = normalize(cross(N, Tw)) * sign(dot(cross(N, Tw), l.upn));
   let Vt = vec3f(dot(V, Tw), dot(V, Bw), dot(V, -N));
   let St = vec3f(dot(G.sun_dir.xyz, Tw), dot(G.sun_dir.xyz, Bw), dot(G.sun_dir.xyz, N));
-  let sh = shadow_at(P, N);
   // Close up, windows get depth: a recess, and a room behind the glass.
   // (out to distances the graphics settings' city detail scales)
-  let ck = city_k();
   let inner = f.aa * (1.0 - smoothstep(350.0 * ck, 750.0 * ck, dist));
   var gl = f.glass;
   // Pane-by-pane tilt only where single panes are resolved; further out it would shimmer.
@@ -446,24 +521,94 @@ fn facade_shade(P: vec3f, V: vec3f, N: vec3f, Tw: vec3f, uv: vec2f, fw: vec2f, b
     let near_alb = mix(mix(albedo, rev_col, reveal), vec3f(0.012), pane);
     albedo = mix(albedo, near_alb, inner);
     gl = mix(gl, pane, inner);
-    room = interior(q, Vt, f, ftype, seed, wealth, night, l.amb, l.sun * max(St.z, 0.0) * sh, max(fwq.x, fwq.y)) * pane;
+    // (the room shows only through the pane: not cast for the rest of the bay)
+    if (pane > 0.0) {
+      room = interior(q, Vt, f, ftype, seed, wealth, night, l.amb, l.sun * max(St.z, 0.0) * sh, max(fwq.x, fwq.y)) * pane;
+    }
   }
   // Glass: Fresnel reflection of sky, clouds and ground, the sun's glint,
   // and what is behind it seen through the tint.
+  let gcov = clamp(gl + f.span, 0.0, 1.0);
+  // By day glasscol stands in for the sunlit room from afar; at night an unlit
+  // room behind glass is dark, so distant glass keeps the same dark base as
+  // close-up panes instead of catching diffuse ambient light like matte paint.
+  albedo = mix(albedo, vec3f(0.005, 0.012, 0.030), night * gcov * (1.0 - inner * 0.65));
   let Ng = normalize(N + Tw * tilt.x + Bw * tilt.y);
   let R = reflect(V, Ng);
   let ndv = max(dot(-V, Ng), 0.0);
   let F = f.coat + (1.0 - f.coat) * pow(1.0 - ndv, 5.0);
-  let env = env_reflect(P, R, l.upn, dist < 2500.0);
-  let Hh = normalize(G.sun_dir.xyz - V);
-  let glint = pow(max(dot(Ng, Hh), 0.0), 1400.0) * 9.0 * gsun * F;
-  let tint = select(vec3f(0.86, 0.9, 0.88), mix(vec3f(0.75), base / max(luma(base), 0.05) * 0.5, 0.5) * (1.0 - f.coat), ftype == 3u);
+  var env = vec3f(0.0);
+  if (gcov > 0.001) {
+    env = env_reflect(P, R, l.upn, dist < 2500.0);
+  }
+  var glint = 0.0;
+  if (night < 0.99 && gsun > 0.001 && gl > 0.001) {
+    let Hh = normalize(G.sun_dir.xyz - V);
+    glint = pow(max(dot(Ng, Hh), 0.0), 1400.0) * 9.0 * gsun * F;
+  }
+  let bn = base / max(luma(base), 0.06);
+  let tint = select(select(vec3f(0.86, 0.9, 0.88), vec3f(0.68, 0.76, 0.84), ftype == 2u), mix(vec3f(0.75), bn * 0.5, 0.5) * (1.0 - f.coat), ftype == 3u);
   let refl = env * F + l.sun * glint;
-  var extra = (refl * gl) + (1.0 - F) * tint * room * inner;
+  let trans = (1.0 - F) * tint;
+  var extra = (refl * gl) + trans * room * inner;
   // Spandrel glass reflects the same way, with a dark panel behind it.
   extra += env * (F + 0.03) * f.span;
-  // Lit rooms after dusk from afar, and the street lights washing the lowest floors.
-  extra += f.lcol * 0.025 * G.sun_dir.w * night * f.lit * (1.0 - inner * step(0.001, o.x));
+  // At night, tall buildings and glass facades take on the cool dark midnight
+  // blue of the upper sky dome even when viewed from flight altitude (where R
+  // dips below the horizon) and after city exposure closes down, giving both
+  // glass and clad towers rich 3D midnight-blue depth at every distance without
+  // relying on screen-space reflections.
+  if (night > 0.0) {
+    let tower = smoothstep(15.0, 60.0, H);
+    let sky_h = 0.42 + 0.58 * clamp(uv.y / max(H, 12.0), 0.0, 1.0);
+    let az = 0.80 + 0.12 * dot(N, G.moon.xyz) + 0.08 * dot(N, G.north.xyz);
+    let n_k = night * sky_h * az * sqrt(lg);
+    if (gcov > 0.001) {
+      let nf = max(F, select(0.22, 0.36, ftype == 3u));
+      let gblue = mix(vec3f(0.14, 0.36, 0.96), mix(vec3f(0.13, 0.34, 0.94), bn * vec3f(0.18, 0.40, 0.96), 0.28), f32(ftype == 3u));
+      extra += gblue * (0.0045 + 0.0115 * tower) * n_k * nf * gcov;
+    }
+    if (tower > 0.0 && gcov < 0.999) {
+      let wlum = 0.4 + 0.6 * clamp(luma(albedo) * 2.5, 0.25, 1.0);
+      extra += vec3f(0.13, 0.31, 0.86) * 0.0062 * tower * n_k * wlum * (1.0 - gcov);
+    }
+  }
+  // Lit rooms after dusk from afar (passing through the same glass tint and
+  // Fresnel transmission as close-up interiors), and street lights washing the
+  // lowest floors.
+  extra += f.lcol * trans * 0.025 * G.sun_dir.w * night * f.lit * (1.0 - inner * step(0.001, o.x));
   extra += albedo * LAMP_COL * 0.012 * G.sun_dir.w * night * exp(-max(uv.y, 0.0) / 4.5) * (1.0 - gl);
+  // Architectural lighting on some towers and grander facades: the crown
+  // floodlit from its setback (on a glass tower, its floor edges traced in
+  // LED as well), and uplights along the foot of the wall. Mostly warm or
+  // neutral white, now and then a colour.
+  if (night > 0.0 && !smashed) {
+    let hs = hash1(seed * 71.3 + 4.1);
+    let hcol = hash1(seed * 37.9 + 1.7);
+    var acol = select(vec3f(1.0, 0.78, 0.55), vec3f(0.86, 0.92, 1.0), hcol > 0.6);
+    if (hcol > 0.9) { acol = 0.65 + 0.35 * cos(6.283 * (fract(seed * 5.1) + vec3f(0.0, 0.33, 0.67))); }
+    let aw = G.sun_dir.w * night * lg;
+    if (H >= 80.0 && hs < 0.2 + 0.45 * smoothstep(80.0, 300.0, H)) {
+      let ch = clamp(H * 0.07, 8.0, 40.0);
+      let up = ch - (H - uv.y);  // height above the floodlights
+      let inz = step(0.0, up);
+      // A fan of light from each fixture, blending to its mean from afar.
+      let sx = fract(uv.x / 3.5) - 0.5;
+      let fan = mix(1.0, 0.4 + 1.5 * exp(-sx * sx * 30.0 / (1.0 + up * 0.6)), clamp(1.0 - fw.x / 1.75, 0.0, 1.0));
+      extra += albedo * acol * 0.08 * aw * inz * (0.3 + 0.7 * exp(-up / (ch * 0.45))) * fan * (1.0 - gl);
+      if (ftype == 3u) {
+        let fh = f.cell.w;
+        let line = mix(0.1 / fh, box(fract(uv.y / fh) * fh - 0.05, 0.05, max(fw.y, 0.01)), clamp(1.0 - fw.y / fh * 1.4, 0.0, 1.0));
+        extra += acol * 0.05 * aw * line * inz;
+      }
+    }
+    if ((ftype == 2u || ftype == 3u || ftype == 5u) && H > 25.0 && hs > 0.85 - 0.3 * wealth) {
+      let fix = 5.0 + 3.0 * fract(seed * 9.1);
+      let y = max(uv.y, 0.0);
+      let sx = fract(uv.x / fix) - 0.5;
+      let fan = mix(1.0, 0.3 + 1.6 * exp(-sx * sx * 24.0 / (1.0 + y * 0.5)), clamp(1.0 - fw.x / fix * 2.0, 0.0, 1.0));
+      extra += albedo * acol * 0.06 * aw * exp(-y / (5.0 + H * 0.04)) * fan * (1.0 - gl);
+    }
+  }
   return FShade(albedo, extra, Ng, (gl + f.span) * F * (1.0 - smoothstep(900.0, 1500.0, dist)));
 }

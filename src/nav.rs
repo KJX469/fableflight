@@ -227,20 +227,17 @@ pub fn adf_bearing(st: &Station, pos: DVec3, heading: f64) -> Option<f64> {
     ((pos - ant).length() < 60.0 * 1852.0).then(|| (bearing(pos, ant) - heading).rem_euclid(360.0))
 }
 
-/// The radios: what NAV 1 and the ADF are tuned to, the OBS, whether the
-/// instruments are on screen, and the altimeter setting (None: kept on the
-/// QNH, as a pilot sets it before take-off and on the way down).
+/// the radios: nav 1, the adf, the obs and the altimeter setting, none for the qnh.
 pub struct Radios {
     pub nav: Option<Station>,
     pub obs: f64,
     pub adf: Option<Station>,
-    pub show: bool,
     pub baro: Option<f64>,
 }
 
 impl Default for Radios {
     fn default() -> Self {
-        Self { nav: None, obs: 0.0, adf: None, show: false, baro: None }
+        Self { nav: None, obs: 0.0, adf: None, baro: None }
     }
 }
 
@@ -252,12 +249,10 @@ impl Radios {
             _ => bearing(pos, st.pos()).round(),
         };
         self.nav = Some(st);
-        self.show = true;
     }
 
     pub fn tune_adf(&mut self, st: Station) {
         self.adf = Some(st);
-        self.show = true;
     }
 
     /// The altimeter setting (hPa), given the QNH.

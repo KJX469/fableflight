@@ -1,7 +1,8 @@
 [package]
 name = "fablegame"
-version = "1.0.0"
+version = "1.1.1"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 default-run = "fablegame"
 
@@ -14,6 +15,9 @@ earcutr = "0.5.0"
 egui = "0.37.0"
 egui-wgpu = "0.37.0"
 egui-winit = "0.37.0"
+# the launcher's window (src/bin/fableflight-launcher); the same egui and wgpu
+# as the game, so it adds little to the build
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "wayland", "x11", "links", "clipboard"] }
 ab_glyph = "0.2.32"
 env_logger = "0.11.11"
 flate2 = "1.1.11"
@@ -27,6 +31,8 @@ rodio = { version = "0.23.0", default-features = false, features = ["playback"] 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.154"
 ureq = "3.5.1"
+# SHA-256 for the FSR 4 runtime download (already built for ureq's TLS).
+ring = "0.17"
 wgpu = "30"
 winit = "0.30"
 roxmltree = "0.20"
@@ -41,12 +47,16 @@ zip = { version = "9.6.0", default-features = false, features = ["deflate"] }
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "30", features = ["static-dxc"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# opens Feral GameMode's client library at run time (gamemode.rs)
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+# opens Feral GameMode's client library (gamemode.rs, Linux) and AMD's FSR 4
+# runtime (fsr4.rs, Windows) at run time
 libloading = "0.8"
+# Vulkan handles for AMD's FSR 4 runtime (fsr4.rs); the version wgpu-hal uses
+ash = "0.38"
 
 [dev-dependencies]
-naga = { version = "=30.0.1", features = ["wgsl-in"] }
+# Keep in step with wgpu's naga version when upgrading wgpu.
+naga = { version = "=30.0.1", features = ["wgsl-in", "msl-out"] }
 
 # full lto and one codegen unit for faster release builds.
 [profile.release]

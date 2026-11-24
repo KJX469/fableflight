@@ -511,10 +511,6 @@ fn door_trim(m: &mut Mesh) {
             v.nrm = (-Vec3::from(v.nrm)).into();
         }
     }
-    // A pen and a folded chart showing over the lip.
-    d.tube(&mt(mat::PLASTIC, 0.03, 0.06, 0.25), &[Vec3::new(inner_x(-1.1, -0.25) - 0.02, -0.255, -1.16), Vec3::new(inner_x(-1.0, -0.23) - 0.022, -0.225, -1.03)], &|_| 0.004, 8, true);
-    d.rbox(&mt(mat::PLASTIC, 0.62, 0.62, 0.55).pat(pat::PLACARD), Vec3::new(inner_x(-0.9, -0.27) - 0.017, -0.262, -0.90), Vec3::new(0.0015, 0.03, 0.09), 0.001, Quat::from_rotation_x(0.08));
-
     // Pull strap on the door just under the window, for closing it.
     let (a, an) = on_side(-0.82, 0.03, 1.0, -0.043);
     let (b, _) = on_side(-0.68, 0.03, 1.0, -0.043);
@@ -724,7 +720,9 @@ fn seats(m: &mut Mesh) {
         m.rbox(&side, Vec3::new(xs, 0.0, -0.31), Vec3::new(0.215, 0.29, 0.035), 0.03, tilt);
         m.rbox(&up, Vec3::new(xs, 0.40, -0.21), Vec3::new(0.11, 0.07, 0.04), 0.035, tilt);
         for dx in [-0.07f32, 0.07] {
-            m.tube(&CHROME, &[Vec3::new(xs + dx, 0.32, -0.235), Vec3::new(xs + dx, 0.36, -0.225)], &|_| 0.005, 8, false);
+            // The twin adjustment rails bury into both cushions, so the
+            // padded headrest cannot look detached from the seat back.
+            m.tube(&CHROME, &[Vec3::new(xs + dx, 0.24, -0.285), Vec3::new(xs + dx, 0.34, -0.22)], &|_| 0.006, 8, true);
         }
         // Frame and adjuster under the cushion.
         for (dx, dz) in [(-0.15f32, -0.88f32), (0.15, -0.88), (-0.15, -0.46), (0.15, -0.46)] {
@@ -771,9 +769,8 @@ fn fittings(m: &mut Mesh) {
 
 // ---------------------------------------------------------------- odds and ends
 
-/// The things that make it somebody's aeroplane: the outside air thermometer
-/// poking through the windshield, the overhead console, a headset and a
-/// checklist left on the right seat, the parking brake and cowl flap handles.
+/// Cabin fittings: an outside air thermometer, overhead console, and the
+/// parking brake and cowl flap handles. Keep loose flight gear off the seats.
 fn extras(m: &mut Mesh) {
     // Outside air thermometer: a dial on a stem through the top left of the windshield.
     let gp = Vec3::new(-0.36, fuse_top_y(-1.2, -0.36), -1.2);
@@ -809,40 +806,6 @@ fn extras(m: &mut Mesh) {
     }
     m.rbox(&PAINT_WHITE.pat(pat::PLACARD), Vec3::new(-0.0425, fy - 0.0002, -0.795), Vec3::new(0.022, 0.0003, 0.006), 0.0002, Quat::IDENTITY);
 
-    // A headset left on the right seat: cups face down, the band lying flat
-    // between them, the mic boom forward and the cord trailing off the cushion.
-    let seat_y = -0.36 + 0.045 + 0.004;
-    let cup = mt(mat::PLASTIC, 0.06, 0.062, 0.068);
-    let seal = mt(mat::FABRIC, 0.02, 0.02, 0.022);
-    let (ca, cb) = (Vec3::new(0.19, seat_y, -0.70), Vec3::new(0.35, seat_y, -0.64));
-    for c in [ca, cb] {
-        m.lathe(&seal, c, Vec3::Y, &[[0.0, 0.0], [0.042, 0.0], [0.047, 0.008], [0.044, 0.016]], 22, false);
-        m.lathe(&cup, c + Vec3::Y * 0.014, Vec3::Y, &[[0.043, 0.0], [0.045, 0.012], [0.04, 0.03], [0.026, 0.04], [0.0, 0.042]], 22, false);
-        m.disc(&mt(mat::PAINT, 0.5, 0.5, 0.5).pat(pat::PLACARD), c + Vec3::Y * 0.0565, Vec3::Y, Vec3::Z, 0.012, 14);
-    }
-    let mid = (ca + cb) * 0.5;
-    let side = (cb - ca).normalize();
-    let bow = Vec3::Y.cross(side).normalize() * -1.0;
-    let band: Vec<Vec3> = (0..=16).map(|k| {
-        let t = k as f32 / 16.0;
-        let a = (t - 0.5) * PI;
-        mid + side * (a.sin() * 0.085) + bow * (a.cos() * 0.10) + Vec3::Y * 0.03
-    }).collect();
-    m.tube(&cup, &band, &|_| 0.0055, 8, true);
-    m.tube(&seal, &band[4..13], &|_| 0.011, 10, true);
-    let boom: Vec<Vec3> = [(0.0, 0.03, 0.0), (-0.03, 0.028, -0.04), (-0.04, 0.02, -0.10), (-0.025, 0.012, -0.14)].iter().map(|&(x, y, z)| ca + Vec3::new(x, y, z)).collect();
-    m.tube(&BLACK, &boom, &|_| 0.0022, 6, true);
-    m.dome(&seal, *boom.last().unwrap(), Vec3::new(0.3, 0.2, -1.0).normalize(), 0.011, 0.016, 12, 0.0);
-    let cord: Vec<Vec3> = [(0.0, 0.01, 0.03), (0.03, -0.003, 0.09), (-0.05, -0.004, 0.13), (-0.10, -0.004, 0.06), (-0.16, -0.01, -0.01), (-0.17, -0.07, -0.05), (-0.165, -0.16, -0.08)]
-        .iter().map(|&(x, y, z)| ca + Vec3::new(x, y, z)).collect();
-    m.tube(&BLACK, &cord, &|_| 0.0028, 6, true);
-
-    // A laminated checklist beside it.
-    let card = Quat::from_rotation_y(0.35);
-    let cc = Vec3::new(0.33, seat_y + 0.0015, -0.80);
-    m.rbox(&mt(mat::PLASTIC, 0.75, 0.74, 0.70).pat(pat::PLACARD), cc, Vec3::new(0.055, 0.0012, 0.08), 0.001, card);
-    m.rbox(&mt(mat::PLASTIC, 0.04, 0.12, 0.35), cc + card * Vec3::new(0.0, 0.0006, -0.068), Vec3::new(0.0545, 0.0008, 0.011), 0.0006, card);
-
     // (The parking brake's T handle moves: see `switches`.)
     let pb = PARK_BRAKE;
     label(m,pb+Vec3::new(0.0,0.016,-0.008),0.025,0.0045,"PARK BRAKE");
@@ -860,7 +823,9 @@ fn controls(b: &mut Builder) {
     for xs in [-0.27f32, 0.27] {
         let mut y = Mesh::default();
         let c = Vec3::new(xs, -0.06, -1.06);
-        y.tube(&CHROME, &[Vec3::new(xs, -0.06, PANEL_Z - 0.14), c - Vec3::Z * 0.02], &|_| 0.0115, 14, false);
+        // Start just through the dash face and overlap the yoke hub, leaving
+        // no visible gap in the support bar.
+        y.tube(&CHROME, &[Vec3::new(xs, -0.06, PANEL_Z - 0.014), c - Vec3::Z * 0.02], &|_| 0.0115, 14, false);
         let path: Vec<Vec3> = [(-0.132, 0.085), (-0.142, 0.04), (-0.135, 0.0), (-0.105, -0.03), (-0.05, -0.042), (0.05, -0.042), (0.105, -0.03), (0.135, 0.0), (0.142, 0.04), (0.132, 0.085)]
             .iter()
             .map(|&(dx, dy)| c + Vec3::new(dx, dy, 0.012))
@@ -982,19 +947,7 @@ pub const MOUSE_ACTIONS: &[&str] = &["prop_up", "prop_down", "cowl_open", "cowl_
     "fuel_control_l", "fuel_control_r", "battery_l", "battery_r"];
 
 pub fn action_label(id: &str) -> &str {
-    match id {
-        "prop_up" => "Propeller RPM up", "prop_down" => "Propeller RPM down",
-        "cowl_open" => "Open cowl flaps", "cowl_close" => "Close cowl flaps",
-        "brake_left" => "Left toe brake", "brake_right" => "Right toe brake",
-        "nav_next" => "Tune next NAV station", "nav_prev" => "Tune previous NAV station",
-        "adf_next" => "Tune next ADF station", "adf_prev" => "Tune previous ADF station",
-        "landing_lights" => "Landing lights", "fuel_valve" => "Fuel selector",
-        "fuel_next" => "Next fuel tank", "fuel_prev" => "Previous fuel tank",
-        "ap_vs" => "Autopilot: vertical speed mode", "ap_vs_up" => "Vertical speed up", "ap_vs_down" => "Vertical speed down",
-        "ap_at" => "Autothrottle on / off", "ap_spd_up" => "Speed target up", "ap_spd_down" => "Speed target down",
-        "fuel_control_l" => "L fuel control switch", "fuel_control_r" => "R fuel control switch",
-        "battery_l" => "L main battery", "battery_r" => "R main battery", _ => id,
-    }
+    crate::i18n::try_tr(&format!("action.{id}")).unwrap_or(id)
 }
 
 pub fn moving_piece(h: &Hotspot) -> Option<&'static str> {

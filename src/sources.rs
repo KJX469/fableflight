@@ -833,7 +833,7 @@ pub struct NightLights {
 /// Blocks kept unpacked at once (57.6 KB each).
 const NL_CACHE: usize = 1024;
 /// Light of a saturated map pixel (1 = the terrain shader's brightest downtown).
-const NL_PEAK: f32 = 0.5;
+pub const NL_PEAK: f32 = 0.5;
 /// Exponent from the map's grey to linear light.
 const NL_CURVE: f32 = 4.4;
 
@@ -1273,6 +1273,7 @@ pub fn tile_indices() -> Vec<u16> {
 
 // ---------------------------------------------------------------- worker pool
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Job {
     Terrain(TileId),
     Buildings(TileId),
@@ -1283,6 +1284,9 @@ pub enum JobResult {
     Buildings(TileId, Result<crate::buildings::BuildingData>),
     Airfield(u32, Result<(Arc<crate::airports::Geo>, crate::airfield::FieldMesh)>),
 }
+
+/// Hard cap on queued (not yet started) tile/building/airfield jobs.
+const MAX_LOADER_QUEUE: usize = 64;
 
 pub struct Loader {
     queue: Arc<(Mutex<Vec<(f32, Job)>>, Condvar)>,
@@ -1320,10 +1324,49 @@ impl Loader {
         }
         Self { queue, rx, src }
     }
-    /// Lower priority value = sooner.
-    pub fn submit(&self, prio: f32, job: Job) {
-        self.queue.0.lock().push((prio, job));
+    /// Lower priority value = sooner. Bounds the pending queue to
+    /// `MAX_LOADER_QUEUE`, returning any evicted (or rejected) job so the
+    /// caller can clear its `Loading` slot.
+    pub fn submit(&self, prio: f32, job: Job) -> Option<Job> {
+        let mut q = self.queue.0.lock();
+        if let Some(existing) = q.iter_mut().find(|(_, j)| *j == job) {
+            if prio < existing.0 {
+                existing.0 = prio;
+            }
+            return None;
+        }
+        let evicted = if q.len() >= MAX_LOADER_QUEUE {
+            let worst = q.iter().enumerate().max_by(|a, b| a.1 .0.total_cmp(&b.1 .0)).map(|(i, _)| i).unwrap();
+            if prio < q[worst].0 {
+                let old = q.swap_remove(worst).1;
+                q.push((prio, job));
+                Some(old)
+            } else {
+                return Some(job);
+            }
+        } else {
+            q.push((prio, job));
+            None
+        };
+        drop(q);
         self.queue.1.notify_one();
+        evicted
+    }
+
+    /// Cancels any still-queued jobs for which `drop_job` returns true,
+    /// returning them so the caller can clear their `Loading` state.
+    pub fn cancel_where(&self, mut drop_job: impl FnMut(&Job) -> bool) -> Vec<Job> {
+        let mut q = self.queue.0.lock();
+        let mut cancelled = Vec::new();
+        let mut i = 0;
+        while i < q.len() {
+            if drop_job(&q[i].1) {
+                cancelled.push(q.swap_remove(i).1);
+            } else {
+                i += 1;
+            }
+        }
+        cancelled
     }
 }
 
@@ -1341,5 +1384,26 @@ mod night_lights_tests {
             let mean = m.iter().map(|v| *v as f64).sum::<f64>() / m.len() as f64;
             eprintln!("z{z}: {:.1} ms, mean {mean:.1}, max {}", t.elapsed().as_secs_f64() * 1e3, m.iter().max().unwrap());
         }
+    }
+
+    #[test]
+    fn loader_queue_is_bounded_and_cancellable() {
+        let src = Arc::new(Sources::new(Fetcher::new(std::env::temp_dir(), true), String::new()));
+        let loader = Loader::new(src, 0);
+        for k in 0..(MAX_LOADER_QUEUE as u32 + 10) {
+            let _ = loader.submit(k as f32, Job::Airfield(k));
+        }
+        assert_eq!(loader.queue.0.lock().len(), MAX_LOADER_QUEUE);
+        // Submitting a duplicate does not grow the queue.
+        assert!(loader.submit(0.5, Job::Airfield(1)).is_none());
+        assert_eq!(loader.queue.0.lock().len(), MAX_LOADER_QUEUE);
+        // Submitting a higher-priority job evicts the lowest-priority queued job.
+        let evicted = loader.submit(-1.0, Job::Airfield(9999));
+        assert!(evicted.is_some());
+        assert_eq!(loader.queue.0.lock().len(), MAX_LOADER_QUEUE);
+        // Cancellation drains matching queued jobs.
+        let dropped = loader.cancel_where(|j| matches!(j, Job::Airfield(id) if *id >= 10));
+        assert!(!dropped.is_empty());
+        assert!(loader.queue.0.lock().len() <= 10);
     }
 }

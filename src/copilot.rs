@@ -293,7 +293,6 @@ impl Game {
             "altimeter_setting_hpa": num(self.radios.setting(self.wx.qnh)),
             "qnh_hpa": num(self.wx.qnh),
             "altimeter_follows_qnh": self.radios.baro.is_none(),
-            "nav_display_on": self.radios.show,
         })
     }
 
@@ -382,7 +381,7 @@ impl Game {
                 "holding_for_terrain": p.hold || self.hold_spot.is_some(),
                 "airport_loading": self.airport_rx.is_some() || self.menu.starting,
                 "status": self.status,
-                "view": if self.cam_mode == 1 { "cockpit" } else { "chase" },
+                "view": match self.cam_mode { 1 => "cockpit", crate::settings::TAIL_VIEW => "tail", _ => "chase" },
                 "hud": self.show_hud,
                 "view_panel_open": self.info_open,
                 "fps": num(self.fps),

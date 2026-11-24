@@ -500,8 +500,9 @@ pub static SPEC: Spec = Spec {
     vfe: &[1e9, 325.0 * KT, 325.0 * KT, 270.0 * KT],
     flap_rate: 1.0 / 10.0,
     slats_at: 0,
-    lever: Some(Lever { name: ["NOSE", "NEZ"], notches: &[["NOSE UP", "NEZ RELEVÉ"], ["VISOR DOWN", "VISIÈRE BAISSÉE"], ["NOSE 5°", "NEZ 5°"], ["NOSE 12.5°", "NEZ 12,5°"]], parts: ["NOSE", "VISOR"] }),
+    lever: Some(Lever { name: "lever.concorde.nose", notches: &["lever.concorde.nose_up", "lever.concorde.visor_down", "lever.concorde.nose_5", "lever.concorde.nose_12_5"], parts: ["NOSE", "VISOR"] }),
     gear_rate: 1.0 / 12.0,
+    electric_actuators: false,
     // VMO 530 kt, Mach 2.04 (set by how hot the nose gets: 127 C).
     vne: 530.0 * KT,
     mmo: 2.04,

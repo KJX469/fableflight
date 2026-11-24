@@ -384,7 +384,7 @@ impl Plane {
             toe_brake: [0.0; 2],
             landing_lights: true,
             pair_off: [[false; 2]; 2],
-            fuel_selector: FuelSelector::Center,
+            fuel_selector: if spec.id == 10 { FuelSelector::Left } else { FuelSelector::Center },
             engine_hours: 1834.6,
             propeller: 1.0,
             prop_coarse: 0.0,
@@ -739,12 +739,18 @@ impl Plane {
         let k = (0..s.flaps.len()).find(|&k| s.flap_frac(k as u8) >= self.flaps - 0.01).unwrap_or(s.flaps.len() - 1);
         s.vfe.get(k).copied().unwrap_or(1e9)
     }
-    /// Indicated airspeed (m/s): what the pitot tube feels, true airspeed scaled
-    /// by the square root of the density. It is what the wing flies by: the
-    /// aircraft stalls, and its limits are set, at the same indicated speed at any height.
-    pub fn ias(&self) -> f64 {
+    /// Equivalent airspeed (m/s): true airspeed scaled by sqrt(rho / rho0).
+    /// This tracks dynamic pressure directly (stall speed in EAS is constant with altitude).
+    #[allow(dead_code)]
+    pub fn eas(&self) -> f64 {
         let (_, _, h) = geo::pos_to_lla(self.pos);
         self.airspeed().length() * (density(h) / RHO0).sqrt()
+    }
+    /// Indicated / calibrated airspeed (m/s) from pitot-static impact pressure,
+    /// including compressibility (isentropic subsonic, Rayleigh pitot supersonic).
+    pub fn ias(&self) -> f64 {
+        let (_, _, h) = geo::pos_to_lla(self.pos);
+        cas_from(self.airspeed().length(), h)
     }
     /// Mach number.
     pub fn mach(&self) -> f64 {
@@ -1362,6 +1368,44 @@ impl Plane {
         }
         0.5 * (lo + hi)
     }
+    /// The propeller with its blades `coarse` past the fine stop (see `Governor`).
+    pub fn pitched(pe: &crate::aircraft::Piston, coarse: f64) -> crate::aircraft::Piston {
+        let mut p = pe.clone();
+        if let Some(g) = &pe.governor {
+            p.cp0 *= 1.0 + g.cp * coarse;
+            p.ct0 *= 1.0 + g.ct * coarse;
+            p.j_t *= 1.0 + g.j * coarse;
+            p.j_p *= 1.0 + g.j * coarse;
+        }
+        p
+    }
+    /// The revs (rad/s) the governor holds with the propeller lever at
+    /// `lever`, or None when it is not governing (no governor, or a lever
+    /// fully forward that is the fine stop).
+    pub fn governed_rate(pe: &crate::aircraft::Piston, lever: f64) -> Option<f64> {
+        let g = pe.governor.as_ref()?;
+        (g.at_full || lever < 0.999).then(|| (g.rpm[0] + (g.rpm[1] - g.rpm[0]) * lever.clamp(0.0, 1.0)) * std::f64::consts::TAU / 60.0)
+    }
+    /// The revs (rad/s) and blade setting (`coarse`) an undamaged engine and
+    /// propeller settle at, the governor (if any) holding what `lever` selects.
+    pub fn prop_settled(pe: &crate::aircraft::Piston, throttle: f64, v: f64, rho: f64, lever: f64) -> (f64, f64) {
+        let w = Self::prop_equilibrium(pe, throttle, v, rho);
+        let (Some(target), Some(g)) = (Self::governed_rate(pe, lever), pe.governor.as_ref()) else { return (w, 0.0) };
+        if w <= target {
+            return (w, 0.0);
+        }
+        let w_max = Self::prop_equilibrium(&Self::pitched(pe, g.coarse_max), throttle, v, rho);
+        if w_max >= target {
+            return (w_max, g.coarse_max);
+        }
+        let q_eng = Self::engine_torque(pe, throttle, rho, false, 1.0) - Self::friction(pe, target);
+        let (mut lo, mut hi) = (0.0, g.coarse_max);
+        for _ in 0..40 {
+            let c = 0.5 * (lo + hi);
+            if q_eng > Self::prop_load(&Self::pitched(pe, c), target, v, rho, 1.0).1 { lo = c } else { hi = c }
+        }
+        (target, 0.5 * (lo + hi))
+    }
     /// The fan speed (fraction of N1) the throttle asks for.
     fn n1_target(fe: &crate::aircraft::Fan, throttle: f64) -> f64 {
         fe.idle + (1.0 - fe.idle) * throttle.clamp(0.0, 1.0)
@@ -1402,7 +1446,8 @@ impl Plane {
         match &self.spec.engine {
             Engine::Piston(pe) => {
                 let rho = density(h);
-                Self::prop_load(pe, Self::prop_equilibrium(pe, throttle, v, rho), v, rho, 1.0).0
+                let (w, coarse) = Self::prop_settled(pe, throttle, v, rho, self.propeller);
+                Self::prop_load(&Self::pitched(pe, coarse), w, v, rho, 1.0).0
             }
             Engine::Fan(fe) => Self::fan_thrust(fe, Self::n1_target(fe, throttle), v, h) * self.inlet(v / sound_speed(h)) * self.dry_fade(fe, v / sound_speed(h)),
             Engine::Rocket(_) => 0.0,
@@ -1411,7 +1456,7 @@ impl Plane {
     /// The engine already running as the throttle has it.
     fn settle_engine(&mut self, v: f64, h: f64) {
         match &self.spec.engine {
-            Engine::Piston(pe) => self.prop_rate = Self::prop_equilibrium(pe, self.throttle, v, density(h)),
+            Engine::Piston(pe) => (self.prop_rate, self.prop_coarse) = Self::prop_settled(pe, self.throttle, v, density(h), self.propeller),
             Engine::Fan(fe) => {
                 self.n1 = Self::n1_target(fe, self.throttle);
                 self.prop_rate = self.n1 * fe.n1_rpm * std::f64::consts::TAU / 60.0;
@@ -2067,6 +2112,42 @@ impl Plane {
 
     /// Advance one physics step. Returns an impact if the aircraft was destroyed.
     pub fn step(&mut self, dt: f64, c: &Controls, world: &World) -> Option<Impact> {
+        if !dt.is_finite() || dt <= 0.0 {
+            return None;
+        }
+        let snap = StateSnapshot::capture(self);
+        let imp = self.step_inner(dt, c, world);
+        if !self.is_finite_state() {
+            debug_assert!(false, "non-finite aircraft state in Plane::step");
+            log::error!("non-finite aircraft state detected in Plane::step; restoring previous step");
+            snap.restore(self);
+            return None;
+        }
+        imp
+    }
+
+    fn is_finite_state(&self) -> bool {
+        self.pos.is_finite()
+            && self.vel.is_finite()
+            && self.rot.is_finite()
+            && self.omega.is_finite()
+            && self.head.is_finite()
+            && self.head_v.is_finite()
+            && self.sf.is_finite()
+            && self.stick.is_finite()
+            && self.cmd.is_finite()
+            && self.sas.is_finite()
+            && [self.throttle, self.flaps, self.slats, self.speedbrake, self.spoilers, self.gear, self.canopy, self.fuel, self.power, self.prop_rate, self.g_load, self.alpha, self.trim]
+                .iter()
+                .all(|x| x.is_finite())
+            && self.compress.iter().all(|x| x.is_finite())
+            && self.wheel_rot.iter().all(|x| x.is_finite())
+            && self.wheel_spin.iter().all(|x| x.is_finite())
+            && self.wing_flex.iter().all(|x| x.is_finite())
+            && self.wing_flex_v.iter().all(|x| x.is_finite())
+    }
+
+    fn step_inner(&mut self, dt: f64, c: &Controls, world: &World) -> Option<Impact> {
         let spec = self.spec;
         let hd = &spec.handling;
         let mass = self.mass();
@@ -2100,7 +2181,7 @@ impl Plane {
         self.stick += (target - self.stick) * (dt * 7.0).min(1.0);
         // Flaps run on an electric motor (or hydraulics), the gear on a pump;
         // the squat switch keeps the gear down while there is weight on the wheels.
-        let actuator_power = spec.id != 0 || self.sys.powered();
+        let actuator_power = !spec.electric_actuators || self.sys.powered();
         let flap_target = spec.flap_frac(self.flap_set);
         if actuator_power {
             self.flaps += (flap_target - self.flaps).clamp(-spec.flap_rate * dt, spec.flap_rate * dt);
@@ -2147,7 +2228,7 @@ impl Plane {
         // A braking parachute (`spoilers` is how far it has blossomed): too
         // fast and it tears away; nearly stopped, it is let go before it drags.
         if let (Some(ch), true) = (&spec.chute, self.speedbrake > 0.0) {
-            let ias = v_air * (rho / RHO0).sqrt();
+            let ias = cas_from(v_air, h);
             if ias > ch.v_max * 1.05 {
                 self.drop_chute();
                 self.note("DRAG CHUTE TORN AWAY (OVERSPEED)");
@@ -2311,16 +2392,15 @@ impl Plane {
                 // only slowing nearly to the stall stops it.
                 let w = self.prop_rate.max(0.0);
                 let v_ax = (-vb.z).max(0.0);
-                let mut prop = pe.clone();
-                if spec.id == 0 && self.running && self.propeller < 0.999 {
-                    // Coarsening the blades increases their load, governing the selected RPM.
-                    let target = (1800.0 + 900.0 * self.propeller) * std::f64::consts::TAU / 60.0;
-                    self.prop_coarse = (self.prop_coarse + (w - target) * dt * 0.08).clamp(0.0, 2.0);
-                } else { self.prop_coarse = (self.prop_coarse - dt * 2.0).max(0.0); }
-                prop.cp0 *= 1.0 + self.prop_coarse;
-                prop.ct0 *= 1.0 + 0.3 * self.prop_coarse;
-                prop.j_t *= 1.0 + 0.2 * self.prop_coarse;
-                prop.j_p *= 1.0 + 0.2 * self.prop_coarse;
+                // With a governor (see `Governor`), coarsening the blades loads the
+                // engine more, holding the revs the propeller lever selects.
+                match (Self::governed_rate(pe, self.propeller), &pe.governor) {
+                    (Some(target), Some(g)) if self.running => {
+                        self.prop_coarse = (self.prop_coarse + (w - target) * dt * g.rate).clamp(0.0, g.coarse_max);
+                    }
+                    _ => self.prop_coarse = (self.prop_coarse - dt * 2.0).max(0.0),
+                }
+                let prop = Self::pitched(pe, self.prop_coarse);
                 let (mut thrust, q_prop) = Self::prop_load(&prop, w, v_ax, rho, prop_k);
                 // It fires with the magnetos on, fuel, a mixture that will burn and the
                 // crankshaft turning (by the starter, or windmilling in the air); the
@@ -2491,23 +2571,25 @@ impl Plane {
             if let Some(imp) = self.trees(world) {
                 return self.impact(imp, "tree");
             }
-            let hit = |p: DVec3, world: &World| -> Option<(f64, bool, Option<(geo::TileId, usize)>)> {
+            let hit = |p: DVec3, world: &World| -> Option<(f64, bool, Option<(geo::TileId, usize)>, DVec3)> {
                 let (la, lo, ph) = geo::pos_to_lla(p);
                 let g = world.ground(la, lo)?;
                 if let Some(b) = world.building(la, lo) {
                     if ph < b.top && ph > b.base - if b.bridge { 0.0 } else { 3.0 } {
-                        return Some((b.top - ph, false, Some((b.tile, b.idx))));
+                        return Some((b.top - ph, false, Some((b.tile, b.idx)), upw));
                     }
                 } else if ph < g.h {
                     // Under the 3D tiles the ground is the mesh, buildings and all:
                     // into one of them, it is that building that was hit.
                     if let Some(b) = world.photo_building(la, lo, g.h) {
                         if ph > b.base - 3.0 {
-                            return Some((g.h - ph, false, Some((b.tile, b.idx))));
+                            return Some((g.h - ph, false, Some((b.tile, b.idx)), upw));
                         }
                     }
                 }
-                Some((g.h - ph, g.water, None))
+                let pen = g.h - ph;
+                let n = if pen > 0.0 && !g.water { world.ground_normal(la, lo) } else { upw };
+                Some((pen, g.water, None, n))
             };
             // Every point of the airframe that can touch something, and what it
             // takes to break it: gentle enough, things only scrape; harder, the
@@ -2520,7 +2602,7 @@ impl Plane {
             for &(r0, part) in &pts {
                 let r = if matches!(part, Part::Nose | Part::Belly | Part::Side | Part::Roof) { r0 + self.crumple_offset(r0) } else { r0 };
                 let p = self.pos + self.rot * r;
-                let Some((mut pen, water, building)) = hit(p, world) else { continue };
+                let Some((mut pen, water, building, nrm)) = hit(p, world) else { continue };
                 if water {
                     // A ditched aircraft settles lower in the water as it floods.
                     pen -= self.sink;
@@ -2533,7 +2615,8 @@ impl Plane {
                     let f = &self.dmg.fold[s];
                     pv += self.rot * (f.axis.cross(r.as_vec3() - f.pivot) * f.rate).as_dvec3();
                 }
-                let vn = pv.dot(upw);
+                let pen_n = pen * nrm.dot(upw).max(0.1);
+                let vn = pv.dot(nrm);
                 let closing = (-vn).max(0.0);
                 let sp = pv.length();
                 let crash = Impact { pos: p, vel: self.vel, water, ground_h: geo::pos_to_lla(p).2 + if building.is_some() { 0.0 } else { pen }, building };
@@ -2696,12 +2779,12 @@ impl Plane {
                 // Then it skids: a spring out of the surface, friction along it.
                 // Water gives less and drags far more.
                 let hl = &spec.hull;
-                self.pos += upw * if water { pen * 0.3 } else { pen };
+                self.pos += nrm * if water { pen_n * 0.3 } else { pen_n };
                 let (kk, cc, mu) = if water { (hl.k * 0.42, hl.c * 0.67, 0.9) } else { (hl.k, hl.c, 0.45) };
-                let nf = (pen * kk - vn * cc).clamp(0.0, hl.nf_max);
-                let tang = pv - upw * vn;
+                let nf = (pen_n * kk - vn * cc).clamp(0.0, hl.nf_max);
+                let tang = pv - nrm * vn;
                 let tl = tang.length();
-                let f = upw * nf - tang.normalize_or_zero() * (mu * nf).min(tl * hl.drag);
+                let f = nrm * nf - tang.normalize_or_zero() * (mu * nf).min(tl * hl.drag);
                 force_w += f;
                 let fb_ = self.rot.inverse() * f;
                 torque_b += (r - cg_b).cross(fb_);
@@ -2755,15 +2838,16 @@ impl Plane {
                 }
                 let r = leg.at;
                 let p = self.pos + self.rot * r;
-                if let Some((pen, water, building)) = hit(p, world) {
+                if let Some((pen, water, building, nrm)) = hit(p, world) {
                     if pen <= 0.0 {
                         continue;
                     }
+                    let pen_n = pen * nrm.dot(upw).max(0.1);
                     let pv = self.vel + self.rot * self.omega.cross(r);
-                    let vn = pv.dot(upw);
+                    let vn = pv.dot(nrm);
                     // Wheels do nothing in water or against a wall, and a leg driven
                     // in far too hard just goes: the airframe takes the rest.
-                    if water || (building.is_some() && pen > 1.0) || pen > leg.travel * 4.0 + 0.8 {
+                    if water || (building.is_some() && pen > 1.0) || pen_n > leg.travel * 4.0 + 0.8 {
                         if !water {
                             self.lose_gear(gi, if building.is_some() { "BUILDING" } else { "HARD LANDING" });
                         }
@@ -2782,21 +2866,21 @@ impl Plane {
                     }
                     self.on_ground = true;
                     touching[gi] = true;
-                    self.compress[gi] = pen.min(leg.travel);
-                    let nf = (pen * leg.k - vn * leg.c).clamp(0.0, leg.nf_max);
-                    let mut fwd = (self.forward() - upw * self.forward().dot(upw)).normalize_or_zero();
+                    self.compress[gi] = pen_n.min(leg.travel);
+                    let nf = (pen_n * leg.k - vn * leg.c).clamp(0.0, leg.nf_max);
+                    let mut fwd = (self.forward() - nrm * self.forward().dot(nrm)).normalize_or_zero();
                     if leg.steer != 0.0 {
                         // The nose wheel steers with the rudder pedals.
-                        fwd = DQuat::from_axis_angle(upw, -self.steer_angle() * leg.steer) * fwd;
+                        fwd = DQuat::from_axis_angle(nrm, -self.steer_angle() * leg.steer) * fwd;
                     }
-                    let side = fwd.cross(upw);
+                    let side = fwd.cross(nrm);
                     let (vl, vs) = (pv.dot(fwd), pv.dot(side));
                     let f_side = (-vs * leg.side_k).clamp(-leg.side_mu * nf, leg.side_mu * nf);
                     let brake = if leg.brakes { self.brake_pressure(c, leg.at.x) } else { 0.0 };
                     let mu = leg.roll_mu + (leg.brake_mu - leg.roll_mu) * brake;
                     let drag = leg.roll_k + (leg.brake_k - leg.roll_k) * brake;
                     let f_long = (-vl * drag).clamp(-mu * nf, mu * nf);
-                    let f = upw * nf + side * f_side + fwd * f_long;
+                    let f = nrm * nf + side * f_side + fwd * f_long;
                     force_w += f;
                     torque_b += (r - cg_b).cross(self.rot.inverse() * f);
                     self.wheel_spin[gi] = vl / leg.wheel_r;
@@ -2903,8 +2987,9 @@ impl Plane {
                 self.dmg.fatigue = -1.5;
             }
         }
-        let ve = v * eas_k;
-        let excess = self.excess(ve, mach);
+        let _ = eas_k;
+        let vc = cas_from(v, h);
+        let excess = self.excess(vc, mach);
         let over = (excess - (spec.flutter_v - spec.vne)).max(0.0) as f32;
         self.dmg.flutter = (self.dmg.flutter + (over * 0.035 - 0.25) * dt as f32).max(0.0);
         self.dmg.vibe += smooth(5.0, 30.0, excess) as f32 * 0.6;
@@ -2913,8 +2998,8 @@ impl Plane {
             self.dmg.flutter = 0.35;
         }
         let vfe = self.vfe();
-        if self.flaps > 0.25 * spec.flap_frac(1) && ve > vfe {
-            self.dmg.flap_stress += (dt * (ve - vfe) * 0.06 * self.flaps.max(0.3)) as f32;
+        if self.flaps > 0.25 * spec.flap_frac(1) && vc > vfe {
+            self.dmg.flap_stress += (dt * (vc - vfe) * 0.06 * self.flaps.max(0.3)) as f32;
             if self.dmg.flap_stress > 1.0 {
                 let s = (self.rng.f() * 2.0) as usize;
                 let s = if self.dmg.flap[s] > 0.0 { s } else { 1 - s };
@@ -3183,7 +3268,7 @@ const ISA_LAYERS: [(f64, f64); 7] = [
 /// the USSA 1976 geopotential layers. Above 84.852 km, continue isothermally
 /// from the last tabulated layer; aircraft performance checks stay well below
 /// this extension, while it avoids freezing density for high rocket flights.
-fn atmosphere(h: f64) -> (f64, f64) {
+pub(crate) fn atmosphere(h: f64) -> (f64, f64) {
     const G0: f64 = 9.80665;
     const R_AIR: f64 = 287.05287;
     const EARTH_RADIUS: f64 = 6_356_766.0;
@@ -3236,6 +3321,116 @@ pub fn pressure_ratio(h: f64) -> f64 {
 pub fn sound_speed(h: f64) -> f64 {
     let (t, _) = atmosphere(h);
     (1.4 * 287.05287 * t).sqrt()
+}
+
+/// Calibrated airspeed (m/s) from true airspeed `v` (m/s) and altitude `h` (m),
+/// via compressible impact pressure (isentropic subsonic, Rayleigh pitot supersonic).
+pub fn cas_from(v: f64, h: f64) -> f64 {
+    if !v.is_finite() || v <= 0.0 {
+        return 0.0;
+    }
+    let m = v / sound_speed(h);
+    let qc_p = if m < 1.0 {
+        (1.0 + 0.2 * m * m).powf(3.5) - 1.0
+    } else {
+        // Rayleigh pitot formula for gamma = 1.4: (1.2^3.5 * 6^2.5) = 166.921580093...
+        166.921_580_093 * m.powi(7) / (7.0 * m * m - 1.0).powf(2.5) - 1.0
+    };
+    let qc_p0 = (qc_p * pressure_ratio(h)).max(0.0);
+    let a0 = sound_speed(0.0);
+    // Subsonic calibrated airspeed up to Mach 1 at sea level (1.2^3.5 - 1).
+    if qc_p0 <= 0.892_929_158_7 {
+        a0 * (5.0 * ((qc_p0 + 1.0).powf(2.0 / 7.0) - 1.0)).max(0.0).sqrt()
+    } else {
+        // Above Mach 1 at sea level, invert the Rayleigh pitot equation.
+        let target = qc_p0 + 1.0;
+        let mut mc = (5.0 * (target.powf(2.0 / 7.0) - 1.0)).sqrt().max(1.0);
+        for _ in 0..5 {
+            let d = 7.0 * mc * mc - 1.0;
+            let f = 166.921_580_093 * mc.powi(7) / d.powf(2.5);
+            let df = f * (7.0 / mc - 35.0 * mc / d);
+            if df.abs() > 1e-12 {
+                mc = (mc - (f - target) / df).max(1.0);
+            }
+        }
+        a0 * mc
+    }
+}
+
+struct StateSnapshot {
+    pos: DVec3,
+    vel: DVec3,
+    rot: DQuat,
+    head: DVec3,
+    sf: DVec3,
+    stick: DVec3,
+    cmd: DVec3,
+    sas: DVec3,
+    throttle: f64,
+    flaps: f64,
+    slats: f64,
+    speedbrake: f64,
+    spoilers: f64,
+    gear: f64,
+    canopy: f64,
+    fuel: f64,
+    power: f64,
+    prop_rate: f64,
+    g_load: f64,
+    alpha: f64,
+    trim: f64,
+    compress: [f64; MAX_GEAR],
+    wheel_rot: [f64; MAX_GEAR],
+    wheel_spin: [f64; MAX_GEAR],
+    wing_flex: [f64; 2],
+    wing_flex_v: [f64; 2],
+}
+
+impl StateSnapshot {
+    fn capture(p: &Plane) -> Self {
+        Self {
+            pos: p.pos, vel: p.vel, rot: p.rot,
+            head: p.head, sf: p.sf, stick: p.stick,
+            cmd: p.cmd, sas: p.sas, throttle: p.throttle, flaps: p.flaps,
+            slats: p.slats, speedbrake: p.speedbrake, spoilers: p.spoilers,
+            gear: p.gear, canopy: p.canopy, fuel: p.fuel, power: p.power,
+            prop_rate: p.prop_rate, g_load: p.g_load, alpha: p.alpha,
+            trim: p.trim, compress: p.compress,
+            wheel_rot: p.wheel_rot, wheel_spin: p.wheel_spin,
+            wing_flex: p.wing_flex, wing_flex_v: p.wing_flex_v,
+        }
+    }
+
+    fn restore(self, p: &mut Plane) {
+        p.pos = self.pos;
+        p.vel = self.vel;
+        p.rot = self.rot;
+        p.omega = DVec3::ZERO;
+        p.head = self.head;
+        p.head_v = DVec3::ZERO;
+        p.sf = self.sf;
+        p.stick = self.stick;
+        p.cmd = self.cmd;
+        p.sas = self.sas;
+        p.throttle = self.throttle;
+        p.flaps = self.flaps;
+        p.slats = self.slats;
+        p.speedbrake = self.speedbrake;
+        p.spoilers = self.spoilers;
+        p.gear = self.gear;
+        p.canopy = self.canopy;
+        p.fuel = self.fuel;
+        p.power = self.power;
+        p.prop_rate = self.prop_rate;
+        p.g_load = self.g_load;
+        p.alpha = self.alpha;
+        p.trim = self.trim;
+        p.compress = self.compress;
+        p.wheel_rot = self.wheel_rot;
+        p.wheel_spin = self.wheel_spin;
+        p.wing_flex = self.wing_flex;
+        p.wing_flex_v = self.wing_flex_v;
+    }
 }
 
 /// The intact airframe's lift and drag coefficients (wave drag and the
@@ -3767,8 +3962,8 @@ mod tests {
         let (dry, ..) = level(false, 300.0);
         assert!(dry < 2.2, "{dry}");
 
-        // The whole way up, tanks full at 30,000 ft and Mach 0.9: level to 450 kt
-        // indicated, hold that with the nose up to Mach 3.15, then level off.
+        // The whole way up, tanks full at 30,000 ft and Mach 0.9: level to 450 KEAS
+        // (the SR-71 flight manual climb schedule), hold that with the nose up to Mach 3.15, then level off.
         let mut p = Plane::spawn(bird, 0.6, -2.1, 9_144.0, 0.0, 0.9 * sound_speed(9_144.0));
         p.fuel = bird.fuel_kg;
         p.throttle = 1.0;
@@ -3777,7 +3972,7 @@ mod tests {
         while t < 1800.0 && done.is_none() {
             let (_, _, h) = geo::pos_to_lla(p.pos);
             let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
-            if phase == 0 && p.ias() * KT > 450.0 {
+            if phase == 0 && p.eas() * KT > 450.0 {
                 phase = 1;
             }
             if phase == 1 && p.mach() > 3.15 {
@@ -3787,7 +3982,7 @@ mod tests {
                 done = Some((t, h));
             }
             let vs = p.vel.dot(p.pos.normalize());
-            let pitch = if phase == 1 { ((p.ias() * KT - 450.0) * 0.004 - vs * 0.0005) * 8.0 * gentle - p.omega.x * 1.0 } else { hold(&p) * gentle };
+            let pitch = if phase == 1 { ((p.eas() * KT - 450.0) * 0.004 - vs * 0.0005) * 8.0 * gentle - p.omega.x * 1.0 } else { hold(&p) * gentle };
             let roll_err = -p.right().dot(p.pos.normalize());
             let c = Controls { pitch: pitch.clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost: true, ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
@@ -4479,6 +4674,199 @@ mod tests {
         assert!(dist > 120.0 && dist < 300.0 && vlo * KT < 62.0, "{dist} {}", vlo * KT);
         assert!(h > 150.0, "{h}");
         assert!(p.notes.is_empty() && p.dmg.gear.iter().all(|g| *g), "{:?}", p.notes);
+    }
+
+    const BONANZA: &Spec = &crate::aircraft::bonanza::SPEC;
+    const LB: f64 = 0.453_592;
+    /// A Bonanza weighing `lb`, the tanks `fuel` full, its propeller lever set for `rpm`.
+    fn bonanza(alt: f64, speed: f64, lb: f64, fuel: f64, rpm: f64) -> Plane {
+        let mut p = Plane::spawn(BONANZA, 0.6, -2.1, alt, 0.0, speed);
+        p.fuel = BONANZA.fuel_kg * fuel;
+        p.payload += lb * LB - p.mass();
+        p.propeller = (rpm - 1800.0) / 900.0;
+        p.configure(0, false, 0.0);
+        p
+    }
+    /// Fly level at `alt` with the throttle worked to give `power` (or full
+    /// throttle if it cannot): (true airspeed, throttle).
+    fn level_at_power(p: &mut Plane, w: &World, alt: f64, power: f64) -> (f64, f64) {
+        let mut thr = 0.9;
+        for _ in 0..50 {
+            fly(p, w, 5.0, thr, hold_alt(alt));
+            thr = (thr + (power - p.power) * 0.5).clamp(0.0, 1.0);
+        }
+        (fly(p, w, 120.0, thr, hold_alt(alt)).0, thr)
+    }
+    fn gph(p: &Plane) -> f64 {
+        p.fuel_flow * 3600.0 / 2.72
+    }
+
+    #[test]
+    fn performance_is_a_bonanza() {
+        let w = empty_world();
+        let s = BONANZA;
+        let pe = match &s.engine {
+            Engine::Piston(pe) => pe,
+            _ => unreachable!(),
+        };
+        // Full throttle and level near sea level, 3400 lb.
+        let mut p = bonanza(300.0, 88.0, 3400.0, 0.6, 2700.0);
+        let (v, _) = fly(&mut p, &w, 240.0, 1.0, hold_alt(300.0));
+        println!("BE36 max level 1000 ft, 3400 lb: {:.0} KTAS {:.0} KCAS at {:.0} rpm, power {:.2}, {:.1} gph rich", v * KT, p.ias() * KT, rpm(&p), p.power, gph(&p));
+        assert!(v * KT > 170.0 && v * KT < 184.0 && rpm(&p) > 2650.0 && rpm(&p) < 2750.0, "{} {}", v * KT, rpm(&p));
+        // The same with the gear down.
+        let mut p = bonanza(300.0, 80.0, 3400.0, 0.6, 2700.0);
+        p.configure(0, true, 0.0);
+        let (vg, _) = fly(&mut p, &w, 240.0, 1.0, hold_alt(300.0));
+        println!("BE36 gear down: {:.0} KTAS", vg * KT);
+        assert!(vg < v - 10.0, "{}", vg * KT);
+
+        // Cruise at 6000 ft and 3400 lb: 65 % at 2400 rpm, 75 % at 2500.
+        // The book ([R]): 157 KTAS at 65 % and 169 at 75 % (6000 ft, 3400 lb).
+        for (pw, r, alt, book) in [(0.65, 2400.0, 1829.0, 157.0), (0.75, 2500.0, 1829.0, 169.0), (0.75, 2700.0, 2438.0, 0.0), (0.55, 2300.0, 2438.0, 0.0)] {
+            let mut p = bonanza(alt, 82.0, 3400.0, 0.6, r);
+            let (v, thr) = level_at_power(&mut p, &w, alt, pw);
+            let rich = gph(&p);
+            p.mixture = 0.45;
+            fly(&mut p, &w, 30.0, thr, hold_alt(alt));
+            println!("BE36 {:.0}% at {:.0} ft, {r:.0} rpm: {:.0} KTAS {:.0} KCAS, power {:.2}, throttle {thr:.2}, {:.0} rpm, coarse {:.2}, {rich:.1} gph rich, {:.1} leaned", pw * 100.0, alt / 0.3048, v * KT, p.ias() * KT, p.power, rpm(&p), p.prop_coarse, gph(&p));
+            assert!((rpm(&p) - r).abs() < 15.0 && (book == 0.0 || (v * KT - book).abs() < 4.0), "{} {}", v * KT, rpm(&p));
+        }
+
+        // The governor: the throttle slammed open in the cruise; the revs barely move.
+        let mut p = bonanza(1829.0, 75.0, 3400.0, 0.6, 2400.0);
+        fly(&mut p, &w, 20.0, 0.6, hold_alt(1829.0));
+        let (mut lo, mut hi): (f64, f64) = (1e9, 0.0);
+        for _ in 0..(20.0 * 180.0) as usize {
+            fly(&mut p, &w, 1.0 / 180.0, 1.0, hold_alt(1829.0));
+            (lo, hi) = (lo.min(rpm(&p)), hi.max(rpm(&p)));
+        }
+        println!("BE36 throttle 0.6 to 1 at 2400 rpm: {lo:.0} to {hi:.0} rpm, settles {:.0}", rpm(&p));
+        assert!(hi < 2500.0 && lo > 2300.0 && (rpm(&p) - 2400.0).abs() < 15.0, "{lo} {hi}");
+
+        // Full power at Vy (about 96 KIAS) at sea level, 3650 lb.
+        let mut p = bonanza(300.0, 50.0, 3650.0, 1.0, 2700.0);
+        let (v, vs) = fly(&mut p, &w, 90.0, 1.0, |p| (p.ias() - 49.4) * 0.04);
+        println!("BE36 climb at {:.0} KTAS, 3650 lb: {:.0} fpm, {:.0} rpm, {:.1} gph", v * KT, vs * 196.85, rpm(&p), gph(&p));
+        assert!(vs * 196.85 > 1050.0 && vs * 196.85 < 1300.0, "{}", vs * 196.85);
+        for kias in [85.0, 105.0] {
+            let mut p = bonanza(300.0, kias / KT, 3650.0, 1.0, 2700.0);
+            let (_, vs) = fly(&mut p, &w, 90.0, 1.0, move |p| (p.ias() - kias / KT) * 0.04);
+            println!("BE36   at {kias:.0} KIAS: {:.0} fpm", vs * 196.85);
+        }
+
+        // Idle glide at 110 KIAS, 3650 lb, the lever back and forward.
+        for r in [1800.0, 2700.0] {
+            let mut p = bonanza(1500.0, 58.0, 3650.0, 1.0, r);
+            let (v, vs) = fly(&mut p, &w, 90.0, 0.0, |p| (p.ias() - 56.6) * 0.04);
+            let glide = (v * v - vs * vs).sqrt() / -vs;
+            println!("BE36 idle glide, lever {r:.0}: {glide:.1}:1 at {:.0} rpm", rpm(&p));
+            assert!(glide > 8.0 && glide < 11.5, "{glide}");
+        }
+
+        // Stall at 3650 lb, by the lift slope.
+        let m = 3650.0 * LB;
+        let vs_at = |flap_cl: f64, a: f64| (2.0 * m * 9.81 / (RHO0 * s.wing_area * (s.cl0 + flap_cl + s.cl_a * a))).sqrt() * KT;
+        let (clean, appr, full) = (vs_at(0.0, s.stall_alpha), vs_at(s.flap_cl * 0.4, s.stall_alpha - s.stall_flap * 0.4), vs_at(s.flap_cl, s.stall_alpha - s.stall_flap));
+        println!("BE36 stall 3650 lb: {clean:.0} KCAS clean, {appr:.0} approach, {full:.0} full flaps");
+        assert!(clean > 66.0 && clean < 72.0 && full > 56.0 && full < 61.0, "{clean} {full}");
+
+        // On the ground.
+        let ws = Plane::prop_equilibrium(pe, 1.0, 0.0, RHO0) * 60.0 / std::f64::consts::TAU;
+        let wi = Plane::prop_equilibrium(pe, 0.0, 0.0, RHO0) * 60.0 / std::f64::consts::TAU;
+        let t0 = Plane::spawn(s, 0.6, -2.1, 0.0, 0.0, 0.0).thrust(1.0, 0.0, 0.0);
+        println!("BE36 static {ws:.0} rpm, idle {wi:.0} rpm, thrust {t0:.0} N");
+        assert!(ws > 2600.0 && ws < 2720.0 && wi > 600.0 && wi < 900.0, "{ws} {wi}");
+        // Diving at Vne at full throttle the governor holds 2700.
+        let mut p = bonanza(1000.0, s.vne, 3400.0, 0.6, 2700.0);
+        p.throttle = 1.0;
+        fly(&mut p, &w, 25.0, 1.0, |p| (p.ias() - 0.98 * s.vne) * 0.02 - p.omega.x * 0.3);
+        println!("BE36 full throttle at {:.0} KCAS: {:.0} rpm", p.ias() * KT, rpm(&p));
+        assert!((rpm(&p) - 2700.0).abs() < 30.0 && p.ias() > 0.9 * s.vne, "{} {}", rpm(&p), p.ias() * KT);
+    }
+
+    #[test]
+    fn a_bonanza_takes_off_and_climbs() {
+        let w = flat_world();
+        let s = BONANZA;
+        let mut p = Plane::spawn_ground(s, 37.6, -122.37, 0.0, 0.5, 0.0);
+        p.fuel = s.fuel_kg;
+        p.payload += 3650.0 * LB - p.mass();
+        p.hold = false;
+        p.t = 2.0;
+        p.flap_set = 1;
+        p.flaps = s.flap_frac(1);
+        let dt = 1.0 / 180.0;
+        let (mut lifted, mut fifty, mut t) = (None, None, 0.0);
+        let start = p.pos;
+        let h0 = geo::pos_to_lla(p.pos).2;
+        let mut max_rpm: f64 = 0.0;
+        while t < 60.0 {
+            let pitch_deg = (p.forward().dot(p.pos.normalize())).asin().to_degrees();
+            // Rotate at 70 KIAS, then hold 8 degrees nose up.
+            let pitch = if p.ias() * KT > 70.0 { ((8.0 - pitch_deg) * 0.15 - p.omega.x * 0.3).clamp(-1.0, 1.0) } else { 0.0 };
+            let c = Controls { throttle: 1.0, pitch, ..Default::default() };
+            assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
+            max_rpm = max_rpm.max(rpm(&p));
+            let h = geo::pos_to_lla(p.pos).2 - h0;
+            if lifted.is_none() && !p.on_ground && t > 3.0 {
+                lifted = Some(((p.pos - start).length(), p.ias(), t));
+            }
+            if fifty.is_none() && lifted.is_some() && h > 15.24 + p.wheel_height() {
+                fifty = Some(((p.pos - start).length(), p.ias()));
+            }
+            t += dt;
+        }
+        let (dist, vlo, tlo) = lifted.expect("it never left the ground");
+        let (d50, v50) = fifty.expect("never reached 50 ft");
+        let (_, _, h) = geo::pos_to_lla(p.pos);
+        println!("BE36 3650 lb, flaps 12: lift-off after {tlo:.0} s, {dist:.0} m ({:.0} ft) at {:.0} KIAS; 50 ft at {d50:.0} m ({:.0} ft), {:.0} KIAS; at 60 s {h:.0} m; peak {max_rpm:.0} rpm", dist / 0.3048, vlo * KT, d50 / 0.3048, v50 * KT);
+        // The book: 971 ft on the ground and 1913 ft to 50 ft (Jane's, 3650 lb);
+        // the G36's card, at 3805 lb, says 1300 ft on the ground.
+        assert!(dist > 270.0 && dist < 420.0 && d50 < 720.0, "{dist} {d50}");
+        assert!(p.notes.is_empty() && p.dmg.gear.iter().all(|g| *g), "{:?}", p.notes);
+    }
+
+    #[test]
+    fn a_bonanza_gear_and_flaps_cycle_in_flight() {
+        let w = flat_world();
+        let s = BONANZA;
+        let mut p = Plane::spawn(s, 0.6, -2.1, 1000.0, 0.0, 60.0);
+        p.configure(0, true, 0.0);
+        assert!(p.gear_down && p.gear == 1.0);
+        let thr = p.throttle;
+        p.toggle_gear();
+        assert!(!p.gear_down, "the gear handle goes up in flight");
+        let mut t_up = None;
+        let dt = 1.0 / 180.0;
+        for i in 0..(10.0 / dt) as usize {
+            fly(&mut p, &w, dt, thr, hold_alt(1000.0));
+            if t_up.is_none() && p.gear <= 0.0 { t_up = Some(i as f64 * dt); }
+        }
+        println!("BE36 gear up in {:?} s", t_up);
+        assert!(p.gear == 0.0, "{}", p.gear);
+        p.toggle_gear();
+        let mut t_dn = None;
+        for i in 0..(10.0 / dt) as usize {
+            fly(&mut p, &w, dt, thr, hold_alt(1000.0));
+            if t_dn.is_none() && p.gear >= 1.0 { t_dn = Some(i as f64 * dt); }
+        }
+        println!("BE36 gear down in {:?} s", t_dn);
+        assert!(p.gear == 1.0 && p.gear_down);
+        // Without power on the bus the motors stop where they are.
+        p.sys.elec.master = false;
+        p.toggle_gear();
+        p.flap_set = 2;
+        fly(&mut p, &w, 3.0, thr, hold_alt(1000.0));
+        assert!(p.gear == 1.0 && p.flaps == 0.0, "{} {}", p.gear, p.flaps);
+        p.sys.elec.master = true;
+        let mut t_fl = None;
+        for i in 0..(15.0 / dt) as usize {
+            fly(&mut p, &w, dt, thr, hold_alt(1000.0));
+            if t_fl.is_none() && p.flaps >= 1.0 { t_fl = Some(i as f64 * dt); }
+        }
+        println!("BE36 flaps full in {:?} s, gear {}", t_fl, p.gear);
+        assert!(p.gear == 0.0 && p.flaps == 1.0);
     }
 
     #[test]
@@ -5734,5 +6122,140 @@ mod tests {
         // (2,680 ft, 817 m, from 50 ft at MLW, sea level, ISA)
         assert!(p.vel.length() < 1.0 && roll < 1_000.0 && air + roll < 1_300.0, "{} {air} {roll}", p.vel.length());
         assert!(p.notes.is_empty() && p.dmg.gear.iter().all(|g| *g), "{:?}", p.notes);
+    }
+
+    #[test]
+    fn cas_matches_compressible_pitot_tables() {
+        // Low speed at sea level: CAS == EAS == TAS.
+        let low = cas_from(60.0, 0.0);
+        assert!((low - 60.0).abs() < 0.3, "low speed CAS {low}");
+        // Mach 0.85 at FL350 (10,668 m): EAS ≈ 272 kt, CAS ≈ 291 kt.
+        let h35 = 35_000.0 * 0.3048;
+        let v35 = 0.85 * sound_speed(h35);
+        let eas35 = v35 * (density(h35) / RHO0).sqrt() * KT;
+        let cas35 = cas_from(v35, h35) * KT;
+        assert!((eas35 - 272.0).abs() < 3.0 && (cas35 - 291.0).abs() < 3.0, "FL350 M0.85: EAS {eas35:.1}, CAS {cas35:.1}");
+        // Mach 2.0 at FL550 (16,764 m): EAS ≈ 398 kt, CAS ≈ 480 kt (~20% higher from compressibility).
+        let h55 = 55_000.0 * 0.3048;
+        let v55 = 2.0 * sound_speed(h55);
+        let eas55 = v55 * (density(h55) / RHO0).sqrt() * KT;
+        let cas55 = cas_from(v55, h55) * KT;
+        assert!((eas55 - 398.3).abs() < 2.0 && (cas55 - 480.4).abs() < 2.0 && cas55 - eas55 > 75.0, "FL550 M2.0: EAS {eas55:.1}, CAS {cas55:.1}");
+        // Continuity across Mach 1.0.
+        let a = sound_speed(h35);
+        assert!((cas_from(0.9999 * a, h35) - cas_from(1.0001 * a, h35)).abs() < 0.2);
+    }
+
+    #[test]
+    fn gyroscopic_term_couples_axes_in_vacuum() {
+        // High altitude (near vacuum) so aerodynamic moments are negligible:
+        // spinning simultaneously in roll (z) and pitch (x) on an aircraft
+        // with Ix != Iz must produce a yaw (y) angular acceleration.
+        let w = empty_world();
+        let mut p = Plane::spawn(&crate::aircraft::b747::SPEC, 0.6, -2.1, 80_000.0, 0.0, 0.0);
+        p.throttle = 0.0;
+        p.fuel = 0.0;
+        p.omega = DVec3::new(0.4, 0.0, 1.0);
+        let dt = 1.0 / 180.0;
+        p.step(dt, &Controls::default(), &w);
+        // -(omega x (I * omega)).y / Iy = -omega.z * omega.x * (Ix - Iz) / Iy
+        let i = p.spec.inertia;
+        let expected_wy = -(1.0 * 0.4 * (i.x - i.z) / i.y) * dt;
+        assert!((p.omega.y - expected_wy).abs() < 1e-4 && p.omega.y.abs() > 1e-5, "got {} expected {}", p.omega.y, expected_wy);
+    }
+
+    #[test]
+    fn parked_aircraft_rolls_down_a_terrain_slope() {
+        // Place a C172 on the flank of a crater (a real sloped terrain surface)
+        // with brakes off and engine off: gravity along the slope must roll it downhill.
+        let mut w = flat_world();
+        let (lat, lon) = (37.8f64.to_radians(), -122.46f64.to_radians());
+        let centre = geo::lla_to_pos(lat, lon, 0.0);
+        w.craters.push((centre, 40.0));
+        // Stand ~20 m east of crater centre where the crater bowl slopes down toward west.
+        let dlon = 20.0 / (geo::R * lat.cos());
+        let g = w.ground(lat, lon + dlon).unwrap();
+        let n = w.ground_normal(lat, lon + dlon);
+        let (east, _, up) = geo::enu(geo::lla_to_pos(lat, lon + dlon, g.h));
+        assert!(n.dot(east) < -0.05 && n.dot(up) < 0.999, "expected west-tilted slope normal, got {n:?}");
+        // Point straight downhill (heading 270 deg = west) with brakes off.
+        let mut p = Plane::spawn_ground(C172, lat, lon + dlon, g.h, 270.0f64.to_radians(), 0.0);
+        p.hold = false;
+        p.t = 2.0;
+        p.throttle = 0.0;
+        p.running = false;
+        p.ignition = false;
+        p.parking_brake = false;
+        let dt = 1.0 / 180.0;
+        for _ in 0..(4.0 / dt) as usize {
+            p.step(dt, &Controls::default(), &w);
+        }
+        let downhill_speed = p.vel.dot(-east);
+        assert!(downhill_speed > 0.5, "expected downhill roll on slope, got {downhill_speed:.3} m/s");
+    }
+
+    #[test]
+    fn all_builtin_specs_stay_finite_under_extreme_inputs_and_fuel_exhaustion() {
+        let w = flat_world();
+        let dt = 1.0 / 180.0;
+        for spec in crate::aircraft::BUILTIN {
+            let mut p = Plane::spawn(spec, 0.6, -2.1, 3_000.0, 0.0, spec.cruise.max(60.0));
+            p.t = 2.0;
+            let extreme = Controls {
+                pitch: 1.0,
+                roll: 1.0,
+                yaw: -1.0,
+                throttle: 1.0,
+                brake: true,
+                boost: true,
+                reverse: true,
+                ..Default::default()
+            };
+            for step in 0..360 {
+                if step == 180 {
+                    // Exhaust fuel abruptly in flight.
+                    p.fuel = 0.0;
+                }
+                let _ = p.step(dt, &extreme, &w);
+                assert!(p.is_finite_state(), "{} became non-finite at step {step}", spec.name);
+            }
+        }
+    }
+
+    #[test]
+    fn hangar_fitted_spec_steps_cleanly() {
+        let xml = r#"<fdm_config name="fit-test">
+          <metrics><wingarea unit="FT2">174</wingarea><wingspan unit="FT">36</wingspan><chord unit="FT">4.9</chord></metrics>
+          <mass_balance>
+            <ixx unit="SLUG*FT2">948</ixx><iyy unit="SLUG*FT2">1346</iyy><izz unit="SLUG*FT2">1967</izz>
+            <emptywt unit="LBS">1500</emptywt>
+            <location name="CG" unit="IN"><x>41</x><y>0</y><z>36</z></location>
+          </mass_balance>
+          <propulsion><tank type="FUEL"><capacity unit="LBS">300</capacity><contents unit="LBS">200</contents></tank></propulsion>
+          <ground_reactions>
+            <contact type="BOGEY" name="NOSE"><location unit="IN"><x>-20</x><y>0</y><z>-30</z></location><spring_coeff unit="LBS/FT">1800</spring_coeff><damping_coeff unit="LBS/FT/SEC">600</damping_coeff><max_steer unit="DEG">10</max_steer></contact>
+            <contact type="BOGEY" name="LEFT"><location unit="IN"><x>58</x><y>-43</y><z>-30</z></location><spring_coeff unit="LBS/FT">5400</spring_coeff><damping_coeff unit="LBS/FT2/SEC2">200</damping_coeff><brake_group>LEFT</brake_group></contact>
+            <contact type="BOGEY" name="RIGHT"><location unit="IN"><x>58</x><y>43</y><z>-30</z></location><spring_coeff unit="LBS/FT">5400</spring_coeff><damping_coeff unit="LBS/FT2/SEC2">200</damping_coeff><brake_group>RIGHT</brake_group></contact>
+          </ground_reactions>
+          <aerodynamics>
+            <axis name="LIFT"><function name="CL"><product><property>aero/qbar-psf</property><property>metrics/Sw-sqft</property><table><independentVar>aero/alpha-rad</independentVar><tableData>-0.1 -0.2
+ 0.0 0.3
+ 0.25 1.4</tableData></table></product></function></axis>
+            <axis name="DRAG"><function name="CD"><product><property>aero/qbar-psf</property><property>metrics/Sw-sqft</property><value>0.04</value></product></function></axis>
+          </aerodynamics>
+        </fdm_config>"#;
+        let jsb = crate::jsbsim::Aircraft::parse(xml, std::path::Path::new(".")).unwrap();
+        let eng = crate::hangar::read_part("<piston_engine name='e'><maxhp>160</maxhp></piston_engine>").unwrap();
+        let prop = crate::hangar::read_part("<propeller name='p'><diameter>75</diameter></propeller>").unwrap();
+        let (spec, _) = crate::hangar::fit(&jsb, &[(Some(eng), Some(prop))], "fit-test", "Fit Test", None).unwrap();
+        let spec: &'static Spec = Box::leak(Box::new(spec));
+        let w = flat_world();
+        let mut p = Plane::spawn(spec, 0.6, -2.1, 1_500.0, 0.0, spec.cruise);
+        p.t = 2.0;
+        let dt = 1.0 / 180.0;
+        for _ in 0..360 {
+            let _ = p.step(dt, &Controls { pitch: 0.3, roll: -0.4, throttle: 0.8, ..Default::default() }, &w);
+            assert!(p.is_finite_state());
+        }
     }
 }

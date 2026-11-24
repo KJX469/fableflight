@@ -4,7 +4,7 @@
 //! hangar.rs), each with the license its files state.
 use crate::aircraft::{self, Spec};
 use crate::hangar::{self, Install, LicenseFrom, State, Status};
-use crate::i18n::{t, tr};
+use crate::i18n::{t, tr_en};
 use crate::menu::{self, ACCENT, DIM, TEXT};
 use egui::{Align2, Color32, RichText, Stroke};
 
@@ -21,6 +21,10 @@ const BAD: Color32 = Color32::from_rgb(255, 128, 96);
 impl crate::Game {
     /// An aircraft's picture (shared by types drawn with the same body).
     pub(crate) fn still(&mut self, ctx: &egui::Context, spec: &Spec) -> egui::TextureHandle {
+        // (In the paint scheme picked for it, for a type that has several.)
+        if let Some(l) = crate::aircraft::liveries(spec).get(self.menu.livery(spec)) {
+            return self.picture(ctx, l.still);
+        }
         self.picture(ctx, spec.still)
     }
 
@@ -61,15 +65,15 @@ impl crate::Game {
                         menu::chevron(ui.painter(), r.rect.center(), 6.0, turn, if r.hovered() || r.has_focus() { Color32::WHITE } else { DIM });
                         r
                     };
-                    if arrow(ui, 2.0).on_hover_text(t!("Previous aircraft", "Avion précédent")).clicked() {
+                    if arrow(ui, 2.0).on_hover_text(t!("hangar.previous_aircraft")).clicked() {
                         choose = Some((k + n - 1) % n);
                     }
                     let name_w = ui.available_width() - 34.0 - ui.spacing().item_spacing.x;
                     ui.allocate_ui_with_layout(egui::vec2(name_w, 34.0), egui::Layout::top_down(egui::Align::Center), |ui| {
-                        ui.label(menu::section_text(&t!("Aircraft  {} / {}", "Avion  {} / {}", k + 1, n)).color(DIM));
+                        ui.label(menu::section_text(&t!("hangar.aircraft", k + 1, n)).color(DIM));
                         ui.label(RichText::new(spec.name).font(menu::item_title()).color(Color32::WHITE));
                     });
-                    if arrow(ui, 0.0).on_hover_text(t!("Next aircraft", "Avion suivant")).clicked() {
+                    if arrow(ui, 0.0).on_hover_text(t!("hangar.next_aircraft")).clicked() {
                         choose = Some((k + 1) % n);
                     }
                 });
@@ -86,19 +90,19 @@ impl crate::Game {
             }
             if resp.hovered() {
                 ui.painter().rect_filled(pic, 0.0, Color32::from_black_alpha(90));
-                ui.painter().text(pic.center(), Align2::CENTER_CENTER, t!("See all aircraft", "Voir tous les avions"), egui::FontId::proportional(16.0), Color32::WHITE);
+                ui.painter().text(pic.center(), Align2::CENTER_CENTER, t!("hangar.see_all_aircraft"), egui::FontId::proportional(16.0), Color32::WHITE);
             }
-            let resp = resp.on_hover_text(tr(spec.blurb));
+            let resp = resp.on_hover_text(tr_en(spec.blurb));
             if resp.clicked() {
                 open = Some(Tab::Mine);
             }
             egui::Frame::new().fill(menu::PANEL).corner_radius(bottom).inner_margin(egui::Margin { left: 10, right: 10, top: 4, bottom: 10 }).show(ui, |ui| {
                 ui.set_width(w - 20.0);
                 ui.columns(2, |c| {
-                    if menu::wide_button(&mut c[0], t!("All aircraft", "Tous les avions"), crate::padui::Hint::None, false, true).clicked() {
+                    if menu::wide_button(&mut c[0], t!("hangar.all_aircraft"), crate::padui::Hint::None, false, true).clicked() {
                         open = Some(Tab::Mine);
                     }
-                    if menu::wide_button(&mut c[1], t!("Get more…", "En obtenir…"), crate::padui::Hint::None, false, true).clicked() {
+                    if menu::wide_button(&mut c[1], t!("hangar.get_more"), crate::padui::Hint::None, false, true).clicked() {
                         open = Some(Tab::Download);
                     }
                 });
@@ -166,7 +170,7 @@ impl crate::Game {
             let list_r = Rect::from_min_max(side.min + vec2(16.0, 28.0), pos2(side.right() - 16.0, side.bottom() - foot_h - 12.0));
             let mut s = ui.new_child(egui::UiBuilder::new().max_rect(list_r).layout(Layout::top_down(egui::Align::Min)));
             s.add_space(10.0);
-            menu::screen_heading(&mut s, t!("Aircraft", "Avions"));
+            menu::screen_heading(&mut s, t!("hangar.aircraft_2"));
             s.add_space(20.0);
             egui::ScrollArea::vertical().id_salt("aircraft_list").auto_shrink([false, false]).max_height(s.available_height()).show(&mut s, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
@@ -213,7 +217,7 @@ impl crate::Game {
                 // Last: more to download.
                 let on = tab == Tab::Download;
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
-                resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, t!("Download more", "En télécharger")));
+                resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, t!("hangar.download_more")));
                 if on {
                     self.pad_home_focus(&resp);
                 }
@@ -229,8 +233,8 @@ impl crate::Game {
                 let col = if on { ACCENT } else { menu::mix(DIM, ACCENT, lit) };
                 p.line_segment([c - vec2(9.0, 0.0), c + vec2(9.0, 0.0)], Stroke::new(2.0, col));
                 p.line_segment([c - vec2(0.0, 9.0), c + vec2(0.0, 9.0)], Stroke::new(2.0, col));
-                p.text(pos2(rect.left() + 104.0, rect.center().y - 9.0), Align2::LEFT_CENTER, t!("Download more", "En télécharger"), menu::label(), if on { Color32::WHITE } else { menu::mix(TEXT, Color32::WHITE, lit) });
-                p.text(pos2(rect.left() + 104.0, rect.center().y + 10.0), Align2::LEFT_CENTER, t!("FlightGear's collection", "Collection de FlightGear"), menu::caption(), DIM);
+                p.text(pos2(rect.left() + 104.0, rect.center().y - 9.0), Align2::LEFT_CENTER, t!("hangar.download_more"), menu::label(), if on { Color32::WHITE } else { menu::mix(TEXT, Color32::WHITE, lit) });
+                p.text(pos2(rect.left() + 104.0, rect.center().y + 10.0), Align2::LEFT_CENTER, t!("hangar.flightgears_collection"), menu::caption(), DIM);
                 if resp.clicked() && tab != Tab::Download {
                     tab = Tab::Download;
                     hangar::open();
@@ -239,13 +243,13 @@ impl crate::Game {
             });
             let foot = Rect::from_min_max(pos2(side.left() + 16.0, side.bottom() - foot_h), pos2(side.right() - 16.0, side.bottom() - 24.0));
             let mut f = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(Layout::bottom_up(egui::Align::Min)));
-            let back_to = if self.menu.air_back == menu::Screen::Fly { t!("Back to the globe", "Retour au globe") } else { t!("Back", "Retour") };
+            let back_to = if self.menu.air_back == menu::Screen::Fly { t!("hangar.back_to_the_globe") } else { t!("hangar.back") };
             if menu::wide_button(&mut f, back_to, crate::padui::Hint::of("Esc", "B"), false, true).clicked() {
                 back = true;
             }
             if crate::padui::active() {
                 f.add_space(6.0);
-                crate::padui::prompts(&mut f, &[("LB / RB", tr("aircraft")), ("A", tr("press")), ("B", tr("back"))], 18.0, 12.0, DIM);
+                crate::padui::prompts(&mut f, &[("LB / RB", tr_en("aircraft")), ("A", tr_en("press")), ("B", tr_en("back"))], 18.0, 12.0, DIM);
             }
 
             // The content: the aircraft picked out, or the download page.
@@ -264,7 +268,7 @@ impl crate::Game {
                     }
                 }
                 Tab::Download => {
-                    c.label(RichText::new(t!("Download more aircraft", "Télécharger d'autres avions")).font(menu::page_title()).color(Color32::WHITE));
+                    c.label(RichText::new(t!("hangar.download_more_aircraft")).font(menu::page_title()).color(Color32::WHITE));
                     c.add_space(6.0);
                     if let Some(k) = self.downloads(&mut c) {
                         select = Some(k);
@@ -321,7 +325,7 @@ impl crate::Game {
         }
         if chosen {
             // the aircraft you will fly gets a mark in the corner.
-            let g = ui.painter().layout_no_wrap(t!("IN USE", "UTILISÉ").to_string(), menu::bold(13.0), ACCENT);
+            let g = ui.painter().layout_no_wrap(t!("hangar.in_use").to_string(), menu::bold(13.0), ACCENT);
             let r = egui::Rect::from_min_size(stage.right_top() + egui::vec2(-16.0 - g.size().x - 22.0, 14.0), g.size() + egui::vec2(22.0, 6.0));
             ui.painter().rect_stroke(r, menu::R_WIDGET, Stroke::new(1.0, ACCENT.gamma_multiply(0.6)), egui::StrokeKind::Inside);
             ui.painter().circle_filled(egui::pos2(r.left() + 8.0, r.center().y), 3.0, ACCENT);
@@ -337,14 +341,44 @@ impl crate::Game {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.set_width(240.0);
-                let b = menu::wide_button(ui, t!("Select", "Choisir"), crate::padui::Hint::of("Enter", "A"), true, true);
+                let b = menu::wide_button(ui, t!("hangar.select"), crate::padui::Hint::of("Enter", "A"), true, true);
                 if b.clicked() {
                     go = Some(true);
                 }
             });
         });
         ui.add_space(8.0);
-        ui.add(egui::Label::new(RichText::new(tr(spec.blurb)).size(16.0).color(TEXT)).wrap());
+        ui.add(egui::Label::new(RichText::new(tr_en(spec.blurb)).size(16.0).color(TEXT)).wrap());
+        let liveries = crate::aircraft::liveries(spec);
+        if !liveries.is_empty() {
+            ui.add_space(14.0);
+            ui.label(RichText::new(t!("hangar.livery")).font(menu::caption()).color(DIM));
+            let mut changed = false;
+            let current = self.menu.livery(spec);
+            ui.horizontal_wrapped(|ui| {
+                for (i, l) in liveries.iter().enumerate() {
+                    let selected = current == i;
+                    let button = egui::Button::new(RichText::new(tr_en(l.name)).color(if selected { Color32::WHITE } else { TEXT }))
+                        .fill(if selected { Color32::from_rgb(48, 59, 78) } else { menu::SURFACE })
+                        .stroke(Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { ACCENT } else { menu::LINE }))
+                        .corner_radius(menu::R_WIDGET);
+                    if ui.add(button).clicked() && !selected {
+                        self.menu.liveries.insert(spec.name, i);
+                        changed = true;
+                    }
+                    // A swatch: the main colour over the trim.
+                    let srgb = |c: [f32; 3]| Color32::from(egui::Rgba::from_rgb(c[0], c[1], c[2]));
+                    let (top, under) = (srgb(l.swatch[0]), srgb(l.swatch[1]));
+                    let swatch = ui.allocate_exact_size(egui::vec2(35.0, 14.0), egui::Sense::hover()).0;
+                    let split = swatch.top() + 10.0;
+                    ui.painter().rect_filled(egui::Rect::from_min_max(swatch.min, egui::pos2(swatch.right(), split)), 2.0, top);
+                    ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(swatch.left(), split), swatch.max), 1.0, under);
+                }
+            });
+            // (Shown on the flown aircraft at once; another type takes it when it is picked.)
+            if changed && std::ptr::eq(spec, self.spec) { self.apply_livery(); }
+            ui.add_space(12.0);
+        }
         ui.add_space(18.0);
         // The numbers, in a row of tiles.
         let cells = numbers(spec);
@@ -367,8 +401,8 @@ impl crate::Game {
         }
         if let Some(o) = spec.origin {
             ui.add_space(6.0);
-            let by = if o.author.is_empty() { String::new() } else { t!("  ·  by {}", "  ·  par {}", o.author) };
-            ui.label(RichText::new(t!("License: {}{}", "Licence : {}{}", o.license, by)).font(menu::caption()).color(DIM));
+            let by = if o.author.is_empty() { String::new() } else { t!("hangar.by", o.author) };
+            ui.label(RichText::new(t!("hangar.license", o.license, by)).font(menu::caption()).color(DIM));
         }
         go
     }
@@ -382,9 +416,9 @@ impl crate::Game {
         };
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.label(RichText::new(t!("Aircraft from", "Avions de")).font(menu::caption()).color(DIM));
-            link(ui, t!("FlightGear's collection (FGAddon)", "la collection de FlightGear (FGAddon)"), &hangar::repo_url());
-            ui.label(RichText::new(t!("— each with its own 3D model. Its flight model (JSBSim or YASim) is fitted to ours. Each keeps the license its files state. They are made by FlightGear's community: some are not of high quality, and some don't fly realistically here.", "— chacun avec son propre modèle 3D. Son modèle de vol (JSBSim ou YASim) est adapté au nôtre. Chacun garde la licence indiquée dans ses fichiers. Ils sont faits par la communauté de FlightGear : certains ne sont pas de grande qualité, et certains ne volent pas de façon réaliste ici.")).font(menu::caption()).color(DIM));
+            ui.label(RichText::new(t!("hangar.aircraft_from")).font(menu::caption()).color(DIM));
+            link(ui, t!("hangar.flightgears_collection_fgaddon"), &hangar::repo_url());
+            ui.label(RichText::new(t!("hangar.each_with_its_own_3d")).font(menu::caption()).color(DIM));
         });
         ui.add_space(8.0);
         let (status, entries) = {
@@ -395,14 +429,14 @@ impl crate::Game {
             Status::Idle | Status::Listing => {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
-                    ui.label(RichText::new(t!("Reading FlightGear's aircraft catalogue…", "Lecture du catalogue d'avions de FlightGear…")).color(TEXT));
+                    ui.label(RichText::new(t!("hangar.reading_flightgears_aircraft_catalogue")).color(TEXT));
                 });
                 ui.ctx().request_repaint();
                 return None;
             }
             Status::Failed(e) => {
-                ui.label(RichText::new(t!("Could not get the catalogue: {}", "Impossible d'obtenir le catalogue : {}", e)).color(BAD));
-                if ui.button(t!("Try again", "Réessayer")).clicked() {
+                ui.label(RichText::new(t!("hangar.could_not_get_the_catalogue", e)).color(BAD));
+                if ui.button(t!("hangar.try_again")).clicked() {
                     hangar::catalogue().status = Status::Idle;
                     hangar::open();
                 }
@@ -429,10 +463,10 @@ impl crate::Game {
             ui.scope_builder(column(left), |ui| {
                 ui.set_width(left_w);
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.menu.hangar_find).hint_text(t!("Search", "Rechercher")).desired_width(left_w - 120.0).margin(egui::vec2(8.0, 5.0)));
-                    menu::toggle(ui, &mut self.menu.hangar_all, t!("Show all", "Tout voir")).on_hover_text(t!("Also list the ones that can't be flown here (helicopters, rockets, gliders…)", "Lister aussi ceux qui ne peuvent pas voler ici (hélicoptères, fusées, planeurs…)"));
+                    ui.add(egui::TextEdit::singleline(&mut self.menu.hangar_find).hint_text(t!("hangar.search")).desired_width(left_w - 120.0).margin(egui::vec2(8.0, 5.0)));
+                    menu::toggle(ui, &mut self.menu.hangar_all, t!("hangar.show_all")).on_hover_text(t!("hangar.also_list_the_ones_that"));
                 });
-                let line = t!("{} aircraft · pick one to see if it flies here", "{} avions · choisissez-en un pour voir s'il vole ici", entries.len());
+                let line = t!("hangar.aircraft_pick_one_to_see", entries.len());
                 ui.label(RichText::new(line).font(menu::caption()).color(DIM));
                 ui.add_space(4.0);
                 let find = self.menu.hangar_find.to_lowercase();
@@ -466,21 +500,21 @@ impl crate::Game {
                         let sub = match &e.state {
                             State::Ready(i) => match &i.fit {
                                 Ok(s) => format!("{} · {}", s.kind, i.license),
-                                Err(_) => format!("{} · {}", t!("can't be flown here", "ne peut pas voler ici"), i.license),
+                                Err(_) => format!("{} · {}", t!("hangar.cant_be_flown_here"), i.license),
                             },
                             State::Pending => match hangar::named_fdm(e) {
                                 Some(true) => format!("JSBSim · {}", crate::bytes(e.bytes())),
                                 Some(false) => format!("YASim · {}", crate::bytes(e.bytes())),
                                 None => crate::bytes(e.bytes()),
                             },
-                            State::Failed(_) => t!("couldn't be read", "illisible").to_string(),
+                            State::Failed(_) => t!("hangar.couldnt_be_read").to_string(),
                         };
                         let sub: String = sub.chars().take(44).collect();
                         p.text(rect.left_center() + egui::vec2(10.0, 9.0), Align2::LEFT_CENTER, sub, menu::caption(), DIM);
                         let (tag, col) = match &e.install {
-                            Install::Installed => (t!("installed", "installé").to_string(), OK),
+                            Install::Installed => (t!("hangar.installed").to_string(), OK),
                             Install::Downloading(a, b) => (format!("{:.0}%", *a as f64 * 100.0 / (*b).max(1) as f64), ACCENT),
-                            Install::Unpacking => (t!("unpacking", "décompression").to_string(), ACCENT),
+                            Install::Unpacking => (t!("hangar.unpacking").to_string(), ACCENT),
                             Install::Failed(_) => ("!".to_string(), BAD),
                             Install::No => (String::new(), DIM),
                         };
@@ -519,14 +553,14 @@ impl crate::Game {
             State::Pending => {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
-                    ui.label(RichText::new(t!("Reading {}…", "Lecture de {}…", if e.name.is_empty() { &e.folder } else { &e.name })).color(TEXT));
+                    ui.label(RichText::new(t!("hangar.reading", if e.name.is_empty() { &e.folder } else { &e.name })).color(TEXT));
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
                 });
                 None
             }
             State::Failed(err) => {
                 ui.label(RichText::new(&e.folder).font(menu::page_title()).color(Color32::WHITE));
-                ui.label(RichText::new(t!("Couldn't read it: {}", "Lecture impossible : {}", err)).color(BAD));
+                ui.label(RichText::new(t!("hangar.couldnt_read_it", err)).color(BAD));
                 None
             }
         };
@@ -535,10 +569,10 @@ impl crate::Game {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(RichText::new(format!("{}  ·  {}", e.folder, crate::bytes(e.bytes()))).font(menu::caption()).color(DIM));
-            ui.hyperlink_to(RichText::new(t!("view its files", "voir ses fichiers")).font(menu::caption()), hangar::folder_url(&e.folder));
+            ui.hyperlink_to(RichText::new(t!("hangar.view_its_files")).font(menu::caption()), hangar::folder_url(&e.folder));
         });
         if !i.author.is_empty() {
-            ui.label(RichText::new(t!("By {}", "Par {}", i.author)).font(menu::body()).color(TEXT));
+            ui.label(RichText::new(t!("hangar.by_2", i.author)).font(menu::body()).color(TEXT));
         }
         if !i.description.is_empty() {
             ui.label(RichText::new(&i.description).font(menu::body()).color(TEXT));
@@ -546,7 +580,7 @@ impl crate::Game {
         ui.add_space(10.0);
 
         // The license.
-        menu::heading(ui, t!("License", "Licence"));
+        menu::heading(ui, t!("hangar.license_2"));
         egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 8 }).show(ui, |ui| {
             ui.set_width(ui.available_width());
             if i.license_url.is_empty() {
@@ -555,19 +589,19 @@ impl crate::Game {
                 ui.hyperlink_to(RichText::new(&i.license).font(menu::label()), &i.license_url);
             }
             let from = match i.license_from {
-                LicenseFrom::Header => t!("as stated in the aircraft file's header", "indiquée dans l'en-tête du fichier de l'avion").to_string(),
-                LicenseFrom::Comment => t!("as stated in the aircraft file's comments", "indiquée dans les commentaires du fichier de l'avion").to_string(),
-                LicenseFrom::Repository => t!("the file states no license of its own: it is covered by the license of FlightGear's collection", "le fichier n'indique pas de licence propre : la licence de la collection de FlightGear s'applique").to_string(),
+                LicenseFrom::Header => t!("hangar.as_stated_in_the_aircraft").to_string(),
+                LicenseFrom::Comment => t!("hangar.as_stated_in_the_aircraft_2").to_string(),
+                LicenseFrom::Repository => t!("hangar.the_file_states_no_license").to_string(),
             };
             ui.label(RichText::new(from).font(menu::caption()).color(DIM));
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(RichText::new(t!("FlightGear's collection:", "Collection de FlightGear :")).font(menu::caption()).color(DIM));
+                ui.label(RichText::new(t!("hangar.flightgears_collection_2")).font(menu::caption()).color(DIM));
                 ui.hyperlink_to(RichText::new(hangar::REPO_LICENSE).font(menu::caption()), hangar::REPO_LICENSE_URL);
             });
             if !i.notes.is_empty() {
                 ui.add_space(4.0);
-                ui.label(menu::section_text(t!("Notes from its authors", "Notes de ses auteurs")).color(DIM));
+                ui.label(menu::section_text(t!("hangar.notes_from_its_authors")).color(DIM));
                 let notes: String = i.notes.chars().take(900).collect();
                 ui.label(RichText::new(notes).font(menu::caption()).color(DIM));
             }
@@ -575,7 +609,7 @@ impl crate::Game {
         ui.add_space(10.0);
 
         // What it becomes here.
-        menu::heading(ui, t!("In Fable Flight", "Dans Fable Flight"));
+        menu::heading(ui, t!("hangar.in_fable_flight"));
         egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 8 }).show(ui, |ui| {
             ui.set_width(ui.available_width());
             match &i.fit {
@@ -585,26 +619,26 @@ impl crate::Game {
                             ui.label(RichText::new(k).font(menu::caption()).color(DIM));
                             ui.label(RichText::new(v).font(menu::caption()).color(Color32::WHITE));
                         };
-                        cell(ui, t!("Type", "Type"), s.kind.clone());
-                        cell(ui, t!("Engines", "Moteurs"), s.power.clone());
+                        cell(ui, t!("hangar.type"), s.kind.clone());
+                        cell(ui, t!("hangar.engines"), s.power.clone());
                         ui.end_row();
-                        cell(ui, t!("Mass", "Masse"), format!("{:.0} kg", s.mass_kg));
-                        cell(ui, t!("Span", "Envergure"), format!("{:.1} m", s.span_m));
+                        cell(ui, t!("hangar.mass"), format!("{:.0} kg", s.mass_kg));
+                        cell(ui, t!("hangar.span"), format!("{:.1} m", s.span_m));
                         ui.end_row();
-                        cell(ui, t!("Stall", "Décrochage"), format!("{:.0} kt", s.stall_kt));
-                        cell(ui, t!("Top speed", "Vitesse max"), t!("about {:.0} kt", "environ {:.0} kt", s.vmax_kt));
+                        cell(ui, t!("hangar.stall"), format!("{:.0} kt", s.stall_kt));
+                        cell(ui, t!("hangar.top_speed"), t!("hangar.about_kt", s.vmax_kt));
                         ui.end_row();
                     });
                     ui.add_space(4.0);
                     let how = if s.own_model {
-                        t!("Flies with our flight model, fitted to its {1} lift, drag, mass and engines. Drawn with its own 3D model, on its own landing gear; instruments and sounds from the {0}.", "Vole avec notre modèle de vol, ajusté à sa portance, sa traînée, sa masse et ses moteurs {1}. Dessiné avec son propre modèle 3D, sur son propre train ; instruments et sons du {0}.", s.body, s.fdm)
+                        t!("hangar.flies_with_our_flight_model", s.body, s.fdm)
                     } else {
-                        t!("Flies with our flight model, fitted to its {1} lift, drag, mass and engines. Drawn as the {0} (body, cockpit, gear and paint).", "Vole avec notre modèle de vol, ajusté à sa portance, sa traînée, sa masse et ses moteurs {1}. Dessiné comme le {0} (fuselage, cockpit, train et peinture).", s.body, s.fdm)
+                        t!("hangar.flies_with_our_flight_model_2", s.body, s.fdm)
                     };
                     ui.label(RichText::new(how).font(menu::caption()).color(DIM));
                 }
                 Err(why) => {
-                    ui.label(RichText::new(t!("Can't be flown here yet", "Ne peut pas encore voler ici")).font(menu::label()).color(BAD));
+                    ui.label(RichText::new(t!("hangar.cant_be_flown_here_yet")).font(menu::label()).color(BAD));
                     ui.label(RichText::new(why).font(menu::caption()).color(DIM));
                 }
             }
@@ -617,40 +651,40 @@ impl crate::Game {
         match &e.install {
             Install::No | Install::Failed(_) => {
                 if let Install::Failed(err) = &e.install {
-                    ui.label(RichText::new(t!("Download failed: {}", "Échec du téléchargement : {}", err)).font(menu::caption()).color(BAD));
+                    ui.label(RichText::new(t!("hangar.download_failed", err)).font(menu::caption()).color(BAD));
                 }
-                let label = t!("Download  ·  {}", "Télécharger  ·  {}", crate::bytes(e.bytes()));
+                let label = t!("hangar.download", crate::bytes(e.bytes()));
                 if menu::wide_button(ui, &label, crate::padui::Hint::None, true, can).clicked() {
                     hangar::install(&e.folder);
                 }
-                ui.label(RichText::new(t!("Downloaded straight from a FlightGear mirror, under {}.", "Téléchargé directement depuis un miroir FlightGear, sous {}.", i.license)).font(menu::caption()).color(DIM));
+                ui.label(RichText::new(t!("hangar.downloaded_straight_from_a_flightgear", i.license)).font(menu::caption()).color(DIM));
             }
             Install::Downloading(a, b) => {
-                ui.add(egui::ProgressBar::new(*a as f32 / (*b).max(1) as f32).text(t!("Downloading… {} / {}", "Téléchargement… {} / {}", crate::bytes(*a), crate::bytes(*b))).desired_height(30.0));
+                ui.add(egui::ProgressBar::new(*a as f32 / (*b).max(1) as f32).text(t!("hangar.downloading", crate::bytes(*a), crate::bytes(*b))).desired_height(30.0));
             }
             Install::Unpacking => {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new());
-                    ui.label(RichText::new(t!("Unpacking and reading its model…", "Décompression et lecture de son modèle…")).color(TEXT));
+                    ui.label(RichText::new(t!("hangar.unpacking_and_reading_its_model")).color(TEXT));
                 });
             }
             Install::Installed => {
                 let spec = aircraft::list().into_iter().position(|s| s.keys.first() == Some(&key.as_str()));
                 match spec {
                     Some(k) => {
-                        if menu::wide_button(ui, t!("Select this aircraft", "Choisir cet avion"), crate::padui::Hint::None, true, true).clicked() {
+                        if menu::wide_button(ui, t!("hangar.select_this_aircraft"), crate::padui::Hint::None, true, true).clicked() {
                             fly = Some(k);
                         }
                     }
                     None => {
-                        ui.label(RichText::new(t!("Downloaded, but it doesn't load here.", "Téléchargé, mais ne se charge pas ici.")).font(menu::caption()).color(BAD));
+                        ui.label(RichText::new(t!("hangar.downloaded_but_it_doesnt_load")).font(menu::caption()).color(BAD));
                     }
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(t!("Downloaded", "Téléchargé")).font(menu::caption()).color(OK));
+                    ui.label(RichText::new(t!("hangar.downloaded")).font(menu::caption()).color(OK));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(RichText::new(t!("Remove", "Supprimer")).font(menu::caption())).clicked() {
+                        if ui.button(RichText::new(t!("hangar.remove")).font(menu::caption())).clicked() {
                             let chosen = aircraft::nth(self.menu.aircraft).keys.first().copied();
                             if let Err(err) = hangar::remove(&e.folder) {
                                 log::warn!("removing {}: {err}", e.folder);
@@ -669,8 +703,8 @@ impl crate::Game {
 /// What kind of aircraft, for the list: built in, or where it came from.
 fn kind_line(spec: &Spec) -> String {
     match spec.origin {
-        Some(o) if spec.ext.is_some() => t!("Downloaded  ·  {}", "Téléchargé  ·  {}", o.license),
-        Some(o) => t!("Drawn as the {}", "Dessiné comme le {}", o.body),
+        Some(o) if spec.ext.is_some() => t!("hangar.downloaded_2", o.license),
+        Some(o) => t!("hangar.drawn_as_the", o.body),
         None => engine_line(spec),
     }
 }
@@ -678,34 +712,34 @@ fn kind_line(spec: &Spec) -> String {
 /// Under the name on the big view.
 fn origin_line(spec: &Spec) -> String {
     match spec.origin {
-        Some(o) if spec.ext.is_some() => t!("Downloaded from FlightGear's collection  ·  {}", "Téléchargé de la collection de FlightGear  ·  {}", o.license),
-        Some(o) => t!("From FlightGear's collection, drawn as the {}  ·  {}", "De la collection de FlightGear, dessiné comme le {}  ·  {}", o.body, o.license),
-        None => t!("Built in", "Inclus").to_string(),
+        Some(o) if spec.ext.is_some() => t!("hangar.downloaded_from_flightgears_collection", o.license),
+        Some(o) => t!("hangar.from_flightgears_collection_drawn_as", o.body, o.license),
+        None => t!("hangar.built_in").to_string(),
     }
 }
 
 /// Its engines in a few words: "180 hp piston", "4 × 252 kN jet".
 fn engine_line(spec: &Spec) -> String {
     match &spec.engine {
-        aircraft::Engine::Piston(p) => t!("{:.0} hp piston", "{:.0} ch, à pistons", p.power / 745.7),
-        aircraft::Engine::Fan(f) if f.boost > 1.15 => t!("{} × {:.0} kN, afterburning", "{} × {:.0} kN, postcombustion", f.n, f.thrust * f.boost / 1000.0),
-        aircraft::Engine::Fan(f) => t!("{} × {:.0} kN jet", "{} × {:.0} kN, réacteur", f.n, f.thrust / 1000.0),
-        aircraft::Engine::Rocket(r) => t!("{} rocket engines", "{} moteurs-fusées", r.stages[0].n),
+        aircraft::Engine::Piston(p) => t!("hangar.hp_piston", p.power / 745.7),
+        aircraft::Engine::Fan(f) if f.boost > 1.15 => t!("hangar.kn_afterburning", f.n, f.thrust * f.boost / 1000.0),
+        aircraft::Engine::Fan(f) => t!("hangar.kn_jet", f.n, f.thrust / 1000.0),
+        aircraft::Engine::Rocket(r) => t!("hangar.rocket_engines", r.stages[0].n),
     }
 }
 
 /// The aircraft screen's numbers, straight from its `Spec`: (what, value).
 fn numbers(spec: &Spec) -> Vec<(&'static str, String)> {
     let kt = |ms: f64| ms * 1.943_84;
-    let mut v = vec![(t!("Engines", "Moteurs"), engine_line(spec))];
+    let mut v = vec![(t!("hangar.engines"), engine_line(spec))];
     if spec.rocket().is_none() {
         let top = if spec.mmo > 0.0 { format!("{:.0} kt  ·  M {:.2}", kt(spec.vne), spec.mmo) } else { format!("{:.0} kt", kt(spec.vne)) };
-        v.push((t!("Never exceed (IAS)", "Vitesse à ne pas dépasser"), top));
-        v.push((t!("Wingspan", "Envergure"), format!("{:.1} m", spec.b)));
-        v.push((t!("Wing area", "Surface alaire"), format!("{:.1} m²", spec.wing_area)));
+        v.push((t!("hangar.never_exceed_ias"), top));
+        v.push((t!("hangar.wingspan"), format!("{:.1} m", spec.b)));
+        v.push((t!("hangar.wing_area"), format!("{:.1} m²", spec.wing_area)));
     }
-    v.push((t!("Mass, half fuel", "Masse, mi-carburant"), format!("{} kg", thousands(spec.mass))));
-    v.push((t!("Fuel, full tanks", "Carburant, pleins faits"), format!("{} kg", thousands(spec.fuel_kg))));
+    v.push((t!("hangar.mass_half_fuel"), format!("{} kg", thousands(spec.mass))));
+    v.push((t!("hangar.fuel_full_tanks"), format!("{} kg", thousands(spec.fuel_kg))));
     v
 }
 

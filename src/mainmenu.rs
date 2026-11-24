@@ -3,7 +3,7 @@
 //! space alone (the menu camera looks away from the planet, see `frame`).
 use crate::menu::{self, Screen, ACCENT, DIM, FAINT, TEXT};
 use crate::padui::{self, Hint};
-use crate::{aircraft, hangar_ui, settings_ui, t, tr, Game};
+use crate::{aircraft, hangar_ui, settings_ui, t, tr_en, Game};
 use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stroke};
 
 /// The picture behind the FLY tile, 4:3 at a little over twice the tile's
@@ -67,7 +67,7 @@ impl Game {
 
             // Tab and the d-pad go left to right: Aircraft, FLY, Settings.
             let r = ui.interact(air, ui.scope_id().with("tile_air"), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Aircraft", "Avions")));
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.aircraft")));
             let mut pa = p.clone();
             pa.set_opacity(rise(1));
             aircraft_tile(&pa, air, &r, k, spec.name, &still);
@@ -75,7 +75,7 @@ impl Game {
                 press = Some(Tile::Aircraft);
             }
             let r = ui.interact(fly, ui.scope_id().with("tile_fly"), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Fly", "Voler")));
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.fly")));
             self.pad_home_focus(&r);
             let mut pf = p.clone();
             pf.set_opacity(rise(0));
@@ -84,7 +84,7 @@ impl Game {
                 press = Some(Tile::Fly);
             }
             let r = ui.interact(set, ui.scope_id().with("tile_set"), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Settings", "Réglages")));
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.settings")));
             let mut ps = p.clone();
             ps.set_opacity(rise(2));
             settings_tile(&ps, set, &r, k);
@@ -92,7 +92,7 @@ impl Game {
                 press = Some(Tile::Settings);
             }
             let r = ui.interact(mpb, ui.scope_id().with("tile_mp"), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Multiplayer", "Multijoueur")));
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.multiplayer")));
             let mut pm = p.clone();
             pm.set_opacity(rise(3));
             let (col, status) = self.mp_short();
@@ -105,7 +105,7 @@ impl Game {
             if let Some((place, plane)) = &again {
                 let b = Rect::from_min_size(pos2(fly.left(), fly.bottom() + 14.0 * k), vec2(fly.width(), 46.0));
                 let r = ui.interact(b, ui.scope_id().with("again"), Sense::click());
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Fly again", "Revoler")));
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.fly_again")));
                 let mut pg = p.clone();
                 pg.set_opacity(rise(3));
                 again_button(&pg, b, &r, place, plane);
@@ -118,22 +118,22 @@ impl Game {
             let foot_y = screen.bottom() - 34.0;
             let q = Rect::from_min_size(pos2(screen.left() + 24.0, foot_y - 17.0), vec2(104.0, 34.0));
             let qr = ui.interact(q, ui.scope_id().with("quit"), Sense::click());
-            qr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("Quit", "Quitter")));
+            qr.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.quit")));
             let lit = menu::ease(ctx, qr.id, qr.hovered() || qr.has_focus());
             if lit > 0.0 {
                 p.rect_filled(q, menu::R_WIDGET, Color32::from_white_alpha((14.0 * lit) as u8));
             }
             let qc = menu::mix(DIM, Color32::WHITE, lit);
             power_icon(&p, pos2(q.left() + 18.0, q.center().y), 14.0, qc);
-            p.text(pos2(q.left() + 34.0, q.center().y), Align2::LEFT_CENTER, t!("Quit", "Quitter"), menu::medium(15.0), qc);
+            p.text(pos2(q.left() + 34.0, q.center().y), Align2::LEFT_CENTER, t!("menu.quit"), menu::medium(15.0), qc);
             if qr.clicked() {
                 quit = true;
             }
             if padui::active() {
                 let mut f = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(pos2(screen.center().x, foot_y), vec2(360.0, 28.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                padui::prompts(&mut f, &[("Dpad", tr("move")), ("A", tr("press"))], 20.0, 12.5, DIM);
+                padui::prompts(&mut f, &[("Dpad", tr_en("move")), ("A", tr_en("press"))], 20.0, 12.5, DIM);
             }
-            p.text(pos2(screen.right() - 24.0, foot_y), Align2::RIGHT_CENTER, t!("Globe: Esri, Maxar, Earthstar Geographics · night lights NASA Black Marble · clouds Live Cloud Maps", "Globe : Esri, Maxar, Earthstar Geographics · lumières NASA Black Marble · nuages Live Cloud Maps"), FontId::proportional(11.5), FAINT);
+            p.text(pos2(screen.right() - 24.0, foot_y), Align2::RIGHT_CENTER, t!("menu.globe_esri_maxar_earthstar_geographics"), FontId::proportional(11.5), FAINT);
         });
         match press {
             Some(Tile::Fly) => self.menu.screen = Screen::Fly,
@@ -193,7 +193,7 @@ fn again_button(p: &Painter, r: Rect, resp: &egui::Response, place: &str, plane:
     let end = *pts.last().unwrap();
     p.line(pts, Stroke::new(1.8, col));
     p.add(egui::Shape::convex_polygon(vec![end + vec2(3.5, -3.5), end + vec2(4.0, 3.0), end + vec2(-2.5, 1.5)], col, Stroke::NONE));
-    p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("Fly again", "Revoler"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
+    p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("menu.fly_again"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
     let g = p.layout_no_wrap(format!("{place}  ·  {plane}"), menu::caption(), DIM);
     p.galley(pos2(r.right() - 16.0 - g.size().x, r.center().y - g.size().y * 0.5), g, DIM);
 }
@@ -206,7 +206,7 @@ fn mp_bar(p: &Painter, r: Rect, resp: &egui::Response, status: &str, col: Color3
     p.rect_stroke(r, menu::R_WIDGET, Stroke::new(1.0, menu::mix(Color32::from_white_alpha(26), ACCENT, lit)), egui::StrokeKind::Inside);
     let ic = menu::mix(TEXT, ACCENT, lit);
     settings_ui::Section::Multiplayer.icon(p, pos2(r.left() + 24.0, r.center().y), 18.0, ic);
-    p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("Multiplayer", "Multijoueur"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
+    p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("menu.multiplayer"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
     let g = p.layout_no_wrap(status.to_string(), menu::caption(), DIM);
     // (a long status, an error say, is cut to the room left)
     let room = r.width() - 44.0 - 120.0;
@@ -262,7 +262,7 @@ fn aircraft_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32, name: &str
     let w = r.width() * 0.98;
     let pic = Rect::from_center_size(c + vec2(5.0 * lit, -4.0 * lit) * k, vec2(w, w * 392.0 / 680.0));
     clip.image(still.id(), pic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-    caption(p, r, k, lit, t!("Aircraft", "Avions"), name);
+    caption(p, r, k, lit, t!("menu.aircraft"), name);
 }
 
 /// the settings tile: a cog that turns on hover.
@@ -272,7 +272,7 @@ fn settings_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32) {
     let c = pos2(r.center().x, r.top() + r.height() * 0.38);
     p.circle_stroke(c, 72.0 * k, Stroke::new(1.0, Color32::from_white_alpha((14.0 + 16.0 * lit) as u8)));
     gear_icon_turned(p, c, 92.0 * k, menu::mix(Color32::from_rgb(200, 207, 218), Color32::WHITE, lit), lit * std::f32::consts::TAU / 16.0);
-    caption(p, r, k, lit, t!("Settings", "Réglages"), t!("Graphics · sound · controls", "Graphismes · son · commandes"));
+    caption(p, r, k, lit, t!("menu.settings"), t!("menu.graphics_sound_controls"));
 }
 
 /// FLY: the globe picture filling it (easing in a little when hovered),
@@ -303,9 +303,9 @@ fn fly_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32, globe: &egui::T
     tile_frame(p, r, lit, false);
     let x = r.left() + 32.0 * k;
     let base = r.bottom() - 36.0 * k;
-    spaced(p, pos2(x - 3.0, base - 30.0 * k), Align2::LEFT_BOTTOM, t!("FLY", "VOLER"), menu::bold(112.0 * k.max(0.6)), menu::mix(Color32::WHITE, ACCENT, lit), 5.0 * k);
-    p.text(pos2(x, base - 8.0 * k), Align2::LEFT_CENTER, t!("Pick a place on the globe and take off", "Choisissez un lieu sur le globe et décollez"), menu::medium(16.5), Color32::from_rgb(220, 226, 234));
-    // its key or button, bottom right.
+    spaced(p, pos2(x - 3.0, base - 30.0 * k), Align2::LEFT_BOTTOM, t!("menu.fly_2"), menu::bold(112.0 * k.max(0.6)), menu::mix(Color32::WHITE, ACCENT, lit), 5.0 * k);
+    p.text(pos2(x, base - 8.0 * k), Align2::LEFT_CENTER, t!("menu.pick_a_place_on_the"), menu::medium(16.5), Color32::from_rgb(220, 226, 234));
+    // its key or button, bottom right, on a key cap
     let hc = Color32::from_white_alpha(190);
     match Hint::of("Enter", "A") {
         Hint::Text(h) => {

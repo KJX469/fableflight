@@ -190,6 +190,31 @@ impl Db {
         out
     }
 
+    /// The airports of at least `min_kind` between latitudes `lat0..lat1` and
+    /// within `half` degrees of longitude `lon` (degrees; any `half` of 180 or more is the whole world).
+    pub fn in_box(&self, lat0: f64, lat1: f64, lon: f64, half: f64, min_kind: u8) -> Vec<u32> {
+        let mut out = Vec::new();
+        let cols: Vec<i32> = if half >= 180.0 {
+            (-180..180).collect()
+        } else {
+            ((lon - half).floor() as i32..=(lon + half).floor() as i32).map(|c| (c + 180).rem_euclid(360) - 180).collect()
+        };
+        for row in lat0.floor().max(-90.0) as i32..=lat1.floor().min(89.0) as i32 {
+            for &col in &cols {
+                for &i in self.grid.get(&(row as i16, col as i16)).map(|v| &v[..]).unwrap_or(&[]) {
+                    let a = &self.apts[i as usize];
+                    let dlon = (a.lon - lon + 540.0).rem_euclid(360.0) - 180.0;
+                    if a.kind >= min_kind && a.lat >= lat0 && a.lat <= lat1 && (half >= 180.0 || dlon.abs() <= half) {
+                        out.push(i);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     pub fn find(&self, code: &str) -> Option<u32> {
         let c = code.trim().to_ascii_uppercase();
         if c.is_empty() {

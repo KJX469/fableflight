@@ -29,6 +29,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // Leaves and splinters: light, fluttering.
     let n = textureSampleLevel(t_noise, s_repeat, p.pos * 0.3 + vec3f(p.seed * 9.0, S.cam_r.w * 0.5, 0.0), 0.0).gba - 0.5;
     acc = -up * 4.0 + n * 14.0 + (S.wind.xyz - p.vel) * 0.4;
+  } else if (kind == 11) {
+    // Feathers: lighter still, they drift down rocking and are carried off by the wind.
+    let n = textureSampleLevel(t_noise, s_repeat, p.pos * 0.5 + vec3f(p.seed * 9.0, S.cam_r.w * 0.7, 0.0), 0.0).gba - 0.5;
+    acc = -up * 1.2 + n * 6.0 + (S.wind.xyz - p.vel) * 0.8;
   }
   p.vel += acc * dt;
   p.vel *= exp(-p.drag * dt);
@@ -41,7 +45,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       if (kind == 1) { p.vel = (p.vel - up * vn * 1.4) * 0.55; }
       else if (kind == 9) { p.vel = select(vec3f(0.0), (p.vel - up * vn * 1.3) * 0.3, vn < -2.0); }
       else if (kind == 3 || kind == 10) { p.age = p.life; }
-      else if (kind == 6) { p.vel = vec3f(0.0); }
+      else if (kind == 6 || kind == 11) { p.vel = vec3f(0.0); }
       else { p.vel -= up * vn; }
     }
   }

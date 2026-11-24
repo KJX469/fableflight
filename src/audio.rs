@@ -22,8 +22,9 @@
 use parking_lot::Mutex;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::num::NonZero;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The cockpit warnings that are sounding.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -151,29 +152,45 @@ struct Shared {
 
 pub struct Audio {
     shared: Arc<Shared>,
-    _sink: Option<rodio::MixerDeviceSink>,
+    sink: Mutex<Option<rodio::MixerDeviceSink>>,
+    /// Set by the stream error callback (or when no device was open) so `set`
+    /// retries opening the default output after a short cooldown.
+    broken: Arc<AtomicBool>,
+    last_try: Mutex<Instant>,
     /// a synth with no sound device, pulled by `take` (for recording videos)
     offline: Option<Mutex<Synth>>,
 }
 
 impl Audio {
-    pub fn new() -> Option<Self> {
-        let sink = match rodio::DeviceSinkBuilder::open_default_sink() {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("no sound: {e}");
-                return None;
-            }
+    fn open_sink(shared: &Arc<Shared>, broken: &Arc<AtomicBool>) -> Option<rodio::MixerDeviceSink> {
+        let flag = broken.clone();
+        let cb = move |err| {
+            log::warn!("audio stream error (will reopen): {err}");
+            flag.store(true, Ordering::Relaxed);
         };
-        let shared = Arc::new(Shared::default());
+        let sink = rodio::DeviceSinkBuilder::from_default_device()
+            .and_then(|b| b.with_error_callback(cb).open_sink_or_fallback())
+            .or_else(|_| rodio::DeviceSinkBuilder::open_default_sink())
+            .map_err(|e| log::warn!("no sound: {e}"))
+            .ok()?;
         sink.mixer().add(Synth::new(shared.clone()));
-        Some(Self { shared, _sink: Some(sink), offline: None })
+        Some(sink)
+    }
+
+    pub fn new() -> Option<Self> {
+        let shared = Arc::new(Shared::default());
+        let broken = Arc::new(AtomicBool::new(false));
+        let sink = Self::open_sink(&shared, &broken);
+        if sink.is_none() {
+            broken.store(true, Ordering::Relaxed);
+        }
+        Some(Self { shared, sink: Mutex::new(sink), broken, last_try: Mutex::new(Instant::now()), offline: None })
     }
     /// No sound device: samples are generated on demand with `take`.
     pub fn offline() -> Self {
         let shared = Arc::new(Shared::default());
         let synth = Synth::new(shared.clone());
-        Self { shared, _sink: None, offline: Some(Mutex::new(synth)) }
+        Self { shared, sink: Mutex::new(None), broken: Arc::new(AtomicBool::new(false)), last_try: Mutex::new(Instant::now()), offline: Some(Mutex::new(synth)) }
     }
     pub const RATE: u32 = RATE;
     /// The next `n` stereo samples of an offline synth (empty with a device).
@@ -184,9 +201,29 @@ impl Audio {
     }
     pub fn set(&self, p: Params) {
         *self.shared.params.lock() = p;
+        if self.offline.is_none() && self.broken.load(Ordering::Relaxed) {
+            let mut last = self.last_try.lock();
+            if last.elapsed() >= Duration::from_secs(3) {
+                *last = Instant::now();
+                drop(last);
+                let mut guard = self.sink.lock();
+                // Drop the dead stream before opening a fresh one.
+                *guard = None;
+                self.broken.store(false, Ordering::Relaxed);
+                if let Some(s) = Self::open_sink(&self.shared, &self.broken) {
+                    log::info!("audio output restored");
+                    *guard = Some(s);
+                } else {
+                    self.broken.store(true, Ordering::Relaxed);
+                }
+            }
+        }
     }
     pub fn event(&self, e: Event) {
-        self.shared.events.lock().push(e);
+        let mut ev = self.shared.events.lock();
+        if ev.len() < 64 {
+            ev.push(e);
+        }
     }
     pub fn boom(&self, power: f32) {
         self.event(Event::Boom(power));

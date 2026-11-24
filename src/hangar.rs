@@ -30,6 +30,7 @@
 //! when the player asks for them.
 
 use crate::aircraft::{self, Engine, Origin, Spec};
+use crate::i18n::t;
 use crate::{jsbsim, yasim};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -128,8 +129,9 @@ pub struct Entry {
     /// as the catalogue names it, and its authors
     pub name: String,
     pub author: String,
-    /// the zip's size, its mirrors, and the package revision (a date)
+    /// the zip's size, MD5 checksum (if listed), its mirrors, and the package revision (a date)
     pub size: u64,
+    pub md5: String,
     pub urls: Vec<String>,
     pub revision: String,
     pub state: State,
@@ -163,7 +165,7 @@ pub fn catalogue() -> parking_lot::MutexGuard<'static, Catalogue> {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(30))).user_agent("fablegame-flightsim/0.1").build().into()
+    ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(30))).user_agent(crate::fetch::USER_AGENT).build().into()
 }
 
 fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
@@ -288,9 +290,21 @@ fn read_directory(agent: &ureq::Agent, url: &str, size: u64, folder: &str) -> Op
     (!files.is_empty()).then(|| RemoteZip { url: url.to_string(), files })
 }
 
+/// Maximum decompressed bytes read for a single XML file from a remote zip.
+const MAX_REMOTE_DECOMPRESS: u64 = 16 << 20;
+/// Maximum decompressed bytes for one file unpacked from a package zip.
+const MAX_UNPACK_FILE: u64 = 128 << 20;
+/// Maximum total decompressed bytes unpacked from a package zip.
+const MAX_UNPACK_TOTAL: u64 = 1 << 30;
+/// Maximum number of files unpacked from a package zip.
+const MAX_UNPACK_FILES: usize = 20_000;
+
 impl RemoteZip {
     fn read(&self, agent: &ureq::Agent, path: &str) -> Option<Vec<u8>> {
         let &(off, csize, method) = self.files.get(path).or_else(|| self.files.iter().find(|(k, _)| k.eq_ignore_ascii_case(path)).map(|(_, v)| v))?;
+        if csize > MAX_REMOTE_DECOMPRESS {
+            return None;
+        }
         // The local header (30 bytes, then a name and extra field we learn the length of), then the data.
         let head = range(agent, &self.url, off, off + 30 + 512 + csize)?;
         if head.len() < 30 || u32::from_le_bytes([head[0], head[1], head[2], head[3]]) != 0x0403_4b50 {
@@ -303,7 +317,11 @@ impl RemoteZip {
             8 => {
                 use std::io::Read;
                 let mut out = Vec::new();
-                flate2::read::DeflateDecoder::new(&data[..]).read_to_end(&mut out).ok()?;
+                flate2::read::DeflateDecoder::new(&data[..]).take(MAX_REMOTE_DECOMPRESS + 1).read_to_end(&mut out).ok()?;
+                if out.len() as u64 > MAX_REMOTE_DECOMPRESS {
+                    log::warn!("remote zip entry {path} exceeds decompression limit");
+                    return None;
+                }
                 Some(out)
             }
             _ => None,
@@ -414,7 +432,7 @@ fn list(agent: &ureq::Agent) -> Result<Vec<Entry>, String> {
                 d
             }
             // (offline: last week's will do)
-            Err(e) => old.ok().filter(|d| !d.is_empty()).ok_or_else(|| format!("could not get FlightGear's aircraft catalogue: {e}"))?,
+            Err(e) => old.ok().filter(|d| !d.is_empty()).ok_or_else(|| t!("hangar.err_catalogue", e = e))?,
         },
     };
     let text = xml_text(&body);
@@ -432,18 +450,27 @@ fn list(agent: &ureq::Agent) -> Result<Vec<Entry>, String> {
             log::warn!("FlightGear catalogue: skipping {id}, its folder or revision is not a plain name");
             continue;
         }
-        let mut urls: Vec<String> = p.children().filter(|c| c.has_tag_name("url")).filter_map(|c| c.text()).map(|s| s.trim().to_string()).collect();
-        // ibiblio first (over https: it answers range requests and fast; some other mirrors fail their TLS handshake)
-        for u in &mut urls {
-            if u.starts_with("http://mirrors.ibiblio.org") {
-                *u = u.replacen("http://", "https://", 1);
+        let raw_urls: Vec<String> = p.children().filter(|c| c.has_tag_name("url")).filter_map(|c| c.text()).map(|s| s.trim().to_string()).filter(|u| u.starts_with("https://") || u.starts_with("http://")).collect();
+        // Try HTTPS for every mirror first (ibiblio first: it answers range requests and is fast);
+        // keep plain HTTP mirrors as fallback only when HTTPS fails.
+        let mut urls: Vec<String> = Vec::with_capacity(raw_urls.len() * 2);
+        for u in &raw_urls {
+            if let Some(rest) = u.strip_prefix("http://") {
+                let https = format!("https://{rest}");
+                if !urls.contains(&https) {
+                    urls.push(https);
+                }
+            }
+            if !urls.contains(u) {
+                urls.push(u.clone());
             }
         }
-        urls.sort_by_key(|u| (!u.contains("ibiblio.org"), !u.starts_with("https")));
-        entries.push(Entry { folder, name: t(p, "name"), author: t(p, "author"), size: t(p, "file-size-bytes").parse().unwrap_or(0), urls, revision, id, state: State::Pending, install: Install::No });
+        urls.sort_by_key(|u| (!u.starts_with("https://"), !u.contains("ibiblio.org")));
+        let md5 = t(p, "md5").to_ascii_lowercase();
+        entries.push(Entry { folder, name: t(p, "name"), author: t(p, "author"), size: t(p, "file-size-bytes").parse().unwrap_or(0), md5, urls, revision, id, state: State::Pending, install: Install::No });
     }
     if entries.is_empty() {
-        return Err("the catalogue lists no aircraft".into());
+        return Err(t!("hangar.err_catalogue_empty").into());
     }
     entries.sort_by_key(|e| e.name.to_lowercase());
     Ok(entries)
@@ -507,10 +534,23 @@ fn rel_path(from_file: &str, p: &str, folder: &str) -> Option<String> {
 }
 
 /// Reads a property file and those it includes into `out` ("sim/aero" → "c172p"); its own values win.
-fn flatten(get: &dyn Fn(&str) -> Option<Vec<u8>>, file: &str, prefix: &str, folder: &str, depth: usize, out: &mut HashMap<String, String>) {
-    if depth > 6 {
+fn flatten(
+    get: &dyn Fn(&str) -> Option<Vec<u8>>,
+    file: &str,
+    prefix: &str,
+    folder: &str,
+    depth: usize,
+    seen: &mut std::collections::HashSet<(String, String)>,
+    budget: &mut usize,
+    out: &mut HashMap<String, String>,
+) {
+    if depth > 6 || *budget == 0 {
         return;
     }
+    if !seen.insert((file.to_string(), prefix.to_string())) {
+        return;
+    }
+    *budget -= 1;
     let Some(d) = get(file) else { return };
     let text = xml_text(&d);
     let Ok(doc) = roxmltree::Document::parse(&text) else { return };
@@ -542,7 +582,7 @@ fn flatten(get: &dyn Fn(&str) -> Option<Vec<u8>>, file: &str, prefix: &str, fold
     }
     for (inc, pre) in includes {
         if let Some(p) = rel_path(file, &inc, folder) {
-            flatten(get, &p, &pre, folder, depth + 1, out);
+            flatten(get, &p, &pre, folder, depth + 1, seen, budget, out);
         }
     }
 }
@@ -550,10 +590,12 @@ fn flatten(get: &dyn Fn(&str) -> Option<Vec<u8>>, file: &str, prefix: &str, fold
 fn read_set(get: &dyn Fn(&str) -> Option<Vec<u8>>, id: &str, folder: &str) -> Result<SetInfo, String> {
     let file = format!("{id}-set.xml");
     if get(&file).is_none() {
-        return Err(format!("its {file} can't be read"));
+        return Err(t!("hangar.err_file_unreadable", file = file));
     }
     let mut m = HashMap::new();
-    flatten(get, &file, "", folder, 0, &mut m);
+    let mut seen = std::collections::HashSet::new();
+    let mut budget = 256usize;
+    flatten(get, &file, "", folder, 0, &mut seen, &mut budget, &mut m);
     let v = |k: &str| m.get(k).cloned().unwrap_or_default();
     let model = rel_path(&file, &v("sim/model/path"), folder).unwrap_or_default();
     let f = |k: &str| m.get(&format!("sim/view/config/{k}")).and_then(|x| x.trim().parse::<f32>().ok());
@@ -580,7 +622,7 @@ fn read_entry(agent: &ureq::Agent, folder: &str) -> Result<Info, String> {
         "jsb" => {}
         "yasim" => {
             // One file holds it all.
-            let xml = fetch(&main).map(|d| xml_text(&d)).ok_or_else(|| format!("its YASim file {main} can't be read"))?;
+            let xml = fetch(&main).map(|d| xml_text(&d)).ok_or_else(|| t!("hangar.err_yasim_unreadable", main = main))?;
             let (j, parts) = read_yasim(&xml, &set, folder);
             let mut i = info(&xml, j, &parts, folder, &cat_name, !set.model.is_empty());
             i.author = author;
@@ -595,7 +637,7 @@ fn read_entry(agent: &ureq::Agent, folder: &str) -> Result<Info, String> {
         }
     }
     // The JSBSim file and the files it keeps sections in, then its engines.
-    let xml = fetch(&main).map(|d| xml_text(&d)).ok_or_else(|| format!("its JSBSim file {main} can't be read"))?;
+    let xml = fetch(&main).map(|d| xml_text(&d)).ok_or_else(|| t!("hangar.err_jsbsim_unreadable", main = main))?;
     for f in file_refs(&xml) {
         for p in [f.clone(), format!("Systems/{f}")] {
             if fetch(&p).is_some() {
@@ -624,10 +666,10 @@ fn read_entry(agent: &ureq::Agent, folder: &str) -> Result<Info, String> {
 fn read_yasim(xml: &str, set: &SetInfo, folder: &str) -> (Result<jsbsim::Aircraft, String>, Vec<(Option<Part>, Option<Part>)>) {
     let y = match yasim::Airplane::parse(xml) {
         Ok(y) => y,
-        Err(e) => return (Err(format!("our reader can't read its YASim file: {e}")), Vec::new()),
+        Err(e) => return (Err(t!("hangar.err_yasim_parse", e = e)), Vec::new()),
     };
     if y.engines.contains(&yasim::Engine::Rotor) {
-        return (Err("it flies on rotors (a helicopter or an autogyro): rotors can't be flown yet".into()), Vec::new());
+        return (Err(t!("hangar.err_rotors").into()), Vec::new());
     }
     let part = |kind: &str| Part { kind: kind.to_string(), ..Default::default() };
     let parts = y
@@ -684,7 +726,7 @@ fn info(xml: &str, j: Result<jsbsim::Aircraft, String>, parts: &[(Option<Part>, 
 
 /// An engine or a thruster file, read for what the fit needs.
 #[derive(Clone, Debug, Default)]
-struct Part {
+pub(crate) struct Part {
     /// the root element: piston_engine, turbine_engine, turboprop_engine,
     /// rocket_engine, electric_engine; propeller, direct, nozzle, rotor
     kind: String,
@@ -696,7 +738,7 @@ struct Part {
     augmented: bool,
 }
 
-fn read_part(xml: &str) -> Result<Part, String> {
+pub(crate) fn read_part(xml: &str) -> Result<Part, String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| e.to_string())?;
     let r = doc.root_element();
     let num = |k: &str| r.children().find(|c| c.has_tag_name(k)).and_then(|c| c.text()).and_then(|t| t.trim().parse::<f64>().ok());
@@ -813,13 +855,13 @@ fn fit_aero(j: &jsbsim::Aircraft, kt: f64) -> Result<Aero, String> {
         cd_flap: (cf[1] - c0[1]).max(0.0),
     };
     if !a.cl_a.is_finite() || !(1.0..=9.0).contains(&a.cl_a) {
-        return Err(format!("its lift curve doesn't fit ours (slope {:.2} per radian)", a.cl_a));
+        return Err(t!("hangar.err_lift_curve", a.cl_a));
     }
     if !(0.008..=0.2).contains(&cd0) {
-        return Err(format!("its drag doesn't fit ours (CD0 {cd0:.3})"));
+        return Err(t!("hangar.err_drag", cd0 = cd0));
     }
     if !(0.5..=3.5).contains(&a.cl_max) || a.stall_alpha < 5f64.to_radians() || a.stall_alpha > 44f64.to_radians() {
-        return Err(format!("its stall doesn't fit ours (CL max {:.2} at {:.0}°)", a.cl_max, a.stall_alpha.to_degrees()));
+        return Err(t!("hangar.err_stall", a.cl_max, a.stall_alpha.to_degrees()));
     }
     Ok(a)
 }
@@ -865,26 +907,26 @@ pub struct FgFiles {
     pub eye: Option<[f32; 3]>,
 }
 
-fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], folder: &str, name: &str, model: Option<&FgFiles>) -> Result<(Spec, Summary), String> {
+pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], folder: &str, name: &str, model: Option<&FgFiles>) -> Result<(Spec, Summary), String> {
     if j.wing_area_ft2 <= 0.0 || j.span_ft <= 0.0 {
-        return Err("its file gives no wing".into());
+        return Err(t!("hangar.err_no_wing").into());
     }
     if parts.is_empty() {
-        return Err("it has no engine: gliders, balloons and the like can't be flown yet".into());
+        return Err(t!("hangar.err_no_engine").into());
     }
     let n = parts.len();
     let (eng, th): (Vec<_>, Vec<_>) = parts.iter().cloned().unzip();
-    let eng: Vec<Part> = eng.into_iter().collect::<Option<_>>().ok_or("one of its engine files is missing")?;
+    let eng: Vec<Part> = eng.into_iter().collect::<Option<_>>().ok_or(t!("hangar.err_engine_file_missing"))?;
     let th: Vec<Option<Part>> = th;
     let kind = |p: &Part, k: &str| p.kind == k;
     if th.iter().flatten().any(|t| kind(t, "rotor")) {
-        return Err("it is a helicopter: rotors can't be flown yet".into());
+        return Err(t!("hangar.err_helicopter").into());
     }
     if eng.iter().any(|e| kind(e, "rocket_engine")) {
-        return Err("it is rocket powered: rockets can't be flown yet".into());
+        return Err(t!("hangar.err_rocket").into());
     }
     if eng.iter().any(|e| kind(e, "electric_engine")) {
-        return Err("electric engines can't be flown yet".into());
+        return Err(t!("hangar.err_electric").into());
     }
     let prop = th.iter().flatten().any(|t| kind(t, "propeller"));
     let augmented = eng.iter().any(|e| e.augmented && e.max > e.mil * 1.05);
@@ -894,11 +936,11 @@ fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], folder: &st
     let mil: f64 = eng.iter().map(|e| e.mil).sum::<f64>() * 4.448_22;
     let wet: f64 = eng.iter().map(|e| e.max).sum::<f64>() * 4.448_22;
     if prop && hp <= 0.0 || !prop && mil <= 0.0 {
-        return Err("its engines give no power our model can use".into());
+        return Err(t!("hangar.err_no_power").into());
     }
     let mass_half = if j.empty_lbs > 0.0 { (j.empty_lbs + j.points_lbs + 0.5 * j.fuel_cap_lbs) * LB } else { j.weight_lbs * LB };
     if mass_half < 50.0 {
-        return Err("its file gives no mass".into());
+        return Err(t!("hangar.err_no_mass").into());
     }
     let base: &'static Spec = if prop {
         &aircraft::c172::SPEC
@@ -1162,17 +1204,25 @@ fn skipped(top: &str, file: &Path) -> bool {
 }
 
 fn download(e: &Entry, set: &dyn Fn(Install)) -> Result<(), String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(std::time::Duration::from_secs(20))).timeout_recv_body(Some(std::time::Duration::from_secs(60))).user_agent("fablegame-flightsim/0.1").build().into();
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(std::time::Duration::from_secs(20))).timeout_recv_body(Some(std::time::Duration::from_secs(60))).user_agent(crate::fetch::USER_AGENT).build().into();
     let _ = std::fs::create_dir_all(install_dir());
     let zip_path = install_dir().join(format!(".{}.zip", e.folder));
     let tmp = install_dir().join(format!(".{}.part", e.folder));
     let _ = std::fs::remove_dir_all(&tmp);
-    // The zip, from the first mirror that answers.
+    // The zip, from the first mirror that answers (and matches the catalogue's MD5, if given).
     let mut last = String::from("it lists no download");
     let mut used = String::new();
+    let want_md5 = (e.md5.len() == 32 && e.md5.bytes().all(|b| b.is_ascii_hexdigit())).then_some(e.md5.as_str());
     for url in &e.urls {
         match fetch_to(&agent, url, &zip_path, e.size, set) {
-            Ok(()) => {
+            Ok(got_md5) => {
+                if let Some(want) = want_md5 {
+                    if !got_md5.eq_ignore_ascii_case(want) {
+                        last = format!("{url}: checksum mismatch (got {got_md5}, expected {want})");
+                        let _ = std::fs::remove_file(&zip_path);
+                        continue;
+                    }
+                }
                 used = url.clone();
                 break;
             }
@@ -1201,8 +1251,8 @@ fn download(e: &Entry, set: &dyn Fn(Install)) -> Result<(), String> {
     })
 }
 
-/// Streams a download to a file, reporting the bytes as they come.
-fn fetch_to(agent: &ureq::Agent, url: &str, to: &Path, size: u64, set: &dyn Fn(Install)) -> Result<(), String> {
+/// Streams a download to a file, reporting the bytes as they come and returning its MD5 hex digest.
+fn fetch_to(agent: &ureq::Agent, url: &str, to: &Path, size: u64, set: &dyn Fn(Install)) -> Result<String, String> {
     use std::io::{Read, Write};
     let mut r = agent.get(url).call().map_err(|e| e.to_string())?;
     let total = r.body().content_length().unwrap_or(size);
@@ -1210,28 +1260,124 @@ fn fetch_to(agent: &ureq::Agent, url: &str, to: &Path, size: u64, set: &dyn Fn(I
     let mut f = std::fs::File::create(to).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; 1 << 20];
     let mut done = 0u64;
+    let mut md5 = Md5::new();
     loop {
         let n = rd.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
+        md5.update(&buf[..n]);
         f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         done += n as u64;
         set(Install::Downloading(done, total));
     }
     if total > 0 && done < total {
-        return Err(format!("cut short at {done} of {total} bytes"));
+        return Err(t!("hangar.err_cut_short", done = done, total = total));
     }
-    Ok(())
+    Ok(md5.finish_hex())
+}
+
+/// Minimal RFC 1321 MD5 hasher for verifying FGAddon catalogue package checksums.
+struct Md5 {
+    state: [u32; 4],
+    buf: [u8; 64],
+    buf_len: usize,
+    total_len: u64,
+}
+
+impl Md5 {
+    fn new() -> Self {
+        Self { state: [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476], buf: [0; 64], buf_len: 0, total_len: 0 }
+    }
+    fn compress(&mut self, block: &[u8; 64]) {
+        const S: [u32; 64] = [
+            7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+            5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+            4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+            6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        ];
+        const K: [u32; 64] = [
+            0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+            0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+            0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+            0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+            0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+            0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+            0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+            0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+        ];
+        let mut m = [0u32; 16];
+        for (i, w) in m.iter_mut().enumerate() {
+            *w = u32::from_le_bytes([block[i * 4], block[i * 4 + 1], block[i * 4 + 2], block[i * 4 + 3]]);
+        }
+        let [mut a, mut b, mut c, mut d] = self.state;
+        for i in 0..64 {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | (!b & d), i),
+                16..=31 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let temp = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]).rotate_left(S[i]));
+            a = temp;
+        }
+        self.state[0] = self.state[0].wrapping_add(a);
+        self.state[1] = self.state[1].wrapping_add(b);
+        self.state[2] = self.state[2].wrapping_add(c);
+        self.state[3] = self.state[3].wrapping_add(d);
+    }
+    fn update(&mut self, mut data: &[u8]) {
+        self.total_len += data.len() as u64;
+        if self.buf_len > 0 {
+            let take = (64 - self.buf_len).min(data.len());
+            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
+            self.buf_len += take;
+            data = &data[take..];
+            if self.buf_len == 64 {
+                let blk = self.buf;
+                self.compress(&blk);
+                self.buf_len = 0;
+            }
+        }
+        while data.len() >= 64 {
+            let blk: &[u8; 64] = data[..64].try_into().unwrap();
+            self.compress(blk);
+            data = &data[64..];
+        }
+        if !data.is_empty() {
+            self.buf[..data.len()].copy_from_slice(data);
+            self.buf_len = data.len();
+        }
+    }
+    fn finish_hex(mut self) -> String {
+        let bits = self.total_len.wrapping_mul(8);
+        self.update(&[0x80]);
+        let pad = if self.buf_len <= 56 { 56 - self.buf_len } else { 120 - self.buf_len };
+        self.update(&vec![0u8; pad]);
+        self.update(&bits.to_le_bytes());
+        let mut out = String::with_capacity(32);
+        for w in self.state {
+            for b in w.to_le_bytes() {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "{b:02x}");
+            }
+        }
+        out
+    }
 }
 
 /// Unpacks a package (its `<folder>/` inside the zip) into `to`, leaving out what we don't use.
 fn unpack(zip_path: &Path, to: &Path, folder: &str) -> Result<(), String> {
+    use std::io::Read;
     let f = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut z = zip::ZipArchive::new(f).map_err(|e| format!("the zip doesn't open: {e}"))?;
-    let mut n = 0;
+    let mut n = 0usize;
+    let mut total_bytes = 0u64;
     for i in 0..z.len() {
-        let mut file = z.by_index(i).map_err(|e| e.to_string())?;
+        let file = z.by_index(i).map_err(|e| e.to_string())?;
         if file.is_dir() {
             continue;
         }
@@ -1245,16 +1391,25 @@ fn unpack(zip_path: &Path, to: &Path, folder: &str) -> Result<(), String> {
         if inner.as_os_str().is_empty() || skipped(if inner.components().count() > 1 { &top } else { "" }, &inner) {
             continue;
         }
+        if n >= MAX_UNPACK_FILES {
+            return Err("the zip contains too many files".into());
+        }
+        let remaining = MAX_UNPACK_TOTAL.saturating_sub(total_bytes);
+        let cap = MAX_UNPACK_FILE.min(remaining);
         let out = to.join(&inner);
         if let Some(d) = out.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         let mut w = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-        std::io::copy(&mut file, &mut w).map_err(|e| format!("{}: {e}", out.display()))?;
+        let written = std::io::copy(&mut file.take(cap + 1), &mut w).map_err(|e| format!("{}: {e}", out.display()))?;
+        if written > cap {
+            return Err("the zip exceeds the unpacked size limit".into());
+        }
+        total_bytes += written;
         n += 1;
     }
     if n == 0 {
-        return Err("the zip is empty".into());
+        return Err(t!("hangar.err_zip_empty").into());
     }
     Ok(())
 }
@@ -1282,7 +1437,8 @@ pub fn load(dir: &Path) -> Result<&'static Spec, String> {
     let name = src["name"].as_str().unwrap_or("").to_string();
     let get = |p: &str| std::fs::read(dir.join(p)).ok();
     let set = read_set(&get, id, &folder)?;
-    let main = dir.join(format!("{}.xml", set.aero));
+    let aero = rel_path("", &format!("{}.xml", set.aero), &folder).ok_or("bad flight-model path")?;
+    let main = dir.join(aero);
     let (j, parts) = match set.fdm.as_str() {
         "jsb" => {
             let j = jsbsim::Aircraft::load(&main)?;
@@ -1295,7 +1451,7 @@ pub fn load(dir: &Path) -> Result<&'static Spec, String> {
             let (j, parts) = read_yasim(&xml, &set, &folder);
             (j?, parts)
         }
-        f => return Err(format!("it flies on {}, not JSBSim or YASim", if f.is_empty() { "an unknown flight model" } else { f })),
+        f => return Err(t!("hangar.err_other_fdm", if f.is_empty() { t!("hangar.err_unknown_fdm") } else { f })),
     };
     let model = if set.model.is_empty() { None } else { Some(dir.join(&set.model)) }.filter(|p| p.exists());
     let fg = model.map(|m| FgFiles { dir: dir.to_path_buf(), model: m, still: still_of(dir), eye: set.eye });
@@ -1535,5 +1691,34 @@ mod tests {
     #[test]
     fn section_files() {
         assert_eq!(file_refs("<system file=\"electrical\"/><system file='x'/><propulsion file=\"Systems/engine.xml\"/>"), vec!["electrical.xml".to_string(), "Systems/engine.xml".to_string()]);
+    }
+
+    #[test]
+    fn md5_matches_rfc1321_vectors() {
+        let hash = |s: &[u8]| {
+            let mut m = Md5::new();
+            m.update(s);
+            m.finish_hex()
+        };
+        assert_eq!(hash(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(hash(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(hash(b"message digest"), "f96b697d7cb7938d525a2f31aaf161d0");
+    }
+
+    #[test]
+    fn flatten_bounds_self_include_fanout() {
+        // A file that includes itself many times must not blow up exponentially.
+        let xml = "<PropertyList include=\"a.xml\"><sim><a include=\"a.xml\"/><b include=\"a.xml\"/><c include=\"a.xml\"/><aero>ok</aero></sim></PropertyList>";
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let get = |p: &str| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (p == "a.xml").then(|| xml.as_bytes().to_vec())
+        };
+        let mut out = HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut budget = 256usize;
+        flatten(&get, "a.xml", "", "X", 0, &mut seen, &mut budget, &mut out);
+        assert_eq!(out.get("sim/aero").map(String::as_str), Some("ok"));
+        assert!(calls.load(std::sync::atomic::Ordering::Relaxed) <= 256);
     }
 }

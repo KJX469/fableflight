@@ -131,6 +131,9 @@ pub struct Menu {
     pub markers: Vec<(u32, f32, f32)>,
     /// which aircraft to fly (index into `aircraft::list()`)
     pub aircraft: usize,
+    /// paint scheme for the Cessna 172RG
+    /// the paint scheme picked for each type (by name; `aircraft::liveries`)
+    pub liveries: std::collections::HashMap<&'static str, usize>,
     /// the aircraft screen's page: the aircraft you have, or more to download
     pub air_tab: crate::hangar_ui::Tab,
     /// the collection entry picked out on its download page, what its search has, and whether it lists the unflyable ones too
@@ -195,7 +198,13 @@ pub enum Start {
 
 impl Menu {
     pub fn new(lat: f64, lon: f64, hour: f64) -> Self {
-        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, set_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
+        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, set_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, liveries: std::collections::HashMap::new(), air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
+    }
+
+    /// The paint scheme picked for a type (an index of `aircraft::liveries`).
+    pub fn livery(&self, spec: &crate::aircraft::Spec) -> usize {
+        let n = crate::aircraft::liveries(spec).len();
+        self.liveries.get(spec.name).copied().unwrap_or_else(|| crate::aircraft::default_livery(spec)).min(n.saturating_sub(1))
     }
 
     pub fn look_at(&mut self, lat: f64, lon: f64, alt: f64) {
@@ -275,7 +284,7 @@ impl Menu {
 
 // ---- shared look and widgets for the start screen and the in-flight menu
 
-use crate::i18n::tr;
+use crate::i18n::tr_en;
 use crate::padui::{self, Hint};
 use egui::{Color32, RichText, Stroke};
 
@@ -483,7 +492,7 @@ pub fn seg<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, text: &st
 
 /// an on or off switch.
 pub fn switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let t = if *on { crate::t!("On", "Activé") } else { crate::t!("Off", "Désactivé") };
+    let t = if *on { crate::t!("menu.on") } else { crate::t!("menu.off") };
     toggle(ui, on, t)
 }
 
@@ -558,7 +567,7 @@ impl Page {
     /// The name shown on its tab, in the interface language (`name` stays
     /// English: the command line's `--pause-menu` goes by it).
     pub fn label(self) -> &'static str {
-        crate::i18n::tr(self.name())
+        crate::i18n::tr_en(self.name())
     }
 
     /// on the flight panel (Tab), not the pause menu
@@ -604,18 +613,19 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("I", "magnetos on / off (jets: fuel controls)"),
         ("O", "starter (hold; jets: engage)"),
         ("Page Up / Down", "mixture richer / leaner"),
-        ("J", "navigation instruments (VOR, ILS, ADF)"),
         ("[ / ]", "OBS course left / right"),
         ("X", "altimeter to the QNH"),
         (".", "parking brake"),
     ]),
     ("VIEW", &[
         ("C", "chase / cockpit camera"),
+        ("F6 / ISO key", "toggle fixed rear view"),
         ("Mouse drag", "look around"),
         ("Click / wheel", "cockpit: work a switch, turn a knob (Cessna)"),
         ("Mouse wheel", "camera distance / cockpit zoom"),
         ("H", "hide / show the HUD"),
         ("`", "hide / show the minimap"),
+        ("J", "full-size map: drag to move, wheel to zoom"),
         ("F12", "screenshot"),
     ]),
     ("WORLD", &[
@@ -633,32 +643,6 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("F2", "anti-aliasing (TAA) on / off"),
         ("F1", "quick key reference"),
     ]),
-    ("GAMEPAD (MSFS 2020 layout)", &[
-        ("Left stick", "pitch and roll"),
-        ("LT / RT", "rudder left / right"),
-        ("A / B", "throttle up / down (hold)"),
-        ("X", "wheel brakes (hold)"),
-        ("Y + B", "parking brake on / off"),
-        ("Y + D-pad up / dn", "trim nose down / up"),
-        ("LB / RB", "flaps up / down a notch"),
-        ("Left stick click", "landing gear"),
-        ("Right stick", "look around"),
-        ("Right stick click", "reset the view"),
-        ("D-pad", "quick views"),
-        ("View", "chase / cockpit camera"),
-        ("Menu", "pause menu (B closes it)"),
-        ("Y + View", "flight panel"),
-        ("Y + A", "afterburner / boost (hold)"),
-        ("Y + X", "thrust reversers (hold)"),
-        ("Y + LB", "speedbrake"),
-        ("Y + RB", "autopilot on / off"),
-        ("Y + Left stick click", "start / stop the engine"),
-        ("Y + Right stick click", "hide / show the HUD"),
-        ("Y + Menu", "canopy open / shut"),
-        ("Y + D-pad left / right", "master arm, lock a target"),
-        ("Y (let go)", "fire at a locked target"),
-        ("A after a crash", "fly again"),
-]),
 ];
 
 /// The one look shared by every panel: dark glass, yellow accent, roomy widgets.
@@ -926,23 +910,17 @@ pub fn heading(ui: &mut egui::Ui, s: &str) {
     ui.label(section_text(s).color(DIM));
 }
 
-/// a key cap.
+/// a key cap: the key's name in a raised cap, big enough to read at a glance.
 pub fn key_cap(ui: &mut egui::Ui, keys: &str) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(keys.to_string(), egui::FontId::monospace(11.5), Color32::WHITE);
-    let (r, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 12.0, 20.0), egui::Sense::hover());
+    let g = ui.painter().layout_no_wrap(keys.to_string(), semibold(13.5), Color32::WHITE);
+    let (r, resp) = ui.allocate_exact_size(egui::vec2((g.size().x + 16.0).max(26.0), 24.0), egui::Sense::hover());
     let p = ui.painter();
-    p.rect_filled(r, R_WIDGET, Color32::from_rgb(20, 24, 31));
-    p.rect_filled(r.with_max_y(r.bottom() - 2.0), R_WIDGET, RAISED_HI);
-    p.galley(egui::pos2(r.left() + 6.0, r.center().y - 1.0 - g.size().y * 0.5), g, Color32::WHITE);
+    p.rect_filled(r, R_WIDGET + 1, Color32::from_rgb(14, 17, 23));
+    let top = r.with_max_y(r.bottom() - 2.5);
+    p.rect_filled(top, R_WIDGET + 1, Color32::from_rgb(58, 68, 84));
+    p.rect_stroke(top, R_WIDGET + 1, Stroke::new(1.0, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
+    p.galley(egui::pos2(top.center().x - g.size().x * 0.5, top.center().y - g.size().y * 0.5), g, Color32::WHITE);
     resp
-}
-
-/// One `keys … action` row of the controls list.
-pub fn key_row(ui: &mut egui::Ui, keys: &'static str, what: &'static str) {
-    key_cap(ui, tr(keys));
-    // Truncate the description so a long one can't spill into the next column.
-    ui.add(egui::Label::new(RichText::new(tr(what)).font(body()).color(TEXT)).truncate());
-    ui.end_row();
 }
 
 /// One `buttons … action` row of the gamepad controls list.
@@ -972,49 +950,154 @@ pub const PAD_MENUS: &[(&str, &[(&str, &str)])] = &[
     ]),
 ];
 
-/// The whole controls list, in two columns of sections: the gamepad's while
-/// one is plugged in, else the keyboard's.
+/// The words of a search, lower case.
+pub fn search_words(query: &str) -> Vec<String> {
+    query.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// Whether every word of a search turns up somewhere in `texts` (any case).
+pub fn matches(words: &[String], texts: &[&str]) -> bool {
+    if words.is_empty() {
+        return true;
+    }
+    let hay = texts.iter().map(|t| t.to_lowercase()).collect::<Vec<_>>().join("  ");
+    words.iter().all(|w| hay.contains(w.as_str()))
+}
+
+/// A search box that keeps its text in egui's memory under `id` (so it needs
+/// no field of its own), with a button to clear it. Returns the words to look for.
+pub fn search_box(ui: &mut egui::Ui, id: &str, hint: &str, width: f32) -> Vec<String> {
+    let key = egui::Id::unique(("search_box", id));
+    let mut text: String = ui.data(|d| d.get_temp(key)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let edit = egui::TextEdit::singleline(&mut text)
+            .id(key.with("edit"))
+            .hint_text(hint)
+            .desired_width((width - 34.0).max(80.0))
+            .margin(egui::vec2(8.0, 5.0));
+        let r = ui.add(edit);
+        if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            text.clear();
+        }
+        if !text.is_empty() && ui.add(egui::Button::new("×").min_size(egui::vec2(28.0, 28.0))).on_hover_text(t!("menu.clear_search")).clicked() {
+            text.clear();
+        }
+    });
+    let words = search_words(&text);
+    ui.data_mut(|d| d.insert_temp(key, text));
+    words
+}
+
+/// One section of the controls list: its title and (keys, what they do).
+type Section = (String, Vec<(String, String)>);
+
+/// The keyboard's part of the controls list, the rows matching a search.
+fn keyboard_sections(words: &[String]) -> Vec<Section> {
+    CONTROLS
+        .iter()
+        .map(|(title, rows)| {
+            let rows = rows
+                .iter()
+                .filter(|(k, w)| matches(words, &[tr_en(k), tr_en(w), k, w, tr_en(title)]))
+                .map(|(k, w)| (tr_en(k).to_string(), tr_en(w).to_string()))
+                .collect();
+            (tr_en(title).to_string(), rows)
+        })
+        .filter(|(_, rows): &Section| !rows.is_empty())
+        .collect()
+}
+
+/// The gamepad's part: its flying layout as bound now, then the menus and the globe.
+fn gamepad_sections(words: &[String]) -> Vec<Section> {
+    let mut out = Vec::new();
+    let title = tr_en("GAMEPAD · FLYING");
+    let fly: Vec<_> = crate::padmap::flying_rows().into_iter().filter(|(k, w)| matches(words, &[k, w, title])).collect();
+    out.push((title.to_string(), fly));
+    for (title, rows) in PAD_MENUS {
+        let rows = rows
+            .iter()
+            .filter(|(k, w)| matches(words, &[k, tr_en(w), w, tr_en(title)]))
+            .map(|(k, w)| (k.to_string(), tr_en(w).to_string()))
+            .collect();
+        out.push((tr_en(title).to_string(), rows));
+    }
+    out.retain(|(_, rows)| !rows.is_empty());
+    out
+}
+
+/// The whole controls list: the keyboard's, or the gamepad's while one is
+/// plugged in, each a tab away, with a search over both.
 pub fn controls_list(ui: &mut egui::Ui) {
-    if padui::active() {
-        ui.columns(2, |cols| {
-            heading(&mut cols[0], tr("GAMEPAD · FLYING"));
-            egui::Grid::new("pad_fly").num_columns(2).min_row_height(23.0).spacing([10.0, 3.0]).show(&mut cols[0], |ui| {
-                // (as Settings › Controls › Gamepad has it)
-                for (k, w) in crate::padmap::flying_rows() {
-                    pad_row(ui, &k, &w);
+    let pad = padui::active();
+    // The tab picked by hand holds until a pad comes or goes.
+    let key = egui::Id::unique("controls_list tab");
+    let (mut on_pad, picked_with) = ui.data(|d| d.get_temp::<(bool, bool)>(key)).unwrap_or((pad, pad));
+    if picked_with != pad {
+        on_pad = pad;
+    }
+    let width = ui.available_width();
+    // the tabs, and the search beside them (under them where it is narrow).
+    let words = ui.horizontal_wrapped(|ui| {
+        segments(ui, |ui| {
+            seg(ui, &mut on_pad, false, t!("menu.keyboard"));
+            seg(ui, &mut on_pad, true, t!("menu.gamepad"));
+        });
+        ui.add_space(10.0);
+        search_box(ui, "controls_list", t!("menu.search_controls"), ui.available_width().clamp(220.0, 360.0))
+    }).inner;
+    ui.add_space(2.0);
+    ui.data_mut(|d| d.insert_temp(key, (on_pad, pad)));
+    let sections = if on_pad { gamepad_sections(&words) } else { keyboard_sections(&words) };
+    // While searching, say where else it turns up.
+    let other = if words.is_empty() { 0 } else { (if on_pad { keyboard_sections(&words) } else { gamepad_sections(&words) }).iter().map(|s| s.1.len()).sum::<usize>() };
+    if sections.is_empty() {
+        ui.add_space(10.0);
+        ui.label(RichText::new(t!("menu.no_controls_match")).font(body()).color(DIM));
+    }
+    if other > 0 {
+        let where_ = if on_pad { t!("menu.keyboard") } else { t!("menu.gamepad") };
+        ui.label(RichText::new(t!("menu.more_matches_on", n = other, tab = where_)).font(caption()).color(ACCENT));
+    }
+    // Two columns where there is room, else one; the sections shared out evenly.
+    let cols = if width >= 640.0 { 2 } else { 1 };
+    let total: usize = sections.iter().map(|s| s.1.len() + 2).sum();
+    let mut split = sections.len();
+    if cols == 2 {
+        let mut acc = 0;
+        for (i, s) in sections.iter().enumerate() {
+            if acc > 0 && acc + (s.1.len() + 2) / 2 > total / 2 {
+                split = i;
+                break;
+            }
+            acc += s.1.len() + 2;
+        }
+    }
+    let gap = 24.0;
+    let col_w = (width - gap * (cols - 1) as f32) / cols as f32;
+    let column = |ui: &mut egui::Ui, part: &[Section]| {
+        ui.set_width(col_w);
+        for (title, rows) in part {
+            heading(ui, title);
+            egui::Grid::new(("controls", title.as_str())).num_columns(2).min_row_height(if on_pad { 26.0 } else { 24.0 }).spacing([12.0, 4.0]).show(ui, |ui| {
+                for (k, w) in rows {
+                    if on_pad {
+                        pad_row(ui, k, w);
+                    } else {
+                        key_cap(ui, k);
+                        ui.add(egui::Label::new(RichText::new(w).font(body()).color(TEXT)).truncate());
+                        ui.end_row();
+                    }
                 }
             });
-            for (title, rows) in PAD_MENUS {
-                heading(&mut cols[1], tr(title));
-                egui::Grid::new(("pad", *title)).num_columns(2).min_row_height(23.0).spacing([10.0, 3.0]).show(&mut cols[1], |ui| {
-                    for (k, w) in rows.iter() {
-                        pad_row(ui, k, tr(w));
-                    }
-                });
-                cols[1].add_space(4.0);
-            }
-        });
-        return;
-    }
-    let count = (CONTROLS.len() + 1) / 2;
-    let col_w = (ui.available_width() - 8.0) / 2.0;
-    ui.columns(2, |cols| {
-        for (c, ui) in cols.iter_mut().enumerate() {
-            ui.set_max_width(col_w);
-            let range = if c == 0 { 0..count } else { count..CONTROLS.len() };
-            for (title, rows) in &CONTROLS[range] {
-                heading(ui, tr(title));
-                egui::Grid::new(("keys", *title))
-                    .num_columns(2)
-                    .min_row_height(19.0)
-                    .spacing([10.0, 3.0])
-                    .show(ui, |ui| {
-                        for (k, w) in rows.iter() {
-                            key_row(ui, k, w);
-                        }
-                    });
-                ui.add_space(4.0);
-            }
+            ui.add_space(6.0);
+        }
+    };
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.vertical(|ui| column(ui, &sections[..split]));
+        if cols == 2 {
+            ui.vertical(|ui| column(ui, &sections[split..]));
         }
     });
 }
@@ -1032,7 +1115,7 @@ pub fn heading_compass(ui: &mut egui::Ui, heading: &mut f64) {
             }
         }
     }
-    response.on_hover_text(t!("Click or drag to choose your heading", "Cliquez ou glissez pour choisir le cap"));
+    response.on_hover_text(t!("menu.click_or_drag_to_choose"));
     let painter = ui.painter();
     painter.circle_filled(center, 39.0, Color32::from_rgb(20, 26, 33));
     painter.circle_stroke(center, 39.0, egui::Stroke::new(1.0, DIM));
@@ -1046,7 +1129,7 @@ pub fn heading_compass(ui: &mut egui::Ui, heading: &mut f64) {
         ("N", egui::vec2(0.0, -49.0)),
         ("E", egui::vec2(49.0, 0.0)),
         ("S", egui::vec2(0.0, 49.0)),
-        (t!("W", "O"), egui::vec2(-49.0, 0.0)),
+        (t!("menu.w"), egui::vec2(-49.0, 0.0)),
     ] {
         painter.text(center + offset, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), if label == "N" { ACCENT } else { TEXT });
     }
@@ -1108,6 +1191,33 @@ pub fn big_button(ui: &mut egui::Ui, text: &str, hint: Hint, primary: bool, chos
     let hc = if primary { ON_ACCENT.gamma_multiply(0.65) } else { DIM };
     paint_hint(p, hint, rect.right() - 16.0, rect.center().y, 20.0, hc);
     resp
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn search_matches_every_word_in_any_case() {
+        let w = search_words("  Flaps   NOTCH ");
+        assert_eq!(w, vec!["flaps".to_string(), "notch".to_string()]);
+        assert!(matches(&w, &["F / V", "flaps down / up a notch"]));
+        assert!(!matches(&w, &["L", "landing gear down / up"]));
+        assert!(matches(&[], &["anything"]));
+    }
+
+    #[test]
+    fn keyboard_list_has_no_gamepad_rows_and_filters() {
+        let all = keyboard_sections(&[]);
+        assert!(all.iter().all(|(t, _)| !t.to_lowercase().contains("gamepad")));
+        let flaps = keyboard_sections(&search_words("flaps"));
+        assert_eq!(flaps.iter().map(|s| s.1.len()).sum::<usize>(), 1);
+        assert_eq!(flaps[0].1[0].0, "F / V");
+        // by the key, too
+        assert!(keyboard_sections(&search_words("f12")).iter().any(|s| s.1.iter().any(|r| r.1 == "screenshot")));
+        assert!(keyboard_sections(&search_words("zzzz")).is_empty());
+        assert!(!gamepad_sections(&[]).is_empty());
+    }
 }
 
 #[cfg(test)]

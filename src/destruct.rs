@@ -1591,7 +1591,8 @@ impl Destruction {
                         let reach = (c.half.x.max(c.half.z) as f64 * 1.6).max(2.0);
                         let (e, n, _) = geo::enu(c.pos);
                         let mut low = (floor, DVec3::ZERO);
-                        for d in [e, -e, n, -n, (e + n) * 0.7071, (e - n) * 0.7071, (-e + n) * 0.7071, (-e - n) * 0.7071] {
+                        let d45 = std::f64::consts::FRAC_1_SQRT_2;
+                        for d in [e, -e, n, -n, (e + n) * d45, (e - n) * d45, (-e + n) * d45, (-e - n) * d45] {
                             let hn = fat(field, c.pos + d * reach).max(un.ground);
                             if hn < low.0 {
                                 low = (hn, d);
@@ -1613,7 +1614,7 @@ impl Destruction {
                     }
                     if slab {
                         // Slabs end up lying roughly flat, at odd angles.
-                        let yaw = DQuat::from_axis_angle(up, rng.range(0.0, 6.28) as f64);
+                        let yaw = DQuat::from_axis_angle(up, rng.range(0.0, std::f32::consts::TAU) as f64);
                         let tilt = DQuat::from_axis_angle(rng.dir().as_dvec3(), rng.range(-0.45, 0.45) as f64);
                         let (e, n, _) = geo::enu(c.pos);
                         // Shortest side up.
@@ -1666,7 +1667,7 @@ impl Destruction {
             }
             let w = s * rng.range(0.8, 1.25);
             let half = Vec3::new(w * rng.range(0.9, 1.3), w * rng.range(0.12, 0.25), w * rng.range(0.9, 1.3));
-            let rot = DQuat::from_rotation_arc(DVec3::Y, up) * DQuat::from_axis_angle(DVec3::Y, rng.range(0.0, 6.28) as f64);
+            let rot = DQuat::from_rotation_arc(DVec3::Y, up) * DQuat::from_axis_angle(DVec3::Y, rng.range(0.0, std::f32::consts::TAU) as f64);
             let tone = rng.range(0.8, 1.05);
             let mut m = Chunk::loose(p + up * (half.y * 0.25) as f64, half, rot, DVec3::ZERO, DVec3::ZERO, [(col[0] * 0.4 + 0.12) * tone, (col[1] * 0.4 + 0.115) * tone, (col[2] * 0.4 + 0.11) * tone], M_ROCK + (rng.f() * 3.0) as u32 % 3);
             m.state = 2;

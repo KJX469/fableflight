@@ -352,11 +352,11 @@ pub fn analyse(e: &Echo, at: (f64, f64)) -> Radar {
         }
         let r_eq = (area / PI).sqrt();
         let p = peak as f64;
-        let rad = (1.6 + 0.36 * r_eq + 1.2 * smoothstep(45.0, 58.0, p)).clamp(1.8, 9.5);
-        let age = (0.1 + 0.9 * smoothstep(32.0, 52.0, p)).max(0.9 * smoothstep(5.0, 8.5, rad)).min(1.0);
+        let rad = (1.7 + 0.38 * r_eq + 3.5 * smoothstep(5.0, 16.0, r_eq) + 1.8 * smoothstep(45.0, 58.0, p)).clamp(2.2, 15.0);
+        let age = (0.1 + 0.9 * smoothstep(32.0, 52.0, p)).max(0.9 * smoothstep(8.0, 13.0, rad)).min(1.0);
         let (cx, cy) = if sw > 0.0 { (sx / sw, sy / sw) } else { (i, j) };
         // Its neighbourhood is its own: the next cell starts beyond it.
-        let rs = (2.2 * rad + 4.0).max(9.0) / kp;
+        let rs = (1.7 * rad + 4.0).max(10.0) / kp;
         let r = rs.ceil() as i64;
         for dj in -r..=r {
             for di in -r..=r {
@@ -395,7 +395,7 @@ fn find_supercells(mut cells: Vec<(f64, Cell)>, at: (f64, f64)) -> Vec<(f64, Cel
         .map(|(i, (_, c))| {
             c.len == 0.0
                 && c.peak >= SUPER_DBZ
-                && c.rad >= 6.0
+                && c.rad >= 8.5
                 && cells.iter().enumerate().all(|(j, (_, o))| j == i || o.peak < 40.0 || (pos[i].0 - pos[j].0).hypot(pos[i].1 - pos[j].1) - o.len * 0.5 > SUPER_KM)
         })
         .collect();
@@ -469,7 +469,7 @@ fn find_lines(cells: Vec<(f64, Cell)>, at: (f64, f64)) -> Vec<(f64, Cell)> {
         let age = parts.iter().map(|c| c.age).fold(0.0, f64::max).max(0.9);
         let peak = parts.iter().map(|c| c.peak).fold(0.0, f32::max);
         m.iter().for_each(|&i| used[i] = true);
-        lines.push((x.hypot(y).max(0.0), Cell { lat, lon, rad: rad.clamp(5.0, 7.5), age, peak, len, axis: ex.atan2(ey).to_degrees().rem_euclid(180.0), parts }));
+        lines.push((x.hypot(y).max(0.0), Cell { lat, lon, rad: rad.clamp(7.0, 11.5), age, peak, len, axis: ex.atan2(ey).to_degrees().rem_euclid(180.0), parts }));
     }
     let mut out: Vec<(f64, Cell)> = cells.into_iter().enumerate().filter(|(i, _)| !used[*i]).map(|(_, c)| c).chain(lines).collect();
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
