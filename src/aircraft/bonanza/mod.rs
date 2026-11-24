@@ -72,26 +72,26 @@
 //!
 //! Measured by `performance_is_a_bonanza`, `a_bonanza_takes_off_and_climbs`
 //! and `a_bonanza_gear_and_flaps_cycle_in_flight` in plane.rs (standard
-//! day, no wind, mixture full rich unless said):
+//! day, no wind, mixture full rich unless said), on the surface-element rig:
 //!
 //! | | book | simulator |
 //! |---|---|---|
 //! | stall, 3650 lb, clean / 12° / 30° + gear | ~70 / - / 59 KCAS | 69 / 64 / 59 KCAS |
-//! | take-off, 3650 lb, flaps 12°, rotate 70 KIAS | 971 ft (1300 at 3805 lb) roll, 1913 ft to 50 ft | 1190 ft roll (lift-off 75 KIAS), 2165 ft to 50 ft at 85 KIAS |
-//! | climb, sea level, 3650 lb, full power | 1210 fpm (1120 at 3805 lb) | 1140 fpm at 96 KIAS, 1180 at 105, 1070 at 85 |
-//! | 65 %, 2400 rpm, 6000 ft, 3400 lb | 157 KTAS | 157 KTAS (144 KCAS), 14.2 gal/h leaned, 16.9 rich |
-//! | 75 %, 2500 rpm, 6000 ft, 3400 lb | 169 KTAS | 167 KTAS (153 KCAS), 16.0 gal/h leaned, 19.2 rich |
-//! | 75 %, 2700 rpm, 8000 ft (full throttle) | - | 169 KTAS (150 KCAS) |
-//! | full throttle, 1000 ft, 3400 lb | (G36: 174 KTAS max cruise) | 176 KTAS / 174 KCAS, 96 % power, 24 gal/h |
-//! | the same, gear down | - | 154 KTAS |
-//! | idle glide, 110 KIAS, 3650 lb | about 10:1 | 9.3:1 |
+//! | take-off, 3650 lb, flaps 12°, rotate 70 KIAS | 971 ft (1300 at 3805 lb) roll, 1913 ft to 50 ft | 1020 ft roll (lift-off 70 KIAS), 2010 ft to 50 ft at 80 KIAS |
+//! | climb, sea level, 3650 lb, full power | 1210 fpm (1120 at 3805 lb) | 1200 fpm at 96 KIAS, 1230 at 105, 1110 at 85 |
+//! | 65 %, 2400 rpm, 6000 ft, 3400 lb | 157 KTAS | 160 KTAS (146 KCAS), 14.2 gal/h leaned, 16.9 rich |
+//! | 75 %, 2500 rpm, 6000 ft, 3400 lb | 169 KTAS | 169 KTAS (155 KCAS), 16.0 gal/h leaned, 19.2 rich |
+//! | 75 %, 2700 rpm, 8000 ft (full throttle) | - | 171 KTAS (152 KCAS) |
+//! | full throttle, 1000 ft, 3400 lb | (G36: 174 KTAS max cruise) | 178 KTAS / 176 KCAS, 96 % power, 24 gal/h |
+//! | the same, gear down | - | 155 KTAS |
+//! | idle glide, 110 KIAS, 3650 lb | about 10:1 | 9.5:1 |
 //! | static, full throttle | about 2700 rpm | 2654 rpm, 4490 N; idle 790 rpm |
 //! | gear / flaps travel | about 6 s / 10 s | 6.0 s / 10.0 s, both stop without bus power |
 //!
 //! Not modelled or not matched: no gear speed limit (VLE 152 KCAS); no cowl
 //! flaps; the windmilling glide drags more than the book's with the lever
-//! back (see the engine below); the take-off runs about 20 % long against
-//! Jane's (but inside the G36's figure) and lifts off a few knots fast; the
+//! back (see the engine below); the take-off runs about 5 % long against
+//! Jane's (inside the G36's figure), with right rudder held on the run; the
 //! POH's tables (take-off, climb, stall, fuel) were not to hand, so those
 //! targets are secondary. Inertias are estimates.
 //!
@@ -151,6 +151,7 @@
 pub mod cabin;
 
 use crate::aircraft::{Engine, Governor, Handling, Hole, Hull, Leg, Livery, Part, Piston, Sound, Spec, Tail, Tyre};
+use crate::aero::{Ctrl, Foil2d, Fuse, Planform, Rig};
 use crate::airframe::*;
 use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -225,8 +226,8 @@ const KT: f64 = 1.0 / 1.94384;
 const V_NONE: f64 = 1e9;
 const LB: f64 = 0.453_592;
 
-/// The A36's tyres (see the table above): 7.00-6 mains at 33-40 psi (36 here),
-/// a 5.00-5 nose at 40 psi, all on air-oil oleo struts; the nose wheel is steered.
+/// The A36's tyres ([S]): 7.00-6 mains at 36 psi, a 5.00-5 nose at 40 psi,
+/// all three on air-oil struts; no anti-skid.
 const fn tyre(steer: f64) -> Tyre {
     Tyre { wheels: 1, pressure: if steer != 0.0 { 276.0 } else { 248.0 }, caster: 0.0, oleo: true, antiskid: false }
 }
@@ -235,7 +236,52 @@ const fn leg(at: DVec3, r: f32, travel: f64, k: f64, steer: f64, fold_vn: f64, f
     Leg { at, wheel_r: r as f64, travel, k, c: k * 0.1, nf_max: 150_000.0, steer, brakes: at.x != 0.0, mu: 0.9, roll_mu: 0.025, brake_mu: 0.55, fold_vn, fold_kick, name, tyre: tyre(steer) }
 }
 
+/// The surface-element rig (aero.rs). Geometry is this model's own: the wing
+/// from `wing_sect`, the tailplane and fin from `tail()`'s outlines (quarter
+/// chord lines, chords and hinge lines measured off them). The rest:
+///
+/// - wing section NACA 23016.5 to 23012 ([A]; Abbott & von Doenhoff, Theory
+///   of Wing Sections: a ≈ 0.105/deg, α0 ≈ -1.2°, cm ≈ -0.01; cl_max a little
+///   under the smooth section's, chosen to give the stalls in the table above);
+/// - control travel from [S]: ailerons 20° each way, elevator 23° up / 20°
+///   down, rudder 25° each way, elevator tab 10° up / 27° down, flaps 0-30°;
+/// - the flaps' extra lift, the tailplane's incidence and the fuselage's
+///   coefficients are estimates for a low-wing single of this size (Roskam,
+///   Airplane Flight Dynamics I, Appendix B, Beech/Cessna data as the guide),
+///   tuned to the handling harness (plane/modes.rs) and the book's figures.
+pub static RIG: Rig = Rig {
+    wing_foil: Foil2d { cl_a: 6.0, a0: -0.021, cl_max: 1.5, cd0: 0.0065, cm0: -0.01 },
+    wing_strips: 10,
+    oswald: 0.78,
+    flap: Ctrl { span: [FLAP[0] as f64, FLAP[1] as f64], chord: 0.20, travel: [0.0, 0.5236] },
+    flap_dcl_max: 0.8,
+    aileron_chord: 0.21,
+    aileron_travel: [0.3491, 0.3491],
+    elevons: false,
+    // Quarter chords: root s 273-319 (1.17 m), tip s 280-313.5 (0.85 m,
+    // rounded off to about 0.75 at the very tip); the elevator hinge at
+    // s 298.5, 44 % of the chord.
+    htail: Planform { root: DVec3::new(0.0, 0.31, 4.585), tip: DVec3::new(1.80, 0.31, 4.68), chord: [1.17, 0.75], incidence: [-0.035, -0.035] },
+    htail_foil: Foil2d::SYMMETRIC,
+    elevator: Ctrl { span: [0.09, 1.80], chord: 0.44, travel: [0.4014, 0.3491] },
+    // The tab holds the elevator where its hinge moment is nil: its 27° down
+    // is worth about 14° of elevator up, its 10° up about 6° down.
+    trim: [0.10, 0.24],
+    // Quarter chords: root (on the tail cone) 1.47 m, tip 0.79 m; the rudder
+    // hinge 35 % of the chord ahead of the trailing edge.
+    fin: Planform { root: DVec3::new(0.0, 0.42, 4.382), tip: DVec3::new(0.0, 1.68, 5.122), chord: [1.47, 0.79], incidence: [0.0, 0.0] },
+    fin_foil: Foil2d::SYMMETRIC,
+    rudder: Ctrl { span: [0.01, 1.26], chord: 0.35, travel: [0.4363, 0.4363] },
+    fuse: Fuse { cm_a: 0.35, cn_b: -0.08, cl_b: -0.03, cy_b: -0.25, cl_a: 0.0 },
+    downwash: 1.0,
+    eta_tail: 0.9,
+    prop_hub: DVec3::new(PROP_HUB.x as f64, PROP_HUB.y as f64, PROP_HUB.z as f64),
+    swirl: 0.25,
+    ..Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
+    rig: Some(&RIG),
     id: 10,
     name: "Beechcraft A36 Bonanza",
     keys: &["bonanza", "a36", "be36"],
@@ -342,7 +388,9 @@ pub static SPEC: Spec = Spec {
     // at 75 %) with the propeller below working at 84-85 % in the cruise.
     // [R]'s own guess is 0.019 (f = 3.5 sq ft); the simulator lumps cooling,
     // trim and interference drag into CD0 and has no drag rising with the
-    // lift other than k, so its figure sits a little higher.
+    // lift other than k, so its figure sits a little higher. On the
+    // surface-element rig (`RIG`) the wing's own profile drag rises with
+    // the lift, so 0.0205 gives the same cruise there.
     // Stalls: about 59 KCAS with the gear and full flaps down at 3650 lb
     // (Plane & Pilot's A36 table, from Jane's; the FAR 23 limit is 61) and
     // about 70 clean (the older A36's 62-64 against 52-53 dirty, AOPA, keeps
@@ -350,7 +398,7 @@ pub static SPEC: Spec = Spec {
     // Gear down adds 0.012 (full power falls from about 176 to 154 KTAS).
     cl0: 0.28,
     cl_a: 4.6,
-    cd0: 0.022,
+    cd0: 0.0205,
     k_ind: 0.0685,
     cd_gear: 0.012,
     cd_flap: [0.018, 0.03],
@@ -445,7 +493,6 @@ pub static SPEC: Spec = Spec {
     cam_dist: 17.0,
     shadow_r: 6.6,
     sound: Sound::Piston,
-    rig: None,
 };
 
 // ---------------------------------------------------------------- fuselage

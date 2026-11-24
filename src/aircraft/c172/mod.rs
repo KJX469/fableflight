@@ -4,8 +4,8 @@
 //! The cockpit lives in `cabin.rs`.
 pub mod cabin;
 
-use crate::aircraft::{Engine, Governor, Handling, Hole, Hull, Leg, Livery, Part, Piston, Sound, Spec, Tail, Tyre};
 use crate::aero::{Ctrl, Foil2d, Fuse, Planform, Rig};
+use crate::aircraft::{Engine, Governor, Handling, Hole, Hull, Leg, Livery, Part, Piston, Sound, Spec, Tail, Tyre};
 use crate::airframe::*;
 use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};

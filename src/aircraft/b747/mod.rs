@@ -1460,28 +1460,6 @@ const fn main_leg(x: f64, z: f64, name: &'static str, kick: f64) -> Leg {
     }
 }
 
-/// Paint schemes for the aircraft picker (`aircraft::liveries`), drawn by
-/// plane.wgsl `livery747` in the style `colours[0][3]` names. All are
-/// FICTIONAL airlines (no real carrier's name, colours or emblem):
-/// - 0 "Classic": the original scheme, a navy cheat line with a red
-///   pinstripe, a navy fin with a ringed emblem, grey belly and wings.
-///   Colours: navy, red, belly, wing grey.
-/// - 1 "Orivante": white overall, the fin in its colour with a sweeping arc of
-///   the second colour, the fin's colour wrapping down over the tail cone,
-///   the nacelles painted, big titles ahead of the wing.
-///   Colours: fin, arc, nacelle lip, wing grey.
-/// - 2 "Kestralis": a deep coloured belly rising in a curve to fill the tail,
-///   a pinstripe along its edge, a chevron on the fin, titles above the windows.
-///   Colours: belly and fin, pinstripe and chevron, nacelles, wing grey.
-/// Orivante and Kestralis fly the G650 too (`g650::LIVERIES`).
-pub const LIVERIES: &[Livery] = &[
-    Livery { name: "Classic", colours: [[0.012, 0.03, 0.095, 0.0], [0.42, 0.025, 0.02, 0.0], [0.46, 0.48, 0.51, 0.0], [0.34, 0.36, 0.39, 0.0]], title: "", paint: None, swatch: [[0.012, 0.03, 0.095], [0.42, 0.025, 0.02]], still: include_bytes!("../../../assets/aircraft/liveries/b747_classic.png") },
-    Livery { name: "Orivante", colours: [ORIVANTE[0], ORIVANTE[1], ORIVANTE[2], [0.40, 0.42, 0.45, 0.0]], title: "ORIVANTE", paint: None, swatch: [[0.004, 0.10, 0.11], [0.80, 0.24, 0.10]], still: include_bytes!("../../../assets/aircraft/liveries/b747_orivante.png") },
-    Livery { name: "Kestralis", colours: [KESTRALIS[0], KESTRALIS[1], KESTRALIS[2], [0.38, 0.40, 0.43, 0.0]], title: "KESTRALIS", paint: None, swatch: [[0.006, 0.02, 0.10], [0.85, 0.36, 0.02]], still: include_bytes!("../../../assets/aircraft/liveries/b747_kestralis.png") },
-];
-/// The two made-up airlines' colours (style in w), shared with the G650.
-pub const ORIVANTE: [[f32; 4]; 3] = [[0.004, 0.10, 0.11, 1.0], [0.80, 0.24, 0.10, 0.0], [0.70, 0.71, 0.72, 0.0]];
-pub const KESTRALIS: [[f32; 4]; 3] = [[0.006, 0.02, 0.10, 2.0], [0.85, 0.36, 0.02, 0.0], [0.006, 0.02, 0.10, 0.0]];
 /// The surface-element rig (aero.rs). Sources and estimates:
 ///
 /// - tail planforms from this model's `tail()`, which match Jenkinson, Simpkin
@@ -1519,6 +1497,28 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     fcs: crate::aero::Fcs { damp: [0.0, 0.0, 3.0], damp_auth: 0.3, gear_q: 15000.0, ..crate::aero::Fcs::NONE },
     ..crate::aero::Rig::BASE
 };
+/// Paint schemes for the aircraft picker (`aircraft::liveries`), drawn by
+/// plane.wgsl `livery747` in the style `colours[0][3]` names. All are
+/// FICTIONAL airlines (no real carrier's name, colours or emblem):
+/// - 0 "Classic": the original scheme, a navy cheat line with a red
+///   pinstripe, a navy fin with a ringed emblem, grey belly and wings.
+///   Colours: navy, red, belly, wing grey.
+/// - 1 "Orivante": white overall, the fin in its colour with a sweeping arc of
+///   the second colour, the fin's colour wrapping down over the tail cone,
+///   the nacelles painted, big titles ahead of the wing.
+///   Colours: fin, arc, nacelle lip, wing grey.
+/// - 2 "Kestralis": a deep coloured belly rising in a curve to fill the tail,
+///   a pinstripe along its edge, a chevron on the fin, titles above the windows.
+///   Colours: belly and fin, pinstripe and chevron, nacelles, wing grey.
+/// Orivante and Kestralis fly the G650 too (`g650::LIVERIES`).
+pub const LIVERIES: &[Livery] = &[
+    Livery { name: "Classic", colours: [[0.012, 0.03, 0.095, 0.0], [0.42, 0.025, 0.02, 0.0], [0.46, 0.48, 0.51, 0.0], [0.34, 0.36, 0.39, 0.0]], title: "", paint: None, swatch: [[0.012, 0.03, 0.095], [0.42, 0.025, 0.02]], still: include_bytes!("../../../assets/aircraft/liveries/b747_classic.png") },
+    Livery { name: "Orivante", colours: [ORIVANTE[0], ORIVANTE[1], ORIVANTE[2], [0.40, 0.42, 0.45, 0.0]], title: "ORIVANTE", paint: None, swatch: [[0.004, 0.10, 0.11], [0.80, 0.24, 0.10]], still: include_bytes!("../../../assets/aircraft/liveries/b747_orivante.png") },
+    Livery { name: "Kestralis", colours: [KESTRALIS[0], KESTRALIS[1], KESTRALIS[2], [0.38, 0.40, 0.43, 0.0]], title: "KESTRALIS", paint: None, swatch: [[0.006, 0.02, 0.10], [0.85, 0.36, 0.02]], still: include_bytes!("../../../assets/aircraft/liveries/b747_kestralis.png") },
+];
+/// The two made-up airlines' colours (style in w), shared with the G650.
+pub const ORIVANTE: [[f32; 4]; 3] = [[0.004, 0.10, 0.11, 1.0], [0.80, 0.24, 0.10, 0.0], [0.70, 0.71, 0.72, 0.0]];
+pub const KESTRALIS: [[f32; 4]; 3] = [[0.006, 0.02, 0.10, 2.0], [0.85, 0.36, 0.02, 0.0], [0.006, 0.02, 0.10, 0.0]];
 
 pub static SPEC: Spec = Spec {
     id: 1,
