@@ -1379,8 +1379,8 @@ impl Plane {
         }
     }
     /// The air at height `h` and the aircraft's motion through it (body frame).
-    fn flight(vb: DVec3, omega: DVec3, h: f64) -> crate::propulsion::unit::Flight {
-        let (t, p) = atmosphere(h);
+    fn flight(&self, vb: DVec3, omega: DVec3, h: f64) -> crate::propulsion::unit::Flight {
+        let (t, p) = self.atmos.at(h);
         crate::propulsion::unit::Flight { p, t, vb, omega }
     }
     /// Thrust (N) once the engines have settled at this throttle, flying
@@ -1388,7 +1388,7 @@ impl Plane {
     pub fn thrust(&self, throttle: f64, v: f64, h: f64) -> f64 {
         let mut lv = self.levers(false, false);
         (lv.throttle, lv.auto_mixture) = (throttle, true);
-        let fl = Self::flight(DVec3::new(0.0, 0.0, -v), DVec3::ZERO, h);
+        let fl = self.flight(DVec3::new(0.0, 0.0, -v), DVec3::ZERO, h);
         self.engines.iter().map(|u| {
             let mut u = u.clone();
             u.settle(&lv, &fl);
@@ -1400,7 +1400,7 @@ impl Plane {
     pub fn settled_rpm(&self, throttle: f64, v: f64, h: f64) -> f64 {
         let mut lv = self.levers(false, false);
         (lv.throttle, lv.auto_mixture) = (throttle, true);
-        let fl = Self::flight(DVec3::new(0.0, 0.0, -v), DVec3::ZERO, h);
+        let fl = self.flight(DVec3::new(0.0, 0.0, -v), DVec3::ZERO, h);
         self.engines.first().map_or(0.0, |u| {
             let mut u = u.clone();
             u.settle(&lv, &fl);
@@ -1411,7 +1411,7 @@ impl Plane {
     fn settle_engine(&mut self, v: f64, h: f64) {
         let mut lv = self.levers(false, false);
         lv.auto_mixture = true;
-        let fl = Self::flight(DVec3::new(0.0, -v * self.alpha.sin(), -v * self.alpha.cos()), DVec3::ZERO, h);
+        let fl = self.flight(DVec3::new(0.0, -v * self.alpha.sin(), -v * self.alpha.cos()), DVec3::ZERO, h);
         for u in &mut self.engines {
             u.settle(&lv, &fl);
         }
@@ -1888,7 +1888,7 @@ impl Plane {
             // The engines at cruise power: their torque, P-factor and slipstream.
             let mut lv = self.levers(false, false);
             (lv.throttle, lv.auto_mixture) = (0.75, true);
-            let fl = Self::flight(vb, DVec3::ZERO, h);
+            let fl = self.flight(vb, DVec3::ZERO, h);
             let (mut thrust, mut em) = (0.0, DVec3::ZERO);
             for u in &self.engines {
                 let mut u = u.clone();
@@ -2387,7 +2387,7 @@ impl Plane {
             // The game's own boost (arcade, on a type without an afterburner).
             let arcade = if c.boost && !spec.real_boost() { if jet { if let Engine::Fan(fe) = &spec.engine { fe.boost } else { 1.0 } } else { 1.35 } } else { 1.0 };
             let blades = if dm.prop > 0.75 { 1.0 } else if dm.prop > 0.25 { 0.45 } else { 0.0 };
-            let fl = Self::flight(vb, self.omega, h);
+            let fl = self.flight(vb, self.omega, h);
             let fail = self.sys.fail.engine;
             for (i, u) in self.engines.iter_mut().enumerate() {
                 // A failure takes the first engine (the only one, on a single).
