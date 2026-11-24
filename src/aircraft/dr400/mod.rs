@@ -234,6 +234,7 @@ pub static SPEC: Spec = Spec {
     lever: None,
     // Fixed gear: it never moves (see `Spec::fixed_gear`).
     gear_rate: 0.0,
+    electric_actuators: false,
     // VNE 308 km/h; flutter past about 185 kt.
     vne: 85.6,
     mmo: 0.0,
@@ -262,6 +263,7 @@ pub static SPEC: Spec = Spec {
         fric0: 15.0,
         fric1: 35.0,
         blade_break_y: PROP_HUB.y + 0.40,
+        governor: None,
     }),
     // The Cessna's, quicker in roll (shorter span, a stick, light ailerons).
     handling: Handling {

@@ -466,6 +466,7 @@ pub static SPEC: Spec = Spec {
     slats_at: 0,
     lever: None,
     gear_rate: 1.0 / 6.0,
+    electric_actuators: false,
     // 500 kt indicated (it climbs at 450), Mach 3.3.
     vne: 500.0 * KT,
     mmo: 3.3,

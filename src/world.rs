@@ -61,12 +61,22 @@ struct BTile {
     /// distance scale of its tallest height class (buildings::HCLASS)
     tall: f32,
 }
+/// How far from the camera a floodlight still lights the ground (m).
+const FLOOD_REACH: f64 = 3000.0;
+/// A mast's floodlights: about 1e5 cd on the beam's axis (Globals units, as
+/// the landing lights: cd / 1e4 / pi, times 60), and the beam's half-angle.
+const FLOOD_I: f32 = 1.0e5 / 1.0e4 / std::f32::consts::PI * 60.0;
+const FLOOD_COS: f32 = 0.42;
 /// An airfield near enough to be drawn and to be busy.
 pub struct Field {
     pub geo: std::sync::Arc<crate::airports::Geo>,
     gpu: crate::render::FieldGpu,
     props: Vec<crate::airfield::Prop>,
     socks: Vec<Vec3>,
+    /// a hand-made scenery pack's objects (scenery.rs)
+    scenery: Vec<crate::scenery::Placed>,
+    /// floodlights that light the ground: lamp (relative to `geo.center`), beam direction
+    floods: Vec<(Vec3, Vec3)>,
     pub traffic: crate::traffic::Traffic,
     last_used: u64,
 }
@@ -1013,7 +1023,7 @@ impl World {
                             let gpu = r.upload_field(&mesh);
                             let traffic = crate::traffic::Traffic::new(&geo, i.wrapping_mul(2654435761) ^ 0x5bd1e995);
                             log::info!("airfield {} ready: {} runways, {} stands, {} lights", geo.apt().ident, geo.runways.len(), geo.stands.len(), mesh.lights.len());
-                            self.fields.insert(i, FSlot::Ready(Box::new(Field { geo, gpu, props: mesh.props, socks: mesh.socks, traffic, last_used: self.frame })));
+                            self.fields.insert(i, FSlot::Ready(Box::new(Field { geo, gpu, props: mesh.props, socks: mesh.socks, scenery: mesh.scenery, floods: mesh.floods, traffic, last_used: self.frame })));
                         }
                         Err(e) => {
                             log::debug!("airfield {i} failed: {e}");
@@ -1396,7 +1406,33 @@ impl World {
     }
 
     /// Fixed airport objects, parked and moving aircraft and their lights.
-    pub fn airport_instances(&self, cam: DVec3, wind_from: f32, wind_kt: f32, t: f64, out: &mut Vec<(u32, Inst)>, lights: &mut Vec<crate::airfield::Light>) {
+    /// `scenery` takes the hand-made scenery packs' objects (scenery.rs).
+    /// `wind`: where it blows from (degrees) and how hard (knots).
+    /// The eight floodlights nearest the camera within 3 km, for Globals
+    /// `flood` (common.wgsl `flood_light`), `on` 0..1 as they come on at dusk.
+    pub fn flood_globals(&self, cam: DVec3, on: f32, out: &mut [[f32; 4]; 16]) {
+        let mut near: Vec<(f64, DVec3, Vec3)> = Vec::new();
+        for s in self.fields.values() {
+            let FSlot::Ready(f) = s else { continue };
+            for (p, d) in &f.floods {
+                let o = f.geo.center - cam + p.as_dvec3();
+                let r = o.length();
+                if r < FLOOD_REACH {
+                    near.push((r, o, *d));
+                }
+            }
+        }
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (k, (r, o, d)) in near.iter().take(out.len() / 2).enumerate() {
+            // fading out toward the edge of the reach, so none pops in or out
+            let fade = (((FLOOD_REACH - r) / 500.0) as f32).clamp(0.0, 1.0);
+            out[2 * k] = [o.x as f32, o.y as f32, o.z as f32, FLOOD_I * on * fade];
+            out[2 * k + 1] = [d.x, d.y, d.z, FLOOD_COS];
+        }
+    }
+
+    pub fn airport_instances(&self, cam: DVec3, wind: (f32, f32), t: f64, out: &mut Vec<(u32, Inst)>, scenery: &mut Vec<(u32, Inst)>, lights: &mut Vec<crate::airfield::Light>) {
+        let (wind_from, wind_kt) = wind;
         let fr = self.frustum.as_ref();
         for s in self.fields.values() {
             let FSlot::Ready(f) = s else { continue };
@@ -1423,15 +1459,37 @@ impl World {
                 if o.length() > 5000.0 {
                     continue;
                 }
-                let wob = (t as f32 * (2.3 + k as f32 * 0.4)).sin() * 0.05 * (wind_kt / 10.0).min(1.5);
-                let droop = (1.0 - (wind_kt / 15.0).clamp(0.0, 1.0)) * 1.25 + wob;
-                let fwd = hd * droop.cos() - up * droop.sin();
-                let fwd = (fwd + hd.cross(up) * wob).normalize();
+                let fwd = sock_dir(hd, up, wind_kt, t, k);
                 let upv = (up - fwd * fwd.dot(up)).normalize();
                 let x = fwd.cross(upv);
                 let z = -fwd;
                 let o = o.as_vec3();
                 out.push((crate::airmodels::M_SOCK, Inst { m: [[x.x, upv.x, z.x, o.x], [x.y, upv.y, z.y, o.y], [x.z, upv.z, z.z, o.z]], tint: [1.0, 1.0, 1.0, 0.0], ext: [0.0; 4] }));
+            }
+            // The scenery pack's objects, each as far as its class reaches; its
+            // windsocks turn with the wind like the procedural ones. They give
+            // way to the 3D tiles (ext.w).
+            let mut ks = 0;
+            for (pi, p) in f.scenery.iter().enumerate() {
+                let o = base + DVec3::new(p.m[0][3] as f64, p.m[1][3] as f64, p.m[2][3] as f64);
+                let r = p.radius as f64;
+                if o.length() > crate::scenery::reach(p.class) as f64 + r || !fr.map(|f| f.sphere(o, r)).unwrap_or(true) {
+                    if p.class == crate::scenery::C_SOCK {
+                        ks += 1;
+                    }
+                    continue;
+                }
+                let o = o.as_vec3();
+                let mut m = p.m;
+                if p.class == crate::scenery::C_SOCK {
+                    let (x, y, z) = crate::scenery::sock_axes(sock_dir(hd, p.up, wind_kt, t, ks), p.up);
+                    ks += 1;
+                    m = [[x.x, y.x, z.x, 0.0], [x.y, y.y, z.y, 0.0], [x.z, y.z, z.z, 0.0]];
+                }
+                (m[0][3], m[1][3], m[2][3]) = (o.x, o.y, o.z);
+                // ext.y: a steady random number per object (scenery.wgsl varies its wear by it)
+                let rnd = ((pi as u32).wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0;
+                scenery.push((p.mesh, Inst { m, tint: [p.tint[0], p.tint[1], p.tint[2], 0.0], ext: [0.0, rnd, 0.0, 1.0] }));
             }
             f.traffic.draw(g, cam, t, out, lights);
         }
@@ -1859,4 +1917,13 @@ impl Tag for TileId {
     fn with_refresh(self) -> Self {
         TileId::new(self.z | 0x40, self.x, self.y)
     }
+}
+
+/// Which way a windsock hangs: downwind (`hd`, horizontal), drooping in a
+/// light breeze and stirring a little; `k` staggers neighbouring socks.
+pub fn sock_dir(hd: Vec3, up: Vec3, wind_kt: f32, t: f64, k: usize) -> Vec3 {
+    let wob = (t as f32 * (2.3 + k as f32 * 0.4)).sin() * 0.05 * (wind_kt / 10.0).min(1.5);
+    let droop = (1.0 - (wind_kt / 15.0).clamp(0.0, 1.0)) * 1.25 + wob;
+    let fwd = hd * droop.cos() - up * droop.sin();
+    (fwd + hd.cross(up) * wob).normalize()
 }

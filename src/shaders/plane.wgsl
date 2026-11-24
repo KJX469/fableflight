@@ -194,6 +194,7 @@ fn quad(a: vec2f, b: vec2f, c: vec2f, d: vec2f) -> array<vec2f, 5> { return arra
 // Window openings (negative inside); matches c172::window / b747::window.
 fn window(p: vec3f) -> f32 {
   if (kind() == 1u) { return window747(p); }
+  if (kind() == 10u) { return window_bonanza(p); }
   // (The Robin's canopy is a glass piece of its own, all of it clear.)
   if (kind() == 8u) { return -1.0; }
   // A fighter's canopy is blown glass: all of it is window.
@@ -216,6 +217,7 @@ fn window(p: vec3f) -> f32 {
 // Landing gear wells (only the skin has them); matches c172::well / b747::well.
 fn well(p: vec3f) -> f32 {
   if (kind() == 1u) { return well747(p); }
+  if (kind() == 10u) { return well_bonanza(p); }
   if (kind() == 8u) { return 1.0; }
   // (The G650's wells are cut into its exported skin.)
   if (kind() == 9u) { return 1.0; }
@@ -336,6 +338,7 @@ fn pack(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) -> u32 {
 fn livery(L: vec3f, aa: f32, pt: u32) -> vec3f {
   if (kind() == 1u) { return livery747(L, aa, pt); }
   if (kind() == 8u) { return livery_dr400(L, aa, pt); }
+  if (kind() == 10u) { return livery_bonanza(L, aa, pt); }
   // The Cessna: white, and the scheme picked for it (PT.a: main colour, w 1
   // if painted; PT.b: the pinstripe).
   var c = WHITE_PAINT;
@@ -475,6 +478,7 @@ fn weather(L: vec3f, N: vec3f, base: vec3f) -> vec4f {
   c *= 1.0 - (0.03 + 0.07 * belly) * n.g;
   if (kind() == 1u) { return weather747(L, N, c, belly, n); }
   if (kind() == 8u) { return weather_dr400(L, N, c, belly); }
+  if (kind() == 10u) { return weather_bonanza(L, N, c, belly); }
   // Soot from the exhaust stack streaking back along the belly.
   let d = L.z + 2.1;
   if (d > 0.0 && L.y < -0.2) {
@@ -697,6 +701,8 @@ fn relief(pt: u32, uv: vec2f, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
   // The Robin is wood and fabric: no rivets, no laps (its cabin keeps its
   // upholstery, carpet, crinkle paint and knurling).
   if (kind() == 8u && pt <= 6u) { return relief_dr400(pt, uv, L, px); }
+  // The Bonanza: flush-riveted aluminium (its cabin keeps the shared patterns below).
+  if (kind() == 10u && pt <= 6u) { return relief_bonanza(pt, uv, L, Nl, px); }
   var h = 0.0;
   var dirt = 0.0;
   var rv = 0.0;
@@ -977,6 +983,14 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
         redline = 365.0;
         nd[0] = vec4f(dial(P0.x, 60.0, 450.0, a0, a1), 0.86, 0.035, 0.18);
       }
+      if (kind() == 10u) {
+        // The A36's markings, KIAS (G36/A36 limits, aircraft/bonanza): white
+        // 51-122, green 61-165, yellow 165-203, the red line at 203.
+        vmax = 220.0; tn = 44.0; ln = 10.0;
+        arcs[0] = vec4f(61.0, 165.0, 0.86, 0.95); arcs[1] = vec4f(165.0, 203.0, 0.86, 0.95); arcs[2] = vec4f(51.0, 122.0, 0.79, 0.85);
+        redline = 203.0;
+        nd[0] = vec4f(dial(P0.x, 0.0, 220.0, a0, a1), 0.86, 0.035, 0.18);
+      }
       if (fighter() || kind() == 6u) {
         // A fighter's airspeed (and Concorde's): 50 to 850 kt.
         a0 = rad(10.0); vmin = 50.0; vmax = 850.0; tn = 32.0; tper = 4.0;
@@ -1092,20 +1106,24 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
       a0 = rad(-135.0); a1 = rad(135.0); vmin = 10.0; vmax = 35.0; tn = 25.0; tper = 5.0;
       ln = 6.0; lfirst = 10.0; lstep = 5.0; lh = 0.16;
       arcs[0] = vec4f(15.0, 25.0, 0.86, 0.95); arc_col[0] = green;
+      // (The Bonanza's IO-550-B: green 15 to 29.6 in Hg.)
+      if (kind() == 10u) { arcs[0] = vec4f(15.0, 29.6, 0.86, 0.95); }
       nd[0] = vec4f(dial(P2.y, vmin, vmax, a0, a1), 0.86, 0.04, 0.18); nn = 1;
     }
-    case 8u, 9u, 10u, 11u, 12u, 13u, 16u, 18u: { // small engine gauges, dial low on the face
+    case 8u, 9u, 10u, 11u, 12u, 13u, 16u, 18u, 34u: { // small engine gauges, dial low on the face
       a0 = rad(-60.0); a1 = rad(60.0); tn = 10.0; tper = 5.0;
       q = (uv + vec2f(0.0, 0.35)) * 0.78;
       var v = 0.0; var g0 = 0.0; var g1 = 0.0;
-      if (id == 8u) { v = P2.z; vmax = select(26.0, max(G.cockpit[0].w, 1.0), kind() == 0u); g0 = 2.0; g1 = vmax; }
-      if (id == 9u) { v = P2.w; vmax = select(26.0, max(G.cockpit[0].w, 1.0), kind() == 0u); g0 = 2.0; g1 = vmax; }
+      if (id == 8u) { v = P2.z; vmax = select(26.0, max(G.cockpit[0].w, 1.0), kind() == 0u || kind() == 10u); g0 = 2.0; g1 = vmax; }
+      if (id == 9u) { v = P2.w; vmax = select(26.0, max(G.cockpit[0].w, 1.0), kind() == 0u || kind() == 10u); g0 = 2.0; g1 = vmax; }
       if (id == 10u) { v = P3.x; vmin = 100.0; vmax = 250.0; g0 = 100.0; g1 = 240.0; }
       if (id == 11u) { v = P3.y; vmax = 115.0; g0 = 60.0; g1 = 90.0; redline = 114.0; }
       if (id == 12u) { v = P3.w; vmin = -60.0; vmax = 60.0; g0 = -5.0; g1 = 60.0; }
       if (id == 13u) { v = P4.x; vmin = 3.0; vmax = 7.0; g0 = 4.5; g1 = 5.5; }
       if (id == 16u) { v = P3.z; g0 = 0.5; g1 = 0.8; }
-      if (id == 18u) { v = select(P3.x * 1.6 + 30.0, G.cockpit[2].x, kind() == 0u); vmin = 200.0; vmax = 500.0; g0 = 200.0; g1 = 460.0; }
+      // (fuel flow, US gal/h: the Bonanza's, main.rs `cockpit_globals` row 3 w)
+      if (id == 34u) { v = G.cockpit[3].w; vmax = 30.0; g0 = 6.0; g1 = 27.0; }
+      if (id == 18u) { v = select(P3.x * 1.6 + 30.0, G.cockpit[2].x, kind() == 0u || kind() == 10u); vmin = 200.0; vmax = 500.0; g0 = 200.0; g1 = 460.0; }
       arcs[0] = vec4f(g0, g1, 0.86, 0.95); arc_col[0] = green;
       if (id == 8u || id == 9u) {
         arcs[1] = vec4f(vmin, 2.0, 0.86, 0.95); arc_col[1] = vec3f(0.6, 0.02, 0.01);
@@ -1779,6 +1797,11 @@ fn surface(in: VOut) -> Shaded {
         rough = mix(rough, 0.4, sc);
         albedo = mix(albedo, albedo * 0.6, smoothstep(0.62, 0.85, nz(L * 9.0).g) * 0.4);
       }
+      if (kind() == 10u && pt == P_WING) {
+        let wk = walkway_bonanza(L, px);
+        rough = mix(rough, 0.85, wk);
+        spec_k = mix(spec_k, 0.5, wk);
+      }
       if (kind() == 8u && pt == P_WING) {
         let wk = walkway_dr400(L, px);
         rough = mix(rough, 0.85, wk);
@@ -2215,6 +2238,7 @@ fn surface(in: VOut) -> Shaded {
   if (kind() == 6u) { inside = step(abs(L.x), CONCORDE_TUB.x) * step(CONCORDE_TUB.z, L.z) * step(L.z, CONCORDE_TUB.w) * step(CONCORDE_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 9u) { inside = step(abs(L.x), G650_TUB.x) * step(G650_TUB.z, L.z) * step(L.z, G650_TUB.w) * step(G650_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 8u) { inside = step(abs(L.x), 0.56) * step(-0.62, L.z) * step(L.z, 1.66) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL); }
+  if (kind() == 10u) { inside = step(abs(L.x), 0.58) * step(-1.11, L.z) * step(L.z, 2.69) * step(-0.5, L.y) * step(L.y, 0.78) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL && pt != P_WING); }
   if (kind() == 7u) { inside = step(abs(L.x), SR71_TUB.x) * step(SR71_TUB.z, L.z) * step(L.z, SR71_TUB.w) * step(SR71_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   // (a downloaded aircraft has no cabin of ours where its own model is)
   if (id == M_TEX) { inside = 0.0; }
@@ -2559,6 +2583,7 @@ fn tex_glass(in: VOut) -> vec4f {
   if (kind() == 6u) { in_cabin = from_inside && abs(eye_l.x) < CONCORDE_CABIN[0] && eye_l.y > CONCORDE_CABIN[1] && eye_l.y < CONCORDE_CABIN[2] && eye_l.z > CONCORDE_CABIN[3] && eye_l.z < CONCORDE_CABIN[4]; }
   if (kind() == 9u) { in_cabin = from_inside && abs(eye_l.x) < G650_CABIN[0] && eye_l.y > G650_CABIN[1] && eye_l.y < G650_CABIN[2] && eye_l.z > G650_CABIN[3] && eye_l.z < G650_CABIN[4]; }
   if (kind() == 8u) { in_cabin = from_inside && abs(eye_l.x) < 0.56 && eye_l.y > -0.52 && eye_l.y < 0.62 && eye_l.z > -0.62 && eye_l.z < 1.66; }
+  if (kind() == 10u) { in_cabin = from_inside && abs(eye_l.x) < 0.58 && eye_l.y > -0.46 && eye_l.y < 0.78 && eye_l.z > -1.1 && eye_l.z < 2.7; }
   if (kind() == 7u) { in_cabin = from_inside && abs(eye_l.x) < SR71_CABIN[0] && eye_l.y > SR71_CABIN[1] && eye_l.y < SR71_CABIN[2] && eye_l.z > SR71_CABIN[3] && eye_l.z < SR71_CABIN[4]; }
   let wind = abs(in.Nl.x) < 0.5;
   let tb = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), wind);
@@ -3480,4 +3505,361 @@ fn relief747(pt: u32, uv: vec2f, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
     default: {}
   }
   return vec3f(h, sat(dirt) * min(1.0, 0.003 / gw), rv);
+}
+
+// ---------------------------------------------------------------- the Bonanza (kind 10, aircraft/bonanza)
+// An aluminium semi-monocoque: lapped skins on frames and stringers, flush
+// rivets (seen as faint rings, not domes), the cabin door and the double
+// cargo doors on the right, a nose bowl and two engine compartment doors
+// hinged on the top centre line. Body frame; uv as bonanza/mod.rs builds it
+// (fuselage: station z, arc from the top; wing and tail: span station,
+// signed chord distance). Window and well outlines: keep in step with
+// bonanza::window and bonanza::well.
+
+const BON_WIN_R = 0.035;
+// (No loops in the Bonanza's code: a loop over a constant table in its
+// relief made the NVIDIA driver take half an hour to compile this shader.
+// Each family of seams is drawn once, at the nearest one, found by `bon_near`.)
+// The signed distance from z to `a`, if it is nearer than `cur`.
+fn bon_near(z: f32, a: f32, cur: f32) -> f32 { return select(cur, z - a, abs(z - a) < abs(cur)); }
+
+fn bon_rect(p: vec2f, lo: vec2f, hi: vec2f) -> f32 {
+  let c = (lo + hi) * 0.5;
+  let h = (hi - lo) * 0.5;
+  let q = abs(p - c) - h;
+  return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0);
+}
+fn window_bonanza(p: vec3f) -> f32 {
+  let zy = vec2f(p.z, p.y);
+  var d = sd_poly(zy, array<vec2f, 5>(vec2f(-1.054, 0.36), vec2f(-0.762, 0.375), vec2f(-0.292, 0.731), vec2f(-0.241, 0.82), vec2f(-1.092, 0.82)), 5) + 0.01;
+  if (abs(p.x) > 0.33 && p.y < 0.75) {
+    d = min(d, sd_poly(zy, array<vec2f, 5>(vec2f(-0.56, 0.265), vec2f(0.31, 0.265), vec2f(0.31, 0.665), vec2f(-0.214, 0.665), vec2f(-0.616, 0.36)), 5) - BON_WIN_R);
+    d = min(d, bon_rect(zy, vec2f(0.446, 0.280), vec2f(0.956, 0.650)) - BON_WIN_R);
+    d = min(d, bon_rect(zy, vec2f(1.196, 0.280), vec2f(1.565, 0.574)) - BON_WIN_R);
+    d = min(d, bon_rect(zy, vec2f(1.790, 0.296), vec2f(2.162, 0.513)) - BON_WIN_R);
+  }
+  return d;
+}
+fn well_bonanza(p: vec3f) -> f32 {
+  var d = 1.0;
+  if (p.y < -0.40 && p.z < -1.0) {
+    d = min(d, bon_rect(vec2f(p.z, p.x), vec2f(-2.20, -0.115), vec2f(-1.25, 0.115)) + 0.005);
+  }
+  let ax = abs(p.x);
+  if (p.y < -0.2 && p.y > -0.7 && ax > 0.6 && ax < 1.8) {
+    let q = vec2f(ax, p.z);
+    let c = length(q - vec2f(1.037, 0.404)) - 0.25;
+    let s = bon_rect(q, vec2f(1.06, 0.33), vec2f(1.67, 0.48));
+    d = min(d, min(c, s) + 0.005);
+  }
+  return d;
+}
+// The cabin door (right side), and the cargo doors aft of the wing: distance to their outlines.
+fn door_bonanza(L: vec3f) -> f32 {
+  return sd_poly(vec2f(L.z, L.y), array<vec2f, 5>(vec2f(-0.69, -0.153), vec2f(0.368, -0.153), vec2f(0.368, 0.77), vec2f(-0.28, 0.77), vec2f(-0.76, 0.39)), 5);
+}
+fn cargo_bonanza(L: vec3f) -> f32 {
+  let q = vec2f(L.z, L.y);
+  let o = bon_rect(q, vec2f(1.074 + 0.04, -0.313 + 0.04), vec2f(2.299 - 0.04, 0.654 - 0.04)) - 0.04;
+  // (the split between the two leaves)
+  let split = select(1.0, abs(L.z - 1.687), L.y > -0.313 && L.y < 0.654);
+  return min(abs(o), split);
+}
+// The black non-slip walkway on the right wing root (the doors are on the right).
+fn walkway_bonanza(L: vec3f, aa: f32) -> f32 {
+  if (L.x < 0.6 || L.x > 1.2) { return 0.0; }
+  let le = -0.4953 + 0.05512 * L.x;
+  let c = 2.220 - 0.2135 * L.x;
+  let xc = (L.z - le) / c;
+  let chord_y = -0.407 + 0.1051 * L.x - (L.z - le) * 0.06;
+  if (L.y < chord_y + 0.02) { return 0.0; }
+  let e = min(min(L.x - 0.66, 1.15 - L.x), min(xc - 0.18, 0.74 - xc) * c);
+  return smoothstep(-aa, aa, e);
+}
+// The registration, N741TZ (made up), in glyph units as `text` lays them
+// out (1 wide, 2 tall, 1.45 apart): ink coverage. Drawn segment by segment
+// for the one glyph under p, without `text`'s loop over the font table (see
+// the note on loops above).
+fn bon_reg(p: vec2f, stroke: f32, aa: f32) -> f32 {
+  if (p.y < -0.6 || p.y > 2.6 || p.x < -0.6) { return 0.0; }
+  let k = i32(floor((p.x + 0.225) / 1.45));
+  if (k < 0 || k > 5) { return 0.0; }
+  let q = vec2f(p.x - f32(k) * 1.45, p.y);
+  var d = 1e3;
+  switch k {
+    case 0: { // N
+      d = min(min(seg_d(q, vec2f(0.0, 0.0), vec2f(0.0, 2.0)), seg_d(q, vec2f(0.0, 2.0), vec2f(1.0, 0.0))), seg_d(q, vec2f(1.0, 0.0), vec2f(1.0, 2.0)));
+    }
+    case 1: { // 7
+      d = min(seg_d(q, vec2f(0.0, 2.0), vec2f(1.0, 2.0)), seg_d(q, vec2f(1.0, 2.0), vec2f(0.35, 0.0)));
+    }
+    case 2: { // 4
+      d = min(min(seg_d(q, vec2f(0.75, 0.0), vec2f(0.75, 2.0)), seg_d(q, vec2f(0.75, 2.0), vec2f(0.0, 0.65))), seg_d(q, vec2f(0.0, 0.65), vec2f(1.0, 0.65)));
+    }
+    case 3: { // 1
+      d = min(seg_d(q, vec2f(0.55, 0.0), vec2f(0.55, 2.0)), seg_d(q, vec2f(0.55, 2.0), vec2f(0.2, 1.65)));
+    }
+    case 4: { // T
+      d = min(seg_d(q, vec2f(0.0, 2.0), vec2f(1.0, 2.0)), seg_d(q, vec2f(0.5, 2.0), vec2f(0.5, 0.0)));
+    }
+    default: { // Z
+      d = min(min(seg_d(q, vec2f(0.0, 2.0), vec2f(1.0, 2.0)), seg_d(q, vec2f(1.0, 2.0), vec2f(0.0, 0.0))), seg_d(q, vec2f(0.0, 0.0), vec2f(1.0, 0.0)));
+    }
+  }
+  return 1.0 - smoothstep(stroke - aa, stroke + aa, d);
+}
+// The paint: white, and the scheme picked (bonanza::LIVERIES, livery_style()
+// 1: PT.a the main stripe, PT.b its pinstripe, PT.c the tips). In the manner
+// of Beech's factory schemes of the 1970s-80s (period-inspired, not traced
+// from a drawing; see bonanza::LIVERIES): a broad stripe under the window
+// belt from the nose bowl, sweeping up the tail cone and on across the fin
+// and rudder at about 39°, a pinstripe over it, coloured wing tips,
+// stabiliser tips and spinner. The registration (made up) sits aft of the
+// last window over the stripe, both sides reading the right way round.
+// Clear of the walkway; the glass, rubber, exhausts and the bare propeller
+// are other materials and never come here. Style 0 (none picked, or another
+// type flown): plain white with a black registration.
+fn livery_bonanza(L: vec3f, aa: f32, pt: u32) -> vec3f {
+  var c = WHITE_PAINT;
+  if (pt == P_WING) {
+    let wk = walkway_bonanza(L, aa);
+    if (wk > 0.0) { return mix(c, vec3f(0.035, 0.035, 0.037), wk); }
+  }
+  let ax = abs(L.x);
+  let picked = livery_style() > 0u;
+  let main_c = PT.a.rgb;
+  let pin_c = PT.b.rgb;
+  let tip_c = PT.c.rgb;
+  if (picked) {
+    // One centre line for the whole stripe, side view: level under the
+    // windows (their lower corners at y 0.23), a parabola up the tail cone
+    // from z 2.975 meeting the fin's root at z 4.0, y 0.48 at a slope of
+    // 0.8, and straight on up the fin. Distance measured square to it.
+    let t = clamp(L.z - 2.975, 0.0, 1.025);
+    let yc = 0.07 + 0.39 * t * t + 0.8 * max(L.z - 4.0, 0.0);
+    let slope = select(0.78 * t, 0.8, L.z > 4.0);
+    let d = (L.y - yc) / sqrt(1.0 + slope * slope);
+    if (ax < 0.62 && L.z > -2.32 && L.y > -0.3) {
+      // A point at the nose bowl.
+      let taper = smoothstep(-2.32, -1.95, L.z);
+      let hw = 0.062 * taper;
+      let band = smoothstep(hw + aa, hw - aa, abs(d));
+      let pin = smoothstep(0.011 * taper + aa, 0.011 * taper - aa, abs(d - 0.105 * taper));
+      c = mix(c, main_c, band);
+      c = mix(c, pin_c, pin);
+    }
+    // The wing's glass-fibre tip caps beyond the outer rib (bonanza::TIP_RIB).
+    if (ax > 4.84 && L.y > -0.5) { c = tip_c; }
+    // The stabiliser's rounded tips (outboard of STAB_HALF - 0.17).
+    if (ax > 1.685 && L.z > 4.0 && abs(L.y - 0.31) < 0.12) { c = tip_c; }
+    // The spinner, ahead of the nose bowl's lip.
+    if (L.z < -2.325 && length(vec2f(L.x, L.y - 0.05)) < 0.19) { c = tip_c; }
+  }
+  // The registration, both sides of the fuselage aft of the last window,
+  // over the stripe and clear of the cargo door (to z 2.30): nose-to-tail on
+  // the left, tail-to-nose on the right; the stripe's colour, or black.
+  if (ax > 0.25 && L.z > 2.33 && L.z < 3.02 && L.y > 0.22 && L.y < 0.42) {
+    let h = 0.15;
+    let s = h * 0.5;
+    let w = 8.25 * s;
+    let tx = (2.67 - L.z) * sign(L.x) + w * 0.5;
+    let ink = bon_reg(vec2f(tx, L.y - (0.32 - s)) / s, 0.14, aa / s + 0.01);
+    c = mix(c, select(vec3f(0.012, 0.012, 0.014), main_c, picked), ink);
+  }
+  return c;
+}
+// Exhaust soot from the two stacks under the cowl along the belly, oil
+// mist from the breather, a tide mark round each fuel filler, scuffs by the step.
+fn weather_bonanza(L: vec3f, N: vec3f, base: vec3f, belly: f32) -> vec4f {
+  var c = base;
+  let ax = abs(L.x);
+  let d = L.z + 1.12;
+  if (d > -0.05 && L.y < -0.25 && L.z < 3.0 && ax < 0.62) {
+    let cx = 0.23 - min(max(d, 0.0), 1.5) * 0.08;
+    let spread = 0.04 + max(d, 0.0) * 0.06;
+    let streak = nz(vec3f(L.x * 9.0, L.y * 9.0, L.z * 0.4)).r;
+    let soot = exp(-pow((ax - cx) / spread, 2.0)) * exp(-max(d, 0.0) / 1.5) * smoothstep(-0.05, 0.03, d) * sat(belly * 1.6) * (0.5 + 0.7 * streak);
+    c = mix(c, vec3f(0.035, 0.03, 0.026), sat(soot * 1.3));
+  }
+  if (L.y < -0.5 && L.z > -1.2 && L.z < 2.0) {
+    let oil = exp(-L.x * L.x / 0.012) * exp(-(L.z + 1.1) / 1.2) * (0.4 + 0.6 * nz(vec3f(L.x * 6.0, 0.0, L.z * 0.6)).b);
+    c = mix(c, c * vec3f(0.6, 0.5, 0.34), sat(oil * 0.6));
+  }
+  let fl = length(vec2f(ax - 1.95, L.z + 0.136));
+  if (fl < 0.3 && L.y > -0.3) {
+    let f = exp(-fl / 0.07) * (0.4 + 0.6 * nz(vec3f(L.x * 14.0, 0.0, L.z * 14.0)).r) * smoothstep(0.04, 0.05, fl);
+    c = mix(c, c * vec3f(0.74, 0.84, 1.0), sat(f * 1.5));
+  }
+  if (L.x > 0.5 && L.x < 1.25 && L.y > -0.5 && L.y < -0.2 && L.z > -0.4 && L.z < 1.9) {
+    let scuff = smoothstep(0.55, 0.9, nz(L * vec3f(5.0, 5.0, 2.0)).g) * sat(N.y * 2.0);
+    c = mix(c, c * vec3f(0.80, 0.78, 0.74), scuff * 0.5);
+  }
+  return vec4f(c, 0.08 * belly);
+}
+// A flush rivet row along `along`, `across` from it: 0..1 coverage of the head.
+fn bon_rivets(along: f32, across: f32, pitch: f32, r: f32) -> f32 { return rivets(along, across, pitch, r); }
+fn relief_bonanza(pt0: u32, uv: vec2f, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
+  var h = 0.0;
+  var dirt = 0.0;
+  var rv = 0.0;
+  let gw = max(0.0007, px * 0.9);
+  let ga = 0.00045 * min(1.0, 0.0012 / gw);
+  let rr = 0.0021;
+  let rf = 1.0 - smoothstep(rr * 0.5, rr * 1.6, px);
+  // The inboard lower wing skin carries the fuselage pattern (so the wheel
+  // well can be cut out of it): it gets the wing's seams.
+  let pt = select(pt0, 2u, pt0 == 1u && abs(L.x) > 0.5 && Nl.y < -0.7 && L.y < -0.1);
+  switch pt {
+    case 1u: { // fuselage
+      let z = uv.x;
+      let s = abs(uv.y);
+      // (Each family of seams is drawn once, at the nearest of them: far
+      // cheaper for the shader compiler than a seam drawn per entry.)
+      var dl = 1.0;
+      dl = bon_near(z, -1.118, dl); dl = bon_near(z, 0.368, dl); dl = bon_near(z, 1.074, dl); dl = bon_near(z, 2.299, dl); dl = bon_near(z, 2.794, dl);
+      dl = bon_near(z, 3.30, dl); dl = bon_near(z, 3.85, dl); dl = bon_near(z, 4.40, dl); dl = bon_near(z, 4.95, dl); dl = bon_near(z, 5.30, dl);
+      var df = 1.0;
+      df = bon_near(z, -0.86, df); df = bon_near(z, -0.46, df); df = bon_near(z, 0.05, df); df = bon_near(z, 0.72, df);
+      df = bon_near(z, 1.45, df); df = bon_near(z, 1.95, df); df = bon_near(z, 2.55, df); df = bon_near(z, 3.57, df);
+      h -= ga * line(dl, gw);
+      dirt += line(dl, gw * 2.5);
+      rv = max(rv, bon_rivets(s, abs(abs(dl) - 0.011), 0.024, rr) * rf);
+      rv = max(rv, bon_rivets(s, abs(df), 0.030, rr) * rf);
+      // Longitudinal laps: under the window belt and low on the sides of
+      // the cabin; on the tail cone, two laps and stringer rows between.
+      let cab = z > -1.12 && z < 2.80 && abs(L.x) > 0.3;
+      let dy = select(L.y + 0.30, L.y - 0.19, abs(L.y - 0.19) < abs(L.y + 0.30));
+      let ds = select(s - 0.95, s - 0.40, abs(s - 0.40) < abs(s - 0.95));
+      let dlong = select(select(1.0, ds, z > 2.79), dy, cab);
+      h -= ga * line(dlong, gw);
+      dirt += line(dlong, gw * 2.0);
+      rv = max(rv, bon_rivets(z, abs(dlong - 0.010), 0.026, rr) * rf);
+      let k = (fract(s / 0.16) - 0.5) * 0.16;
+      rv = max(rv, bon_rivets(z, k, 0.040, rr * 0.9) * rf * 0.8 * step(2.79, z));
+      // The doors on the right (a wider, darker gap); an access panel low on
+      // the left of the tail cone (the ELT and battery).
+      var dd = 1.0;
+      if (L.x > 0.2) { dd = min(abs(door_bonanza(L)), cargo_bonanza(L)); }
+      if (L.x < -0.2 && z > 2.3 && z < 2.7) { dd = abs(bon_rect(vec2f(z, L.y), vec2f(2.40, 0.05), vec2f(2.62, 0.22)) - 0.02); }
+      h -= ga * 1.8 * line(dd, gw * 1.3);
+      dirt += line(dd, gw * 3.0);
+    }
+    case 2u: { // wing
+      let s = abs(uv.x);
+      let av = abs(uv.y);
+      let c = 2.220 - 0.2135 * min(s, 4.84);
+      let xc = av / c;
+      let hinge = select(1.0, select(0.79, 0.80, s < 2.86), s > 0.66 && s < 4.81);
+      if (s > 0.70 && s < 4.84 && xc < hinge - 0.01) {
+        let d = (fract((s - 0.70) / 0.28 + 0.5) - 0.5) * 0.28;
+        rv = max(rv, bon_rivets(av, d, 0.026, rr) * rf);
+      }
+      rv = max(rv, bon_rivets(s, abs(abs(xc - 0.23) * c - 0.011), 0.025, rr) * rf);
+      rv = max(rv, bon_rivets(s, abs(xc - 0.62) * c, 0.028, rr) * rf);
+      // The leading-edge skin's lap, both surfaces.
+      let le = av - 0.12 * c;
+      h -= ga * line(le, gw);
+      dirt += line(le, gw * 2.0);
+      rv = max(rv, bon_rivets(s, abs(le + 0.010), 0.024, rr) * rf);
+      // Spanwise splices: at the flap's end, at the tip rib.
+      let ds = bon_near(s, 4.84, s - 2.86);
+      h -= ga * line(ds, gw);
+      dirt += line(ds, gw * 2.0);
+      rv = max(rv, bon_rivets(av, abs(abs(ds) - 0.011), 0.024, rr) * rf);
+      if (uv.y < 0.0) {
+        // The fuel cell access plates under the leading edge.
+        let q = vec2f(bon_near(s, 1.95, bon_near(s, 1.45, s - 0.95)), av - 0.13 * c);
+        let o = bon_rect(q, vec2f(-0.09, -0.05), vec2f(0.09, 0.05)) - 0.02;
+        h -= ga * 1.4 * line(o, gw * 1.2);
+        dirt += line(o, gw * 2.5);
+        rv = max(rv, bon_rivets(atan2(q.y, q.x) * 0.1, abs(o + 0.012), 0.009, rr * 1.4) * rf);
+      } else if (L.x > 0.62 && L.x < 1.18 && xc > 0.17 && xc < 0.75) {
+        // The walkway's grit.
+        h += 0.0005 * nz(L * 180.0).r * (1.0 - smoothstep(0.0003, 0.0012, px));
+      }
+    }
+    case 5u: { // stabiliser and fin
+      let fin = abs(Nl.x) > 0.7;
+      let s = select(abs(uv.x), uv.x, fin);
+      let av = abs(uv.y);
+      var c = 0.0;
+      var hinge = 0.0;
+      if (fin) {
+        let y = 0.42 + s;
+        let le = 4.293 + 0.7225 * (y - 0.804);
+        c = 5.461 + 0.18 * (y - 0.29) - le;
+        hinge = 4.978 + 0.36 * (y - 0.41) - le;
+        let d = (fract((s - 0.10) / 0.25 + 0.5) - 0.5) * 0.25;
+        if (av < hinge - 0.02 && s > 0.05) { rv = max(rv, bon_rivets(av, d, 0.024, rr) * rf); }
+      } else {
+        let a = min(s / 1.685, 1.0);
+        let le = 4.293 + 0.177 * a;
+        c = 5.461 - 0.152 * a - le;
+        hinge = 4.928 - le;
+        // Rib stations (shop manual, 7.28 .. 66.55 in out).
+        var d = bon_near(s, 0.185, s - 0.387);
+        d = bon_near(s, 0.648, d); d = bon_near(s, 0.908, d); d = bon_near(s, 1.168, d); d = bon_near(s, 1.429, d); d = bon_near(s, 1.690, d);
+        if (av < hinge - 0.02) { rv = max(rv, bon_rivets(av, abs(d), 0.024, rr) * rf); }
+      }
+      rv = max(rv, bon_rivets(s, abs(av - 0.22 * c), 0.024, rr) * rf);
+      rv = max(rv, bon_rivets(s, abs(av - (hinge - 0.02)), 0.026, rr) * rf);
+    }
+    case 3u: { // control surfaces: rib rows and the spar along the nose
+      let s = abs(uv.x);
+      let av = abs(uv.y);
+      let d = (fract(s / 0.16) - 0.5) * 0.16;
+      rv = max(rv, bon_rivets(av, abs(d), 0.028, rr) * rf * 0.9);
+      dirt += 0.15 * line(abs(d), gw * 2.0);
+    }
+    case 4u: { // cowling
+      let fwd = L.z > -2.29;
+      if (fwd && L.z < -1.10) {
+        // The nose bowl's joint, the firewall edge.
+        let dz = bon_near(L.z, -1.125, L.z + 2.032);
+        h -= ga * 1.4 * line(dz, gw);
+        dirt += line(dz, gw * 2.5);
+        if (L.z > -2.032) {
+          // The engine compartment doors: their bottom edges, the piano hinge on top.
+          let dy = L.y + 0.15;
+          h -= ga * 1.5 * line(dy, gw);
+          dirt += line(dy, gw * 2.5);
+          if (L.y > 0.2) {
+            let hx = abs(L.x) - 0.006;
+            h -= ga * 1.2 * line(hx, gw);
+            dirt += line(hx, gw * 2.0);
+            let kn = step(0.5, fract(L.z / 0.025)) * line(L.x, 0.004);
+            h += 0.0002 * kn;
+            dirt += 0.3 * kn;
+            // The oil door, left of the hinge.
+            let o = bon_rect(vec2f(L.z, L.x), vec2f(-1.66, -0.24), vec2f(-1.44, -0.10)) - 0.02;
+            h -= ga * 1.4 * line(o, gw);
+            dirt += line(o, gw * 2.0);
+          }
+          // The louvre panels' outlines.
+          let o = bon_rect(vec2f(L.z, L.y), vec2f(-1.97, -0.32), vec2f(-1.54, -0.10)) - 0.01;
+          h -= ga * 1.3 * line(o, gw);
+          dirt += line(o, gw * 2.0);
+        }
+        // Camloc-row and frame rivets along the door edges.
+        rv = max(rv, bon_rivets(L.z, abs(L.y + 0.15 + 0.012), 0.03, rr) * rf * step(-2.03, L.z));
+      }
+    }
+    case 6u: { // tyre tread: circumferential grooves
+      var c = vec3f(sign(L.x) * 1.457, -0.908, 0.404);
+      var r = 0.222;
+      var g = vec2f(0.022, 0.050);
+      if (L.z < -1.0) { c = vec3f(0.0, -1.07, -2.05); r = 0.18; g = vec2f(0.016, 0.038); }
+      let ax = abs(L.x - c.x);
+      let rad = length(L.yz - c.yz);
+      if (rad > r * 0.9) {
+        let gd = min(abs(ax - g.x), abs(ax - g.y));
+        h -= 0.002 * line(gd, max(0.003, px));
+        dirt += line(gd, max(0.004, px));
+      }
+    }
+    default: {}
+  }
+  // Flush rivets: barely proud of the skin; the ring of grime round each shows them.
+  h += rv * 0.00006;
+  return vec3f(h, sat(dirt) * min(1.0, 0.0022 / gw), rv);
 }

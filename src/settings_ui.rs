@@ -675,6 +675,7 @@ impl Game {
                         let (text, primary) = if self.mp_on { (t!("settings.disconnect"), false) } else { (t!("settings.connect"), true) };
                         if menu::wide_button(ui, text, Hint::None, primary, true).clicked() {
                             self.mp_on = !self.mp_on;
+                            self.mp_held = false;
                         }
                     });
                 });

@@ -4,7 +4,7 @@
 //! The cockpit lives in `cabin.rs`.
 pub mod cabin;
 
-use crate::aircraft::{Engine, Handling, Hole, Hull, Leg, Livery, Part, Piston, Sound, Spec, Tail, Tyre};
+use crate::aircraft::{Engine, Governor, Handling, Hole, Hull, Leg, Livery, Part, Piston, Sound, Spec, Tail, Tyre};
 use crate::aero::{Ctrl, Foil2d, Fuse, Planform, Rig};
 use crate::airframe::*;
 use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
@@ -212,6 +212,7 @@ pub static SPEC: Spec = Spec {
     slats_at: 0,
     lever: None,
     gear_rate: 1.0 / 6.0,
+    electric_actuators: true,
     // 163 kt indicated; flutter sets in past 185.
     vne: 83.9,
     mmo: 0.0,
@@ -238,6 +239,9 @@ pub static SPEC: Spec = Spec {
         fric0: 15.0,
         fric1: 35.0,
         blade_break_y: PROP_HUB.y + 0.42,
+        // The propeller lever coarsens the blades below full forward,
+        // holding 1800 to 2700 rpm; fully forward it is the fixed fine pitch.
+        governor: Some(Governor { rpm: [1800.0, 2700.0], at_full: false, coarse_max: 2.0, ct: 0.3, cp: 1.0, j: 0.2, rate: 0.08 }),
     }),
     handling: Handling {
         q_ref: 2200.0,

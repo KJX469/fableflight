@@ -148,6 +148,7 @@ pub const ACTIONS: &[Action] = &[
     act("tail_view", KeyCode::F6),
     act("hud", KeyCode::KeyH),
     act("minimap", KeyCode::Backquote),
+    act("full_map", KeyCode::KeyJ),
     act("goto", KeyCode::KeyG),
     act("respawn", KeyCode::KeyR),
     act("pause", KeyCode::KeyP),
