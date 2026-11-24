@@ -4799,13 +4799,19 @@ mod tests {
         let dt = 1.0 / 180.0;
         let (mut lifted, mut fifty, mut t) = (None, None, 0.0);
         let start = p.pos;
+        let f0 = p.forward();
         let h0 = geo::pos_to_lla(p.pos).2;
         let mut max_rpm: f64 = 0.0;
         while t < 60.0 {
             let pitch_deg = (p.forward().dot(p.pos.normalize())).asin().to_degrees();
             // Rotate at 70 KIAS, then hold 8 degrees nose up.
             let pitch = if p.ias() * KT > 70.0 { ((8.0 - pitch_deg) * 0.15 - p.omega.x * 0.3).clamp(-1.0, 1.0) } else { 0.0 };
-            let c = Controls { throttle: 1.0, pitch, ..Default::default() };
+            // Right rudder holds the heading against the slipstream and the
+            // propeller's torque, and the wings are held level in the air, as
+            // the pilot does at full power (the strips model both).
+            let yaw = (f0.cross(p.forward()).dot(p.pos.normalize()) * 3.0 + p.omega.y * 1.5).clamp(-1.0, 1.0);
+            let roll = if p.on_ground { 0.0 } else { (p.right().dot(p.pos.normalize()) * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0) };
+            let c = Controls { throttle: 1.0, pitch, roll, yaw, ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             max_rpm = max_rpm.max(rpm(&p));
             let h = geo::pos_to_lla(p.pos).2 - h0;

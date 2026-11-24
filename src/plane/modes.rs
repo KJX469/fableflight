@@ -282,6 +282,11 @@ fn handling_of_a_robin_dr400() {
 }
 
 #[test]
+fn handling_of_a_bonanza() {
+    check("A36 at 150 kt, 1800 m", &crate::aircraft::bonanza::SPEC, 1800.0, 77.0, "light-aircraft values as the C172's; firmer in pitch, crisp in roll");
+}
+
+#[test]
 fn handling_of_a_747() {
     let h = 10_668.0;
     check("747 at M0.84, FL350", &b747::SPEC, h, 0.84 * sound_speed(h), "Heffley & Jewell: short period ~7 s ζ ~0.35 | phugoid ~90-100 s ζ ~0.05 | Dutch roll ~5-6 s, ζ ~0.05-0.1 without the yaw dampers (on here) | roll ~10-20°/s");
