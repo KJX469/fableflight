@@ -124,8 +124,14 @@ pub struct Jet {
 fn lapse_family(bpr: f64, wet: bool, th0: f64, d0: f64, m: f64, tr: f64) -> f64 {
     let over = (th0 - tr).max(0.0);
     let sm = m.max(0.0).sqrt();
-    // high bypass (no afterburner: wet is dry)
-    let hi = d0 * (1.0 - 0.49 * sm - 3.0 * over / (1.5 + m));
+    // high bypass (no afterburner: wet is dry). Mattingly's 0.49 is for a
+    // bypass ratio near 8; the ram drag behind the √M term is a smaller part
+    // of a hotter, faster jet's thrust, so it shrinks with the bypass ratio,
+    // down to none in his mixed-flow family. As (BPR/8)^¾ (an estimate, set
+    // between a JT9D's take-off lapse and a light G650 still climbing at
+    // FL510): 0.34 at 5, 0.31 at 4.35.
+    let k_ram = 0.49 * (bpr / 8.0).clamp(0.0, 1.0).powf(0.75);
+    let hi = d0 * (1.0 - k_ram * sm - 3.0 * over / (1.5 + m));
     // low bypass, mixed flow: dry normalised by its static 0.6 of the wet
     let lo = if wet { d0 * (1.0 - 3.5 * over / th0) } else { d0 * (1.0 - 3.8 * over / th0) };
     // turbojet: dry normalised by its static 0.8 (and its static 1 - 0.1·0)
@@ -383,9 +389,10 @@ mod tests {
     fn high_bypass_lapses_like_an_airliners() {
         let mut j = fan();
         j.settle(1.0);
-        // Take-off roll at 150 kt: high-bypass fans lose about 20–25% by then.
+        // Take-off roll at 150 kt: a bypass-5 fan loses some 12–25% by then
+        // (more the higher its bypass ratio).
         let roll = run(&mut j, 1.0, false, Ambient::isa(0.0, 0.0, 77.0), 2.0).thrust / 206_800.0;
-        assert!((0.72..0.86).contains(&roll), "{roll}");
+        assert!((0.75..0.88).contains(&roll), "{roll}");
         // Max climb/cruise at 35,000 ft, M 0.85: about 22–27% of static (JT9D: ~11,000 lbf available).
         let a = Ambient::isa(10_668.0, 0.0, 0.0);
         let a = Ambient { v: 0.85 * a.sound(), mach: 0.85, ..a };
