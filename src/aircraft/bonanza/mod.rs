@@ -403,7 +403,7 @@ pub static SPEC: Spec = Spec {
         cowl_flaps: true,
         prop_d: 2.032,
         blades: 3,
-        chord: 0.062,
+        chord: 0.056,
         pitch: crate::propulsion::prop::Pitch::Constant { fine: 14.0, coarse: 34.0, rpm: [1800.0, 2700.0], feather: 0.0 },
         prop_i: 4.2,
         fric0: 46.0,

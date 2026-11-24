@@ -152,18 +152,7 @@ pub fn measure_in(spec: &'static Spec, alt: f64, speed: f64, cfg: Option<u8>) ->
     // Dutch roll: a one-second rudder pulse, hands and feet off.
     let (mut p, w) = trimmed(spec, alt, speed);
     let r = record(&mut p, &w, 30.0, |t, _| Controls { yaw: if t < 1.0 { 0.6 } else { 0.0 }, ..Default::default() }, |p| p.omega.y);
-    // (Hands off after the pulse it may settle into a gentle turn, the spiral
-    // mode: take out that slow drift, a running mean over 6 s, so that only
-    // the wobble is fitted.)
-    let r = &r[(1.0 / DT) as usize..];
-    let half = (3.0 / DT) as usize;
-    let hp: Vec<f64> = (0..r.len())
-        .map(|i| {
-            let (a, b) = (i.saturating_sub(half), (i + half).min(r.len() - 1));
-            r[i] - r[a..=b].iter().sum::<f64>() / (b - a + 1) as f64
-        })
-        .collect();
-    let dutch = fit_osc(&hp, DT);
+    let dutch = fit_osc(&r[(1.0 / DT) as usize..], DT);
 
     // Roll: full aileron from wings level.
     let (mut p, w) = trimmed(spec, alt, speed);

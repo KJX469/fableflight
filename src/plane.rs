@@ -1885,6 +1885,8 @@ impl Plane {
     /// slipstream and P-factor are balanced and it flies straight hands off.
     /// Slower and at more power it then needs right rudder, as a real one does.
     fn rig_for_cruise(&mut self) {
+        // (The power that holds the cruise level, worked out while the strips are there.)
+        let cruise_throttle = if matches!(self.spec.engine, Engine::Piston(_)) && self.airframe.is_some() { self.throttle_for(self.spec.cruise, 1500.0, 0.0, 0.0, 0.0) } else { 0.75 };
         let Some(af) = self.airframe.take() else { return };
         let spec = self.spec;
         if let Engine::Piston(_) = &spec.engine {
@@ -1892,9 +1894,10 @@ impl Plane {
             let rho = density(h);
             let alpha = self.alpha_level(v, rho, 0.0);
             let vb = DVec3::new(0.0, -v * alpha.sin(), -v * alpha.cos());
-            // The engines at cruise power: their torque, P-factor and slipstream.
+            // The engines at the power that holds the cruise: their torque,
+            // P-factor and slipstream.
             let mut lv = self.levers(false, false);
-            (lv.throttle, lv.auto_mixture) = (0.75, true);
+            (lv.throttle, lv.auto_mixture) = (cruise_throttle, true);
             let fl = self.flight(vb, DVec3::ZERO, h);
             let (mut thrust, mut em) = (0.0, DVec3::ZERO);
             for u in &self.engines {
@@ -4941,7 +4944,11 @@ mod tests {
             let pitch_deg = (p.forward().dot(p.pos.normalize())).asin().to_degrees();
             // Rotate at 70 KIAS, then hold 8 degrees nose up.
             let pitch = if p.ias() * KT > 70.0 { ((8.0 - pitch_deg) * 0.15 - p.omega.x * 0.3).clamp(-1.0, 1.0) } else { 0.0 };
-            let c = Controls { throttle: 1.0, pitch, ..Default::default() };
+            // Held straight with the rudder (the propeller swings it left on the
+            // roll, as it does in the aeroplane) and the wings level once off.
+            let yaw = (p.omega.y * 3.0).clamp(-1.0, 1.0);
+            let roll = if p.on_ground { 0.0 } else { (p.right().dot(p.pos.normalize()) * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0) };
+            let c = Controls { throttle: 1.0, pitch, yaw, roll, ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             max_rpm = max_rpm.max(rpm(&p));
             let h = geo::pos_to_lla(p.pos).2 - h0;

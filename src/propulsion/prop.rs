@@ -73,7 +73,7 @@ fn section(a: f64) -> (f64, f64) {
     let plate_cd = 0.03 + 1.8 * a.sin().powi(2);
     let k = super::smooth(stall, stall + 8.0_f64.to_radians(), a.abs());
     let cl_att = if a > stall { lin.min(1.25) } else if a < -stall + a0 { lin.max(-0.9) } else { lin };
-    let cd_att = 0.011 + 0.008 * (cl_att - 0.4).powi(2);
+    let cd_att = 0.009 + 0.008 * (cl_att - 0.4).powi(2);
     (cl_att * (1.0 - k) + plate_cl * k, cd_att * (1.0 - k) + plate_cd * k)
 }
 
