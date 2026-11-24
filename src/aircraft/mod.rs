@@ -11,6 +11,7 @@
 // 3.14 m, -6.28 m) that trip clippy::approx_constant.
 #![allow(clippy::approx_constant)]
 pub mod b747;
+pub mod bonanza;
 pub mod c172;
 pub mod concorde;
 pub mod dr400;
@@ -105,7 +106,7 @@ pub fn animated_hotspots(controls: &[(Hotspot, Option<usize>)], pose: &[glam::Ma
 }
 
 /// The types built into the game, in the order the menu lists them.
-pub static BUILTIN: [&Spec; 10] = [&c172::SPEC, &dr400::SPEC, &b747::SPEC, &fa18::SPEC, &f4::SPEC, &f22::SPEC, &starship::SPEC, &concorde::SPEC, &sr71::SPEC, &g650::SPEC];
+pub static BUILTIN: [&Spec; 11] = [&c172::SPEC, &dr400::SPEC, &bonanza::SPEC, &b747::SPEC, &fa18::SPEC, &f4::SPEC, &f22::SPEC, &starship::SPEC, &concorde::SPEC, &sr71::SPEC, &g650::SPEC];
 
 /// Types added while the game runs: JSBSim aircraft the player downloaded
 /// (see hangar.rs), each flying with a stand-in from `BUILTIN` as its body.
@@ -499,6 +500,7 @@ pub struct Livery {
 pub fn liveries(spec: &Spec) -> &'static [Livery] {
     if std::ptr::eq(spec, &c172::SPEC) { c172::LIVERIES }
     else if std::ptr::eq(spec, &dr400::SPEC) { dr400::LIVERIES }
+    else if std::ptr::eq(spec, &bonanza::SPEC) { bonanza::LIVERIES }
     else if std::ptr::eq(spec, &b747::SPEC) { b747::LIVERIES }
     else if std::ptr::eq(spec, &g650::SPEC) { g650::LIVERIES }
     else { &[] }
@@ -668,6 +670,9 @@ pub struct Spec {
     pub lever: Option<Lever>,
     /// how fast the gear goes up or down (fraction per second; 0: fixed gear)
     pub gear_rate: f64,
+    /// the flaps and gear run on electric motors: without power on the bus
+    /// (master off, battery flat and no alternator) they stay where they are
+    pub electric_actuators: bool,
     /// never-exceed speed (m/s indicated) and Mach limit (0: none); flutter sets in at `flutter_v`
     pub vne: f64,
     pub mmo: f64,

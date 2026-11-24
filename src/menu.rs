@@ -625,6 +625,7 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("Mouse wheel", "camera distance / cockpit zoom"),
         ("H", "hide / show the HUD"),
         ("`", "hide / show the minimap"),
+        ("J", "full-size map: drag to move, wheel to zoom"),
         ("F12", "screenshot"),
     ]),
     ("WORLD", &[

@@ -146,6 +146,10 @@ struct Globals {
   // det_mean: rgb = 1 / max(albedo mean, 0.02), w = cavity mean; det_hmean = height mean (4 per vec4).
   det_mean: array<vec4f, 16>,
   det_hmean: array<vec4f, 4>,
+  // Apron floodlights (world.rs `flood_globals`), eight, two each: lamp
+  // (camera-relative) + intensity (0 = none, and none after it); beam
+  // direction + cosine of its half-angle.
+  flood: array<vec4f, 16>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -2469,7 +2473,28 @@ fn env_reflect(P: vec3f, R: vec3f, upn: vec3f, clouds: bool) -> vec3f {
 // Light of a fire: a glowing ball of radius light_pos.w whose light falls off
 // with the square of the distance beyond it.
 fn point_light(P: vec3f, N: vec3f) -> vec3f {
-  return fire_light(P, N) + spot_light(P, N);
+  return fire_light(P, N) + spot_light(P, N) + flood_light(P, N);
+}
+// Apron floodlights on their masts (G.flood): wide beams aimed down at the
+// apron, bright pools under each mast fading into the dark beyond, falling
+// off with the square of the distance. No shadows: what stands under them is
+// lit where it faces the mast.
+fn flood_light(P: vec3f, N: vec3f) -> vec3f {
+  var c = 0.0;
+  for (var i = 0; i < 8; i++) {
+    let s = G.flood[2 * i];
+    if (s.w <= 0.0) { break; }
+    let b = G.flood[2 * i + 1];
+    let d = s.xyz - P;
+    let r2 = max(dot(d, d), 25.0);
+    let l = d * inverseSqrt(r2);
+    let ca = dot(-l, b.xyz);
+    if (ca <= b.w) { continue; }
+    let x = (ca - b.w) / (1.0 - b.w);
+    let beam = x * x * (3.0 - 2.0 * x) * (0.4 + 0.6 * x);
+    c += s.w * beam * max(dot(N, l), 0.0) / r2 * exp(-sqrt(r2) * 2.5e-5 * max(G.weather.w, 0.2));
+  }
+  return vec3f(1.0, 0.88, 0.70) * c;
 }
 // The one burning light (a crash's fire, the afterburners).
 fn fire_light(P: vec3f, N: vec3f) -> vec3f {

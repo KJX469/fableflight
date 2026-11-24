@@ -24,6 +24,9 @@ pub(crate) fn msaa() -> u32 {
     MSAA_N.load(std::sync::atomic::Ordering::Relaxed)
 }
 const MAX_INST: usize = 16384;
+/// scenery instances drawn in a frame, and materials in all the packs together
+const MAX_SCENERY: usize = 8192;
+const SC_MATS: usize = 128;
 const MAX_FALL: usize = 4096;
 /// trees and undergrowth close enough to the camera for their leaf cards
 pub const MAX_NEAR: usize = 20000;
@@ -238,6 +241,10 @@ pub struct Globals {
     /// rgb = 1 / max(albedo mean, 0.02), w = cavity mean; det_hmean = height mean (4 per vec4)
     pub det_mean: [[f32; 4]; 16],
     pub det_hmean: [[f32; 4]; 4],
+    /// apron floodlights lighting the ground and what stands on it (common.wgsl
+    /// `flood_light`), eight, two each: camera-relative lamp + intensity (0 =
+    /// none, and none after it); beam direction + cosine of its half-angle
+    pub flood: [[f32; 4]; 16],
 }
 
 /// Raindrops drawn around the camera in rain (as many as the rain is heavy show).
@@ -1048,6 +1055,8 @@ pub struct Frame<'a> {
     pub objs: Vec<DrawObj>,
     /// (mesh, instance) for cars, rubble, rocks
     pub insts: Vec<(u32, Inst)>,
+    /// (mesh, instance) of the hand-made airport scenery (scenery.rs)
+    pub scenery: Vec<(u32, Inst)>,
     /// (tree mesh, instance) for trees that have been knocked loose, camera-relative
     pub fall: Vec<(u32, TreeInst)>,
     /// trees (for their leaf cards) and undergrowth near the camera, relative to their tiles
@@ -1221,6 +1230,14 @@ pub struct Renderer {
     fall_buf: wgpu::Buffer,
     tree_lib: Option<MeshLib>,
     inst_lib: Option<MeshLib>,
+    /// hand-made airport scenery (scenery.rs): pipelines, its materials and
+    /// textures (group 1), its meshes and this frame's instances
+    p_scenery: wgpu::RenderPipeline,
+    p_scenery_shadow: wgpu::RenderPipeline,
+    l_scenery: wgpu::BindGroupLayout,
+    scenery_buf: wgpu::Buffer,
+    scenery_lib: Option<MeshLib>,
+    bg_scenery: Option<wgpu::BindGroup>,
     l_tile: wgpu::BindGroupLayout,
     l_build: wgpu::BindGroupLayout,
     l_comp_cls: wgpu::BindGroupLayout,
@@ -1596,6 +1613,45 @@ const PAINT_UB: u64 = 112;
 fn paint_box(paint: Option<&crate::aircraft::Paint>) -> [f32; 8] {
     let Some(p) = paint else { return [0.0; 8] };
     [p.span as f32, p.length as f32, (p.centre[0] + p.length * 0.5) as f32, (p.span * 0.5 - p.centre[1]) as f32, p.views as f32, p.relief, p.sheen, 0.0]
+}
+
+/// A texture array from square RGBA8 pictures, with its mip chain (each
+/// texel of a level the mean of the four under it).
+fn layer_texture(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, size: u32, layers: &[Vec<u8>], format: wgpu::TextureFormat) -> wgpu::TextureView {
+    let mips = 32 - size.leading_zeros();
+    let t = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: layers.len() as u32 },
+        mip_level_count: mips,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (layer, px) in layers.iter().enumerate() {
+        let (mut cur, mut w) = (px.clone(), size);
+        for level in 0..mips {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &t, mip_level: level, origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 }, aspect: wgpu::TextureAspect::All },
+                &cur,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(w) },
+                wgpu::Extent3d { width: w, height: w, depth_or_array_layers: 1 },
+            );
+            let nw = (w / 2).max(1);
+            let mut next = vec![0u8; (nw * nw * 4) as usize];
+            for y in 0..nw {
+                for x in 0..nw {
+                    for c in 0..4 {
+                        let s = |dx: u32, dy: u32| cur[(((y * 2 + dy).min(w - 1) * w + (x * 2 + dx).min(w - 1)) * 4 + c) as usize] as u32;
+                        next[((y * nw + x) * 4 + c) as usize] = ((s(0, 0) + s(1, 0) + s(0, 1) + s(1, 1) + 2) / 4) as u8;
+                    }
+                }
+            }
+            (cur, w) = (next, nw);
+        }
+    }
+    t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() })
 }
 
 /// An aircraft's paint (`aircraft::Paint`, e.g. the Hornet's
@@ -2302,6 +2358,7 @@ impl Renderer {
         });
         let l_obj = layout("obj", &[ub_entry(0, true, std::mem::size_of::<ObjU>() as u64), tex_entry(1, wgpu::TextureViewDimension::D2Array, false), ub_entry(2, false, PAINT_UB), ub_entry(3, false, font_ub.size())]);
         let l_glass = layout("glass", &[tex_entry(1, d2, false), tex_entry(2, d2, true)]);
+        let l_scenery = layout("scenery", &[ub_entry(0, false, SC_MATS as u64 * 64), tex_entry(1, wgpu::TextureViewDimension::D2Array, false), tex_entry(2, wgpu::TextureViewDimension::D2Array, false)]);
         let ms_entry = |binding, depth| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -2489,7 +2546,7 @@ impl Renderer {
         let (
             (p_cshadow_in, p_cshadow_out, p_cshadow_in_plain, p_cshadow_out_plain, p_cshadow_mix, (p_ap_build, p_sky_build, p_cloud_refl, p_cloud_refl_plain), (p_comp_cls, p_comp_sky, p_comp_opaque, p_comp_glass, p_comp_water, p_comp_edge, p_composite, p_composite_edge), p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_temporal, p_cloud_apply),
             (p_terrain, p_terrain_far, p_terrain_water, p_terrain_tess, p_terrain_cells, p_terrain_photo, p_terrain_tess_photo, p_terrain_cells_photo, p_build, p_build_whole, p_build_shadow, p_photo, p_skin, p_photo_shadow, p_photo_shadow_fast, p_photo_mask, p_water_top, p_shore_cover),
-            (p_road, p_field, p_lights, p_lamp_top, p_rain, p_bolt, p_veil, p_contrails, p_tree, imp, p_tree_near, p_tree_shadow, p_tree_shadow_fixed, p_card, p_inst, p_inst_shadow),
+            (p_road, p_field, p_lights, p_lamp_top, p_rain, p_bolt, p_veil, p_contrails, p_tree, imp, p_tree_near, p_tree_shadow, p_tree_shadow_fixed, p_card, p_inst, p_inst_shadow, p_scenery, p_scenery_shadow),
             (p_trans, p_ms, p_sky, p_gtao, p_ao_blur, p_taa, p_down, p_up, p_final, p_final_taa, p_blit, p_particles, p_psim, p_vol, p_dres),
         ) = std::thread::scope(|s| {
 
@@ -2743,8 +2800,14 @@ impl Renderer {
                 let p_card = geom("leaf cards", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 3);
                 let p_inst = geom("inst", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 0);
                 let p_inst_shadow = geom("inst shadow", None, &m_inst, &[vb(40, false, &A_MESH), vb(80, true, &A_INST)], 1);
+                // Scenery vertex: position, normal and tangent (signed bytes), uv (m), material.
+                const A_SCENERY: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Snorm8x4, 8 => Float32x2, 9 => Uint32];
+                let m_scenery = module("scenery", include_str!("shaders/scenery.wgsl"));
+                let p_scenery = geom("scenery", Some(&l_scenery), &m_scenery, &[vb(32, false, &A_SCENERY), vb(80, true, &A_INST)], 0);
+                // (mode 4: the shadow with its fragment stage, for the fence's cut-out wires)
+                let p_scenery_shadow = geom("scenery shadow", Some(&l_scenery), &m_scenery, &[vb(32, false, &A_SCENERY), vb(80, true, &A_INST)], 4);
                 crate::progress::step("shaders-part");
-                (p_road, p_field, p_lights, p_lamp_top, p_rain, p_bolt, p_veil, p_contrails, p_tree, imp, p_tree_near, p_tree_shadow, p_tree_shadow_fixed, p_card, p_inst, p_inst_shadow)
+                (p_road, p_field, p_lights, p_lamp_top, p_rain, p_bolt, p_veil, p_contrails, p_tree, imp, p_tree_near, p_tree_shadow, p_tree_shadow_fixed, p_card, p_inst, p_inst_shadow, p_scenery, p_scenery_shadow)
             });
 
             let p_trans = full("trans", &pl0, &m_lut, "fs_trans", HDR, None);
@@ -2865,6 +2928,7 @@ impl Renderer {
         let dynbuf = |label: &str, size: u64| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let (inst_buf, fall_buf) = (dynbuf("instances", MAX_INST as u64 * 80), dynbuf("loose trees", MAX_FALL as u64 * 36));
         let near_buf = dynbuf("near trees", MAX_NEAR as u64 * 36);
+        let scenery_buf = dynbuf("scenery instances", MAX_SCENERY as u64 * 80);
         let dyn_lights = dynbuf("aircraft lights", MAX_DYN_LIGHTS as u64 * 40);
         let bolt_buf = dynbuf("lightning", crate::storm::MAX_SEGS as u64 * 32);
         let contrail_nodes = d.create_buffer(&wgpu::BufferDescriptor {
@@ -2949,6 +3013,7 @@ impl Renderer {
         Ok(Self {
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_rain, p_veil, p_bolt, bolt_buf, p_contrails, bg_contrails, contrail_nodes, contrail_segs, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
+            p_scenery, p_scenery_shadow, l_scenery, scenery_buf, scenery_lib: None, bg_scenery: None,
             gpu_timer: crate::gputime::GpuTimer::new(&device, &queue),
             frame_clock: crate::gputime::FrameClock::new(&device, &queue),
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_comp_cls, l_comp_main, l_comp_edge, l_comp_globe, l_hiz, ap_l, ap_t, cloud_refl, bg_atmlut, bg_comp_sky, p_hiz_build, p_ap_build, p_sky_build, p_cloud_refl, p_cloud_refl_plain, l_cloud, l_cloud_storm, l_cloud_rain, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
@@ -3293,6 +3358,50 @@ impl Renderer {
     /// Models for instanced solids (cars, rubble, rocks).
     pub fn set_inst_meshes(&mut self, meshes: &[(Vec<MeshVertex>, Vec<u32>)]) {
         self.inst_lib = Some(self.mesh_lib(meshes));
+    }
+
+    /// The hand-made airport scenery (scenery.rs): every pack's meshes in one
+    /// library (in pack order, as `Pack::mesh_base` counts them), their
+    /// materials and texture layers.
+    pub fn set_scenery(&mut self, packs: &[crate::scenery::Pack]) {
+        let mut meshes = Vec::new();
+        let mut mats: Vec<crate::scenery::SceneryMat> = Vec::new();
+        let size = packs.iter().map(|p| p.tex_size).max().unwrap_or(1).max(1);
+        let (mut base, mut nrm): (Vec<Vec<u8>>, Vec<Vec<u8>>) = (Vec::new(), Vec::new());
+        for p in packs {
+            let (mat0, layer0) = (mats.len() as u32, base.len() as f32);
+            for (b, n) in &p.layers {
+                let fit = |px: &Vec<u8>| if p.tex_size == size { px.clone() } else { image::imageops::resize(&image::RgbaImage::from_raw(p.tex_size, p.tex_size, px.clone()).unwrap(), size, size, image::imageops::FilterType::Triangle).into_raw() };
+                base.push(fit(b));
+                nrm.push(fit(n));
+            }
+            mats.extend(p.mats.iter().map(|m| {
+                let mut m = *m;
+                if m.p[3] >= 0.0 {
+                    m.p[3] += layer0;
+                }
+                m
+            }));
+            for m in &p.meshes {
+                let verts = m.verts.iter().map(|v| crate::scenery::SceneryVertex { mat: v.mat + mat0, ..*v }).collect::<Vec<_>>();
+                meshes.push((verts, m.idx.clone()));
+            }
+        }
+        if meshes.is_empty() {
+            return;
+        }
+        assert!(mats.len() <= SC_MATS, "scenery: {} materials, the shader holds {SC_MATS}", mats.len());
+        if base.is_empty() {
+            base.push(vec![255; (size * size * 4) as usize]);
+            nrm.push([128u8, 128, 200, 0].repeat((size * size) as usize));
+        }
+        mats.resize(SC_MATS, crate::scenery::SceneryMat::zeroed());
+        let d = &self.device;
+        let ub = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("scenery materials"), contents: bytemuck::cast_slice(&mats), usage: wgpu::BufferUsages::UNIFORM });
+        let tb = layer_texture(d, &self.queue, "scenery base", size, &base, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let tn = layer_texture(d, &self.queue, "scenery normal", size, &nrm, wgpu::TextureFormat::Rgba8Unorm);
+        self.bg_scenery = Some(d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("scenery"), layout: &self.l_scenery, entries: &[buf_res(0, &ub, SC_MATS as u64 * 64), tex_res(1, &tb), tex_res(2, &tn)] }));
+        self.scenery_lib = Some(self.mesh_lib(&meshes));
     }
 
     /// The paint of the aircraft being flown (none: `None`): only its pictures are on the GPU.
@@ -3723,6 +3832,19 @@ impl Renderer {
             q.write_buffer(&self.inst_buf, 0, bytemuck::cast_slice(&data));
             inst_ranges = ranges;
         }
+        let mut scenery_ranges = Vec::new();
+        if let Some(lib) = &self.scenery_lib {
+            let d2 = |i: &Inst| i.m[0][3] * i.m[0][3] + i.m[1][3] * i.m[1][3] + i.m[2][3] * i.m[2][3];
+            f.scenery.sort_by(|a, b| d2(&a.1).total_cmp(&d2(&b.1)));
+            let n = f.scenery.len().min(MAX_SCENERY);
+            let (order, ranges) = group(lib.ranges.len(), &mut f.scenery.iter().take(n).map(|i| i.0));
+            let mut data = vec![Inst::zeroed(); n];
+            for (k, (_, inst)) in f.scenery.iter().take(n).enumerate() {
+                data[order[k] as usize] = *inst;
+            }
+            q.write_buffer(&self.scenery_buf, 0, bytemuck::cast_slice(&data));
+            scenery_ranges = ranges;
+        }
         let mut fall_ranges = Vec::new();
         if let Some(lib) = &self.tree_lib {
             let n = f.fall.len().min(MAX_FALL);
@@ -4105,6 +4227,19 @@ impl Renderer {
                     }
                 }
                 rmark(rp, lab[3]);
+            }
+            if let (Some(lib), Some(bg)) = (self.scenery_lib.as_ref().filter(|_| part & 2 != 0), self.bg_scenery.as_ref()) {
+                rp.set_pipeline(if shadow { &self.p_scenery_shadow } else { &self.p_scenery });
+                rp.set_bind_group(1, bg, &[]);
+                rp.set_vertex_buffer(0, lib.vbuf.slice(..));
+                rp.set_vertex_buffer(1, self.scenery_buf.slice(..));
+                rp.set_index_buffer(lib.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                for (k, r) in scenery_ranges.iter().enumerate() {
+                    if r.1 > r.0 {
+                        let (first, count, base) = lib.ranges[k];
+                        rp.draw_indexed(first..first + count, base, r.0..r.1);
+                    }
+                }
             }
             // pipeline set last: 0 generic solid, 1 generic cut, 2 fast solid, 3 fast cut.
             let mut cur: Option<u8> = None;

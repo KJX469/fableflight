@@ -811,6 +811,7 @@ pub static SPEC: Spec = Spec {
     slats_at: 0,
     lever: None,
     gear_rate: 1.0 / 8.0,
+    electric_actuators: false,
     // VMO 340 KCAS (300 below 8,000 ft, which cannot be set here), MMO 0.925
     // (TCDS). Flutter sets in 15% past the dive speed, the margin CS 25.629
     // demands (the dive speed an estimate, VMO + 50 kt: 390 kt; it was dived

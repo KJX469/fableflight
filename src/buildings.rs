@@ -2185,15 +2185,25 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
     // building), and would stand on the carriageway. Parts raised well above the
     // ground (an arcade or a bridge building over the street) are left alone.
     let street = crate::roads::surface_mask(&vt, ext, cx.unit_m);
+    // Where a hand-made scenery pack has the buildings (scenery.rs), OSM's give way.
+    let near_pack = crate::scenery::packs().iter().any(|p| p.local_of(cx.lat, cx.lon).length() < 8_000.0);
     for bi in order {
         let b = &vt.buildings[bi];
         let on_street = rels[bi].lo < 3.0 && on_road(&street, &b.rings[0], ext);
-        if !on_street {
-            if let Some(f) = building(&cx, &mut m, &vt.buildings, &rels, bi, &hoods, &landuse) {
-                footprints.push(f);
-                groups.push(sort_group(rels[bi].hi));
-                raster(&mut built, RASTER, ext, &b.rings[..1], 1);
-            }
+        let in_pack = near_pack && {
+            let r = &b.rings[0];
+            let c = r.iter().fold([0.0f32; 2], |a, p| [a[0] + p[0], a[1] + p[1]]);
+            let n = r.len().max(1) as f64;
+            let (la, lo) = id.lat_lon(c[0] as f64 / n / ext as f64, c[1] as f64 / n / ext as f64);
+            crate::scenery::masked(la.to_degrees(), lo.to_degrees())
+        };
+        if !on_street
+            && !in_pack
+            && let Some(f) = building(&cx, &mut m, &vt.buildings, &rels, bi, &hoods, &landuse)
+        {
+            footprints.push(f);
+            groups.push(sort_group(rels[bi].hi));
+            raster(&mut built, RASTER, ext, &b.rings[..1], 1);
         }
     }
     let bld_end = [m.main.len(), m.det.len(), m.fine.len(), m.far.len()];

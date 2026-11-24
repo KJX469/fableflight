@@ -212,6 +212,7 @@ pub static SPEC: Spec = Spec {
     slats_at: 0,
     lever: None,
     gear_rate: 1.0 / 6.0,
+    electric_actuators: true,
     // 163 kt indicated; flutter sets in past 185.
     vne: 83.9,
     mmo: 0.0,

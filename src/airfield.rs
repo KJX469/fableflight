@@ -67,6 +67,11 @@ pub struct FieldMesh {
     pub socks: Vec<Vec3>,
     /// jet bridge head per stand: where the aircraft's door goes (local)
     pub doors: Vec<Option<Vec2>>,
+    /// a hand-made scenery pack's objects, placed (scenery.rs)
+    pub scenery: Vec<crate::scenery::Placed>,
+    /// floodlights that light the ground (common.wgsl `flood_light`): lamp
+    /// (relative to the airfield's centre), beam direction
+    pub floods: Vec<(Vec3, Vec3)>,
 }
 
 struct B<'a> {
@@ -249,7 +254,8 @@ pub fn build(g: &Geo) -> FieldMesh {
     let concrete_apron = concrete_field || apt.kind == 2;
     let any_paved = g.runways.iter().any(|r| r.paved);
     let lit_field = apt.kind >= 1 || g.runways.iter().any(|r| r.lighted);
-    let flood = if apt.kind >= 1 { 1.0 } else { 0.0 };
+    // An even glow over the aprons at night, unless a scenery pack's masts light them.
+    let flood = if apt.kind >= 1 && crate::scenery::for_airport(&apt.ident).is_none() { 1.0 } else { 0.0 };
 
     // ---- aprons: slabs laid along each apron's longest side
     for (ai, a) in g.aprons.iter().enumerate() {
@@ -324,6 +330,48 @@ pub fn build(g: &Geo) -> FieldMesh {
             }
         }
     }
+    // ---- concrete pads a scenery pack has seen on the orthophoto, over the
+    // aprons and the taxilanes across them (drawn after both, and above:
+    // on concrete a taxilane is only its paint), slabs along their own direction
+    if any_paved && let Some(pack) = crate::scenery::for_airport(&apt.ident) {
+        for (pi, gp) in pack.ground.iter().enumerate().filter(|(_, gp)| gp.kind == crate::scenery::G_CONCRETE) {
+            let rings: Vec<Vec<Vec2>> = gp.rings.iter().map(|r| r.iter().map(|p| pack.to_field(g, *p)).collect()).collect();
+            let p0 = rings[0][0];
+            let axis = (pack.to_field(g, gp.rings[0][0] + Vec2::new(gp.axis.cos(), gp.axis.sin()) * 10.0) - p0).normalize_or(Vec2::X);
+            let side = right_of(axis);
+            let seed = (pi as f32 * 0.613).fract();
+            let mut flat: Vec<f64> = Vec::new();
+            let mut holes = Vec::new();
+            let mut pts: Vec<Vec2> = Vec::new();
+            for (k, ring) in rings.iter().enumerate() {
+                if k > 0 {
+                    holes.push(pts.len());
+                }
+                for p in ring {
+                    flat.extend([p.x as f64, p.y as f64]);
+                    pts.push(*p);
+                }
+            }
+            let Ok(tris) = earcutr::earcut(&flat, &holes, 2) else { continue };
+            let mut stack: Vec<[Vec2; 3]> = tris.chunks(3).map(|t| [pts[t[0]], pts[t[1]], pts[t[2]]]).collect();
+            let mut guard = 0;
+            while let Some(t) = stack.pop() {
+                guard += 1;
+                let l = [(t[1] - t[0]).length(), (t[2] - t[1]).length(), (t[0] - t[2]).length()];
+                let k = (0..3).max_by(|x, y| l[*x].total_cmp(&l[*y])).unwrap();
+                if l[k] > 36.0 && guard < 60_000 {
+                    let (p, q, o) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+                    let mid = (p + q) * 0.5;
+                    stack.push([p, mid, o]);
+                    stack.push([mid, q, o]);
+                    continue;
+                }
+                let ids = t.map(|p| b.v(p, LIFT - 0.015, [p.dot(axis), p.dot(side), flood, seed], [1.0, 0.0, 0.0, 0.0], K_APRON));
+                b.m.idx.extend(ids);
+            }
+        }
+    }
+
     for (ri, r) in g.runways.iter().enumerate() {
         if !r.paved {
             continue;
@@ -420,6 +468,14 @@ pub fn build(g: &Geo) -> FieldMesh {
 
     lights(&mut b, lit_field);
     furniture(&mut b);
+    // A hand-made scenery pack (scenery.rs): its objects, and its masts' floodlights.
+    if let Some(pack) = crate::scenery::for_airport(&g.apt().ident) {
+        b.m.scenery = pack.place(g);
+        for (p, lift, d) in pack.flood_lights(g) {
+            b.light(p, lift, 420.0, L_FLOOD, 2, d, -0.3, STEADY);
+            b.m.floods.push((g.rel(p, lift), g.dir3(d).normalize()));
+        }
+    }
     b.m
 }
 
@@ -579,8 +635,10 @@ fn lights(b: &mut B, lit_field: bool) {
 fn furniture(b: &mut B) {
     let g = b.g;
     let apt = g.apt();
+    // What a hand-made scenery pack brings of its own instead (scenery.rs).
+    let pack_flags = crate::scenery::for_airport(&apt.ident).map_or(0, |p| p.flags);
     // Windsocks beside the touchdown end of the main runways.
-    for r in g.runways.iter().take(2) {
+    for r in g.runways.iter().take(if pack_flags & crate::scenery::F_SOCKS != 0 { 0 } else { 2 }) {
         for e in 0..2 {
             let (thr, dir) = r.end(e);
             let spot = [1.0f32, -1.0].iter().map(|sx| thr + dir * (r.len * 0.12).min(260.0) + right_of(dir) * *sx * (r.width * 0.5 + 45.0)).find(|p| !b.paved(*p, 12.0, None));
@@ -620,7 +678,7 @@ fn furniture(b: &mut B) {
         b.m.doors[si] = Some(door - left * 2.6);
     }
     // Floodlight masts round the larger aprons.
-    if apt.kind >= 1 {
+    if apt.kind >= 1 && pack_flags & crate::scenery::F_MASTS == 0 {
         let mut n = 0;
         for a in &g.aprons {
             let r0 = &a[0];

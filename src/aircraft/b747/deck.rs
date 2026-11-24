@@ -2287,7 +2287,7 @@ mod tests {
         let src = format!("{}\n{}\n{}\n{}\n{}\n{}", include_str!("../../shaders/common.wgsl"), include_str!("../../shaders/plane.wgsl"), strings_wgsl(), include_str!("../../shaders/deck747.wgsl"), include_str!("../../shaders/pit18.wgsl"), include_str!("../../shaders/deck650.wgsl"));
         // the generic shader, and each kind's specialised one (render.rs `specialise`).
         let mut all = vec![("plane (generic)".to_string(), src.clone())];
-        all.extend((0..10).map(|k| (format!("plane #{k}"), crate::render::specialise(&src, k))));
+        all.extend((0..11).map(|k| (format!("plane #{k}"), crate::render::specialise(&src, k))));
         assert!(all[1].1.contains("const KIND: u32 = 0u;") && all[1].1.contains("const INSTR: u32 = 0u;"), "specialise found nothing to rewrite");
         for (label, src) in &all {
             let m = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{label}:\n{}", e.emit_to_string(src)));

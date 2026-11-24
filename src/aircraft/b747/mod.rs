@@ -1662,6 +1662,7 @@ pub static SPEC: Spec = Spec {
     slats_at: 1,
     lever: None,
     gear_rate: 1.0 / 16.0,
+    electric_actuators: false,
     // VMO 365 kt, MMO 0.92.
     vne: 365.0 * KT,
     mmo: 0.92,

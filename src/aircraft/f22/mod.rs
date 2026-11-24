@@ -425,6 +425,7 @@ pub static SPEC: Spec = Spec {
     slats_at: 1,
     lever: None,
     gear_rate: 1.0 / 5.0,
+    electric_actuators: false,
     // 800 kt (Mach 1.21 at sea level), Mach 2.25.
     vne: 800.0 * KT,
     mmo: 2.25,

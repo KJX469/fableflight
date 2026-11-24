@@ -234,6 +234,7 @@ pub static SPEC: Spec = Spec {
     lever: None,
     // Fixed gear: it never moves (see `Spec::fixed_gear`).
     gear_rate: 0.0,
+    electric_actuators: false,
     // VNE 308 km/h; flutter past about 185 kt.
     vne: 85.6,
     mmo: 0.0,
