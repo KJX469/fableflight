@@ -63,6 +63,10 @@ pub struct Layer {
     pub layer: u32,
     /// size, range, chroma, contrast: see G.det in common.wgsl.
     pub params: [f32; 4],
+    /// rgb = max(top-mip albedo mean, 0.02), a = top-mip cavity mean (G.det_mean).
+    pub mean: [f32; 4],
+    /// top-mip height mean (G.det_hmean).
+    pub hmean: f32,
     /// rgb = colour ratio * RATIO_SCALE (linear), a = height 0..1.
     pub alb: Vec<u8>,
     /// rg = normal xy (texture space), b = cavity, a = height.
@@ -160,7 +164,35 @@ fn load(fetch: &Fetcher, s: &Spec) -> Result<Layer> {
         nrm[i * 4 + 3] = hb;
         alb[i * 4 + 3] = hb;
     }
-    Ok(Layer { layer: s.layer, params: [s.size, s.range, s.chroma, s.contrast], alb, nrm })
+    let at = mip_top_u8(&alb, n);
+    let nt = mip_top_u8(&nrm, n);
+    let mean = [1.0 / at[0].max(0.02), 1.0 / at[1].max(0.02), 1.0 / at[2].max(0.02), nt[2]];
+    Ok(Layer { layer: s.layer, params: [s.size, s.range, s.chroma, s.contrast], mean, hmean: at[3], alb, nrm })
+}
+
+/// Top (1x1) mip texel of an n x n RGBA8 image, matching detail.wgsl `down`.
+fn mip_top_u8(rgba: &[u8], mut n: usize) -> [f32; 4] {
+    let mut cur = rgba.to_vec();
+    while n > 1 {
+        let m = n / 2;
+        let mut next = vec![0u8; m * m * 4];
+        for y in 0..m {
+            for x in 0..m {
+                let i00 = ((y * 2) * n + x * 2) * 4;
+                let i10 = i00 + 4;
+                let i01 = i00 + n * 4;
+                let i11 = i01 + 4;
+                let o = (y * m + x) * 4;
+                for c in 0..4 {
+                    let sum = cur[i00 + c] as u32 + cur[i10 + c] as u32 + cur[i01 + c] as u32 + cur[i11 + c] as u32;
+                    next[o + c] = (sum as f32 * 0.25).round_ties_even() as u8;
+                }
+            }
+        }
+        cur = next;
+        n = m;
+    }
+    [cur[0] as f32 / 255.0, cur[1] as f32 / 255.0, cur[2] as f32 / 255.0, cur[3] as f32 / 255.0]
 }
 
 fn srgb_to_linear(c: f32) -> f32 {

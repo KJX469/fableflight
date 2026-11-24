@@ -30,6 +30,7 @@
 //! when the player asks for them.
 
 use crate::aircraft::{self, Engine, Origin, Spec};
+use crate::i18n::t;
 use crate::{jsbsim, yasim};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -431,7 +432,7 @@ fn list(agent: &ureq::Agent) -> Result<Vec<Entry>, String> {
                 d
             }
             // (offline: last week's will do)
-            Err(e) => old.ok().filter(|d| !d.is_empty()).ok_or_else(|| format!("could not get FlightGear's aircraft catalogue: {e}"))?,
+            Err(e) => old.ok().filter(|d| !d.is_empty()).ok_or_else(|| t!("hangar.err_catalogue", e = e))?,
         },
     };
     let text = xml_text(&body);
@@ -469,7 +470,7 @@ fn list(agent: &ureq::Agent) -> Result<Vec<Entry>, String> {
         entries.push(Entry { folder, name: t(p, "name"), author: t(p, "author"), size: t(p, "file-size-bytes").parse().unwrap_or(0), md5, urls, revision, id, state: State::Pending, install: Install::No });
     }
     if entries.is_empty() {
-        return Err("the catalogue lists no aircraft".into());
+        return Err(t!("hangar.err_catalogue_empty").into());
     }
     entries.sort_by_key(|e| e.name.to_lowercase());
     Ok(entries)
@@ -589,7 +590,7 @@ fn flatten(
 fn read_set(get: &dyn Fn(&str) -> Option<Vec<u8>>, id: &str, folder: &str) -> Result<SetInfo, String> {
     let file = format!("{id}-set.xml");
     if get(&file).is_none() {
-        return Err(format!("its {file} can't be read"));
+        return Err(t!("hangar.err_file_unreadable", file = file));
     }
     let mut m = HashMap::new();
     let mut seen = std::collections::HashSet::new();
@@ -621,7 +622,7 @@ fn read_entry(agent: &ureq::Agent, folder: &str) -> Result<Info, String> {
         "jsb" => {}
         "yasim" => {
             // One file holds it all.
-            let xml = fetch(&main).map(|d| xml_text(&d)).ok_or_else(|| format!("its YASim file {main} can't be read"))?;
+            let xml = fetch(&main).map(|d| xml_text(&d)).ok_or_else(|| t!("hangar.err_yasim_unreadable", main = main))?;
             let (j, parts) = read_yasim(&xml, &set, folder);
             let mut i = info(&xml, j, &parts, folder, &cat_name, !set.model.is_empty());
             i.author = author;
@@ -636,7 +637,7 @@ fn read_entry(agent: &ureq::Agent, folder: &str) -> Result<Info, String> {
         }
     }
     // The JSBSim file and the files it keeps sections in, then its engines.
-    let xml = fetch(&main).map(|d| xml_text(&d)).ok_or_else(|| format!("its JSBSim file {main} can't be read"))?;
+    let xml = fetch(&main).map(|d| xml_text(&d)).ok_or_else(|| t!("hangar.err_jsbsim_unreadable", main = main))?;
     for f in file_refs(&xml) {
         for p in [f.clone(), format!("Systems/{f}")] {
             if fetch(&p).is_some() {
@@ -665,10 +666,10 @@ fn read_entry(agent: &ureq::Agent, folder: &str) -> Result<Info, String> {
 fn read_yasim(xml: &str, set: &SetInfo, folder: &str) -> (Result<jsbsim::Aircraft, String>, Vec<(Option<Part>, Option<Part>)>) {
     let y = match yasim::Airplane::parse(xml) {
         Ok(y) => y,
-        Err(e) => return (Err(format!("our reader can't read its YASim file: {e}")), Vec::new()),
+        Err(e) => return (Err(t!("hangar.err_yasim_parse", e = e)), Vec::new()),
     };
     if y.engines.contains(&yasim::Engine::Rotor) {
-        return (Err("it flies on rotors (a helicopter or an autogyro): rotors can't be flown yet".into()), Vec::new());
+        return (Err(t!("hangar.err_rotors").into()), Vec::new());
     }
     let part = |kind: &str| Part { kind: kind.to_string(), ..Default::default() };
     let parts = y
@@ -854,13 +855,13 @@ fn fit_aero(j: &jsbsim::Aircraft, kt: f64) -> Result<Aero, String> {
         cd_flap: (cf[1] - c0[1]).max(0.0),
     };
     if !a.cl_a.is_finite() || !(1.0..=9.0).contains(&a.cl_a) {
-        return Err(format!("its lift curve doesn't fit ours (slope {:.2} per radian)", a.cl_a));
+        return Err(t!("hangar.err_lift_curve", a.cl_a));
     }
     if !(0.008..=0.2).contains(&cd0) {
-        return Err(format!("its drag doesn't fit ours (CD0 {cd0:.3})"));
+        return Err(t!("hangar.err_drag", cd0 = cd0));
     }
     if !(0.5..=3.5).contains(&a.cl_max) || a.stall_alpha < 5f64.to_radians() || a.stall_alpha > 44f64.to_radians() {
-        return Err(format!("its stall doesn't fit ours (CL max {:.2} at {:.0}°)", a.cl_max, a.stall_alpha.to_degrees()));
+        return Err(t!("hangar.err_stall", a.cl_max, a.stall_alpha.to_degrees()));
     }
     Ok(a)
 }
@@ -908,24 +909,24 @@ pub struct FgFiles {
 
 pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], folder: &str, name: &str, model: Option<&FgFiles>) -> Result<(Spec, Summary), String> {
     if j.wing_area_ft2 <= 0.0 || j.span_ft <= 0.0 {
-        return Err("its file gives no wing".into());
+        return Err(t!("hangar.err_no_wing").into());
     }
     if parts.is_empty() {
-        return Err("it has no engine: gliders, balloons and the like can't be flown yet".into());
+        return Err(t!("hangar.err_no_engine").into());
     }
     let n = parts.len();
     let (eng, th): (Vec<_>, Vec<_>) = parts.iter().cloned().unzip();
-    let eng: Vec<Part> = eng.into_iter().collect::<Option<_>>().ok_or("one of its engine files is missing")?;
+    let eng: Vec<Part> = eng.into_iter().collect::<Option<_>>().ok_or(t!("hangar.err_engine_file_missing"))?;
     let th: Vec<Option<Part>> = th;
     let kind = |p: &Part, k: &str| p.kind == k;
     if th.iter().flatten().any(|t| kind(t, "rotor")) {
-        return Err("it is a helicopter: rotors can't be flown yet".into());
+        return Err(t!("hangar.err_helicopter").into());
     }
     if eng.iter().any(|e| kind(e, "rocket_engine")) {
-        return Err("it is rocket powered: rockets can't be flown yet".into());
+        return Err(t!("hangar.err_rocket").into());
     }
     if eng.iter().any(|e| kind(e, "electric_engine")) {
-        return Err("electric engines can't be flown yet".into());
+        return Err(t!("hangar.err_electric").into());
     }
     let prop = th.iter().flatten().any(|t| kind(t, "propeller"));
     let augmented = eng.iter().any(|e| e.augmented && e.max > e.mil * 1.05);
@@ -935,11 +936,11 @@ pub(crate) fn fit(j: &jsbsim::Aircraft, parts: &[(Option<Part>, Option<Part>)], 
     let mil: f64 = eng.iter().map(|e| e.mil).sum::<f64>() * 4.448_22;
     let wet: f64 = eng.iter().map(|e| e.max).sum::<f64>() * 4.448_22;
     if prop && hp <= 0.0 || !prop && mil <= 0.0 {
-        return Err("its engines give no power our model can use".into());
+        return Err(t!("hangar.err_no_power").into());
     }
     let mass_half = if j.empty_lbs > 0.0 { (j.empty_lbs + j.points_lbs + 0.5 * j.fuel_cap_lbs) * LB } else { j.weight_lbs * LB };
     if mass_half < 50.0 {
-        return Err("its file gives no mass".into());
+        return Err(t!("hangar.err_no_mass").into());
     }
     let base: &'static Spec = if prop {
         &aircraft::c172::SPEC
@@ -1275,7 +1276,7 @@ fn fetch_to(agent: &ureq::Agent, url: &str, to: &Path, size: u64, set: &dyn Fn(I
         set(Install::Downloading(done, total));
     }
     if total > 0 && done < total {
-        return Err(format!("cut short at {done} of {total} bytes"));
+        return Err(t!("hangar.err_cut_short", done = done, total = total));
     }
     Ok(md5.finish_hex())
 }
@@ -1412,7 +1413,7 @@ fn unpack(zip_path: &Path, to: &Path, folder: &str) -> Result<(), String> {
         n += 1;
     }
     if n == 0 {
-        return Err("the zip is empty".into());
+        return Err(t!("hangar.err_zip_empty").into());
     }
     Ok(())
 }
@@ -1454,7 +1455,7 @@ pub fn load(dir: &Path) -> Result<&'static Spec, String> {
             let (j, parts) = read_yasim(&xml, &set, &folder);
             (j?, parts)
         }
-        f => return Err(format!("it flies on {}, not JSBSim or YASim", if f.is_empty() { "an unknown flight model" } else { f })),
+        f => return Err(t!("hangar.err_other_fdm", if f.is_empty() { t!("hangar.err_unknown_fdm") } else { f })),
     };
     let model = if set.model.is_empty() { None } else { Some(dir.join(&set.model)) }.filter(|p| p.exists());
     let fg = model.map(|m| FgFiles { dir: dir.to_path_buf(), model: m, still: still_of(dir), eye: set.eye });

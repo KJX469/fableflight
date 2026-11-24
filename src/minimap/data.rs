@@ -14,15 +14,14 @@ pub struct Place {
 impl Place {
     /// Resolve at draw time so changing the game language also updates cached tiles.
     pub fn label(&self, lang: crate::i18n::Lang) -> &str {
-        // The tiles carry English and French names only; Korean looks the
-        // English up in the i18n table (a 'static string), and both Korean and
-        // English fall back to the tile's own name when the field is blank.
-        if lang == crate::i18n::Lang::Ko {
-            if let Some(k) = crate::i18n::ko(&self.en) {
-                return k;
-            }
-        }
-        let translated = match lang { crate::i18n::Lang::Fr => &self.fr, _ => &self.en };
+        // The tiles carry English and French names only; the other languages
+        // look the English up in their language file (`text.place.*`), and
+        // all fall back to the tile's own name when the field is blank.
+        let translated: &str = match lang.locale() {
+            "fr" => &self.fr,
+            "en" => &self.en,
+            _ => crate::i18n::tr_en_in(lang, &self.en).filter(|_| !self.en.is_empty()).unwrap_or(&self.en),
+        };
         if translated.is_empty() { &self.name } else { translated }
     }
 
@@ -138,19 +137,19 @@ mod tests {
         }
         let id = TileId::new(3, 4, 2);
         let place = Place::from_feature(&feature, id, 4096.0).unwrap();
-        assert_eq!(place.label(Lang::Fr), "Bruxelles");
-        assert_eq!(place.label(Lang::En), "Brussels");
-        assert_eq!(place.label(Lang::Fr), "Bruxelles");
+        assert_eq!(place.label(Lang::parse("fr").unwrap()), "Bruxelles");
+        assert_eq!(place.label(Lang::EN), "Brussels");
+        assert_eq!(place.label(Lang::parse("fr").unwrap()), "Bruxelles");
         assert_eq!(place.xy, [4.5 / 8.0, 2.5 / 8.0]);
         feature.props.remove("name:en");
         feature.props.insert("name:fr".into(), mvt::Val::Str("  ".into()));
         let place = Place::from_feature(&feature, id, 4096.0).unwrap();
-        assert_eq!(place.label(Lang::En), "Brussel");
-        assert_eq!(place.label(Lang::Fr), "Brussel");
+        assert_eq!(place.label(Lang::EN), "Brussel");
+        assert_eq!(place.label(Lang::parse("fr").unwrap()), "Brussel");
         feature.props.remove("name");
         assert!(Place::from_feature(&feature, id, 4096.0).is_none());
         feature.props.insert("name:en".into(), mvt::Val::Str("Brussels".into()));
-        assert_eq!(Place::from_feature(&feature, id, 4096.0).unwrap().label(Lang::Fr), "Brussels");
+        assert_eq!(Place::from_feature(&feature, id, 4096.0).unwrap().label(Lang::parse("fr").unwrap()), "Brussels");
     }
     #[test]
     fn polygon_preserves_holes() {

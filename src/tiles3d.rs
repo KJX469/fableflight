@@ -319,7 +319,7 @@ pub struct MeshData {
     pub idx: Vec<u32>,
     /// RGBA mip levels: width, height, texels
     pub mips: Vec<(u32, u32, Vec<u8>)>,
-    /// (where the tile sits; read by the tests)
+    /// read by the tests.
     #[cfg_attr(not(test), allow(dead_code))]
     origin: DVec3,
     col: ColMesh,

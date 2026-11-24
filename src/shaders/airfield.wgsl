@@ -40,22 +40,56 @@ fn joints(u: vec2f, a: vec2f, fw: f32) -> f32 {
   return max(band(f.x, w * 2.0, fw), band(f.y, w * 2.0, fw)) * (1.0 - smoothstep(0.02, 0.12, fw));
 }
 
+// Sealed cracks: wobbly lines on a jittered `cell`-metre grid, in some
+// cells only; coverage 0..1, faded out before they would alias.
+fn cracks(u: vec2f, cell: f32, share: f32, fw: f32) -> f32 {
+  let fade = 1.0 - smoothstep(0.03, 0.14, fw);
+  if (fade <= 0.0) { return 0.0; }
+  let w = u / cell + (vec2f(wn(u, 3.1, fw), wn(u + vec2f(31.0, 17.0), 3.7, fw)) - 0.5) * 0.5;
+  let id = floor(w);
+  let f = fract(w) - 0.5;
+  let h = hash2(id + vec2f(7.0, 11.0));
+  let fwc = fw / cell;
+  let along_x = band(f.x, 0.022, fwc) * step(1.0 - share, h);
+  let along_y = band(f.y, 0.022, fwc) * step(1.0 - share * 0.6, fract(h * 7.31));
+  return max(along_x, along_y) * fade;
+}
+
 fn asphalt(loc: vec2f, fw: f32, tone: f32) -> vec3f {
   let n1 = wn(loc, 47.0, fw);
   let n2 = wn(loc, 6.1, fw);
   let n3 = wn(loc, 1.3, fw);
-  return vec3f(tone, tone, tone * 1.03) * (0.72 + 0.3 * n1 + 0.22 * n2 + 0.18 * n3);
+  var c = vec3f(tone, tone, tone * 1.03) * (0.72 + 0.3 * n1 + 0.22 * n2 + 0.18 * n3);
+  // Repairs: rectangles of newer (darker) or older (greyer) asphalt.
+  let pid = floor(loc / vec2f(9.0, 6.5));
+  let ph = hash2(pid + vec2f(5.1, 2.3));
+  let pf = fract(loc / vec2f(9.0, 6.5));
+  let inside = span(pf.x, 0.12, 0.88, fw / 9.0) * span(pf.y, 0.15, 0.85, fw / 6.5);
+  c *= mix(1.0, select(1.13, 0.8, fract(ph * 13.7) > 0.5), inside * step(0.88, ph));
+  // Crack sealant, tar black and a little glossy.
+  c = mix(c, vec3f(0.018, 0.018, 0.02), cracks(loc, 7.0, 0.3, fw) * 0.85);
+  // Oil drips.
+  c *= 1.0 - 0.25 * smoothstep(0.7, 0.86, wn(loc + vec2f(3.0, 29.0), 4.5, fw));
+  return c;
 }
 fn concrete(loc: vec2f, slab: vec2f, size: vec2f, fw: f32) -> vec3f {
   let id = floor(slab / size);
   let h = hash2(id + vec2f(17.0, 3.0));
   let n1 = wn(loc, 33.0, fw);
   let n2 = wn(loc, 2.3, fw);
-  var c = vec3f(0.36, 0.355, 0.335) * (0.8 + 0.18 * h + 0.25 * n1 + 0.12 * n2);
+  // (aged apron concrete reads about 0.58 sRGB on the orthophoto: 0.3 linear)
+  var c = vec3f(0.27, 0.267, 0.254) * (0.84 + 0.14 * h + 0.2 * n1 + 0.1 * n2);
   // Stains and tyre marks.
-  c *= 1.0 - 0.35 * smoothstep(0.66, 0.85, wn(loc + vec2f(41.0, 7.0), 9.0, fw));
-  c *= 1.0 - 0.5 * joints(slab, size, fw);
-  return c;
+  c *= 1.0 - 0.2 * smoothstep(0.7, 0.88, wn(loc + vec2f(41.0, 7.0), 9.0, fw));
+  // Spalled, darker slab edges, and a crack across some slabs.
+  let f = abs(fract(slab / size + 0.5) - 0.5) * size;
+  c *= 1.0 - 0.12 * (1.0 - smoothstep(0.05, 0.3, min(f.x, f.y))) * (1.0 - smoothstep(0.02, 0.1, fw));
+  c = mix(c, c * 0.45, cracks(slab + h * 3.0, size.x, 0.18, fw));
+  // Joints: dark sealant, moss and grass where it has worked loose.
+  let j = joints(slab, size, fw);
+  let moss = smoothstep(0.45, 0.7, wn(loc + vec2f(13.0, 5.0), 3.3, fw));
+  let joint = mix(vec3f(0.035, 0.034, 0.032), vec3f(0.07, 0.09, 0.035), moss);
+  return mix(c, joint, j * 0.85);
 }
 
 const PAINT_W = vec3f(0.62, 0.62, 0.60);

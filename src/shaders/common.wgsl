@@ -15,7 +15,7 @@ struct Globals {
   light_col: vec4f,
   vol_o: vec4f,      // explosion volume corner relative to camera, w cell size
   vol_u: vec4f,      // volume up axis, w = 1 while it holds smoke
-  misc: vec4f,       // near plane, city glow 0..1, water quality, pixel angle
+  misc: vec4f,       // near plane, stops the night exposure is closed down for city lights, water quality, pixel angle
   csm: vec4f,        // world size of a shadow texel in each cascade, w = shadows on
   scorch: array<vec4f, 8>,
   crater: array<vec4f, 8>,  // xyz relative to camera, w radius
@@ -139,6 +139,17 @@ struct Globals {
   // Precomputed lone-cell turrets (5 per cell: tc.xy, rk, ck) and flanking
   // towers (3 per cell: fo.xy, fr, ft) (storm.rs `turrets`).
   storm_turrets: array<vec4f, 128>,
+  // Graphics settings (graphics.rs): x the water's detail (0 plain, 1 full,
+  // 2 full + screen-space reflections), y 1 while the clouds are drawn.
+  lite: vec4f,
+  // Precomputed top-mip means for the ground detail arrays (render.rs GroundMats):
+  // det_mean: rgb = 1 / max(albedo mean, 0.02), w = cavity mean; det_hmean = height mean (4 per vec4).
+  det_mean: array<vec4f, 16>,
+  det_hmean: array<vec4f, 4>,
+  // Apron floodlights (world.rs `flood_globals`), eight, two each: lamp
+  // (camera-relative) + intensity (0 = none, and none after it); beam
+  // direction + cosine of its half-angle.
+  flood: array<vec4f, 16>,
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var t_trans: texture_2d<f32>;
@@ -274,6 +285,7 @@ fn sun_trans(h: f32, mu: f32) -> vec3f {
   let hc = max(h, 0.0);
   let mu_h = -sqrt(hc * (2.0 * rg + hc)) / (rg + hc);
   let vis = smoothstep(mu_h - 0.006, mu_h + 0.006, mu);
+  if (vis <= 0.0) { return vec3f(0.0); }
   return textureSampleLevel(t_trans, s_clamp, trans_uv(hc, mu), 0.0).rgb * vis;
 }
 fn ms_lut(h: f32, mu: f32) -> vec3f {
@@ -289,16 +301,21 @@ struct Scatter { L: vec3f, T: vec3f };
 // Single scattering plus the multi-scatter LUT along a ray segment. oc is the
 // ray origin relative to the planet centre.
 fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -> Scatter {
+  let rg = G.planet.w;
   let sun = G.sun_dir.xyz;
   let c = dot(rd, sun);
   let pr = phase_r(c);
   let pm = phase_m(c, 0.8);
+  let oc_sun = dot(oc, sun);
   let moon = G.moon.xyz;
   let cm = dot(rd, moon);
   let prm = phase_r(cm);
   let pmm = phase_m(cm, 0.8);
+  let oc_moon = dot(oc, moon);
   let mk = MOON_TINT * (G.moon.w / G.sun_dir.w);
   let moon_on = G.moon.w > 0.0;
+  let cs_on = G.cs[4].w >= 0.5 && G.start.x <= 0.0;
+  let cs_top = G.cs[3].y;
   var T = vec3f(1.0);
   var L = vec3f(0.0);
   let len = max(tmax - tmin, 0.0);
@@ -309,20 +326,24 @@ fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -
     let f = f32(i + 1) / f32(steps);
     let tn = tmin + len * f * f;
     let dt = tn - tp;
-    let p = oc + rd * mix(tp, tn, jit);
+    let tm = mix(tp, tn, jit);
+    let p = oc + rd * tm;
     let r = length(p);
-    let h = r - G.planet.w;
-    let mu = dot(p / r, sun);
+    let h = r - rg;
+    let mu = (oc_sun + c * tm) / r;
     let d = atm_density(h);
     let ext = atm_ext(d);
     let sr = RAYLEIGH * d.x;
     let sm = MIE_S * d.y;
     // Air in the shadow of a cloud gets no sunlight (light shafts through the gaps);
     // under a closed deck the light that remains is the deck's dull grey.
-    let cl = cloud_sun(p, false);
     var msl = ms_lut(h, mu);
-    msl = mix(msl, vec3f(luma(msl)), cl.closed * 0.75) * (1.0 - 0.45 * cl.closed);
-    var vis = cl.vis;
+    var vis = 1.0;
+    if (cs_on && h < cs_top) {
+      let cl = cloud_sun_at(p, r, h, false);
+      msl = mix(msl, vec3f(luma(msl)), cl.closed * 0.75) * (1.0 - 0.45 * cl.closed);
+      vis = cl.vis;
+    }
     if (sdark > 0.0) {
       let k = 1.0 - 0.8 * sdark * exp(-mix(tp, tn, 0.5) / 15000.0);
       msl *= k;
@@ -330,7 +351,7 @@ fn atm_march(oc: vec3f, rd: vec3f, tmin: f32, tmax: f32, steps: i32, jit: f32) -
     }
     var S = sun_trans(h, mu) * vis * (sr * pr + vec3f(sm * pm)) + msl * (sr + vec3f(sm));
     if (moon_on) {
-      let mum = dot(p / r, moon);
+      let mum = (oc_moon + cm * tm) / r;
       S += (sun_trans(h, mum) * (sr * prm + vec3f(sm * pmm)) + ms_lut(h, mum) * (sr + vec3f(sm))) * mk;
     }
     let st = exp(-ext * dt);
@@ -1725,7 +1746,8 @@ fn cloud_shape_plain(pp: vec3f, h: f32, ow: vec4f, detail: bool, fine: f32) -> f
 // Storm cell quality tier from Globals.detail.w: 1 Low, 2 Medium, 3 High, 4 Ultra
 // (0 falls back to High so zeroed Globals keep full quality).
 fn storm_tier() -> i32 {
-  return select(i32(G.detail.w + 0.5), 3, G.detail.w < 0.5);
+  let w = abs(G.detail.w); // negative for --still shots
+  return select(i32(w + 0.5), 3, w < 0.5);
 }
 // Pure storm-cell density evaluator (zero ordinary cumulus/stratocumulus/nimbo)
 // for the decoupled storm pass (`clouds.wgsl` `fs_storm`): keeps register
@@ -1846,17 +1868,15 @@ fn cs_fetch(uv: vec2f, layer: i32, hq: bool) -> vec4f {
   return g0.y * (g0.x * textureSampleLevel(t_cshadow, s_clamp, c0, layer, 0.0) + g1.x * textureSampleLevel(t_cshadow, s_clamp, vec2f(c1.x, c0.y), layer, 0.0))
        + g1.y * (g0.x * textureSampleLevel(t_cshadow, s_clamp, vec2f(c0.x, c1.y), layer, 0.0) + g1.x * textureSampleLevel(t_cshadow, s_clamp, c1, layer, 0.0));
 }
-fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
+fn cloud_sun_at(pc: vec3f, r: f32, h: f32, hq: bool) -> CloudSun {
   var o = CloudSun(1.0, 0.0);
   let base = G.cs[3].x;
   let top = G.cs[3].y;
-  let r = length(pc);
-  let h = r - G.planet.w;
   if (G.cs[4].w < 0.5 || G.start.x > 0.0 || h >= top) { return o; }
   // The sun the maps were drawn for (it differs from this frame's by a fraction
   // of a degree while the clock runs fast).
   let sun = G.cs[4].xyz;
-  let mu = dot(pc / r, sun);
+  let mu = dot(pc, sun) / r;
   let R = G.planet.w + base;
   // Exactly along the sun (a low sun's rays cross the base tens of km away): forward
   // to the base from below it, back down to it from inside the layer.
@@ -1890,6 +1910,10 @@ fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
   o.vis = mix(t + (1.0 - t) * 0.22 / (1.0 + 0.12 * od + 0.01 * od * od), 1.0, fade);
   o.closed = v.w * (1.0 - fade) * (1.0 - smoothstep(base, base + 600.0, h));
   return o;
+}
+fn cloud_sun(pc: vec3f, hq: bool) -> CloudSun {
+  let r = length(pc);
+  return cloud_sun_at(pc, r, r - G.planet.w, hq);
 }
 // High cirrus: a thin streaky sheet at CIRRUS_H. Returns optical thickness.
 fn cirrus(pp: vec3f) -> f32 {
@@ -1973,10 +1997,13 @@ fn shadow_at(P: vec3f, N: vec3f) -> f32 {
   return shadow_world(P, N) * plane_shadow(P, N);
 }
 fn shadow_world(P: vec3f, N: vec3f) -> f32 {
+  let cmask = u32(G.lite.w);
+  if (cmask == 0u) { return 1.0; }
   var acc = 0.0;
   var rem = 1.0;
   let texel = 1.0 / f32(textureDimensions(t_shadow).x);
   for (var c = 0; c < 3; c++) {
+    if ((cmask & (1u << u32(c))) == 0u) { continue; }
     let tex = G.csm[c];
     let q = G.shadow_vp[c] * vec4f(P + N * tex * 1.8 + G.sun_dir.xyz * tex * 0.8, 1.0);
     let uv = q.xy * vec2f(0.5, -0.5) + 0.5;
@@ -2001,7 +2028,7 @@ fn crater_field(P: vec3f) -> vec4f {
   var o = vec4f(0.0);
   for (var i = 0; i < 8; i++) {
     let c = G.crater[i];
-    if (c.w <= 0.0) { continue; }
+    if (c.w <= 0.0) { break; }
     let v = P - c.xyz;
     if (abs(v.x) > c.w * 2.0 || abs(v.y) > c.w * 2.0 || abs(v.z) > c.w * 2.0) { continue; }
     let upn = normalize(c.xyz - G.planet.xyz);
@@ -2372,7 +2399,9 @@ fn light_at_nv(P: vec3f) -> Light {
   let upn = pp / r;
   let h = r - G.planet.w;
   let mu = dot(upn, G.sun_dir.xyz);
-  let sun = sun_trans(h, mu) * G.sun_dir.w * cloud_sun(pp, true).vis;
+  let st = sun_trans(h, mu);
+  var sun = st * G.sun_dir.w;
+  if (sun.x + sun.y + sun.z > 0.0) { sun *= cloud_sun_at(pp, r, h, true).vis; }
   // Skylight falls off steeply once the sun is down: about half a decade per
   // 3 degrees of twilight (the exp term), so a street at blue hour is far
   // darker than the glowing sky above it rather than as bright as overcast day.
@@ -2390,11 +2419,11 @@ fn light_at_nv(P: vec3f) -> Light {
   let mum = dot(upn, G.moon.xyz);
   let night = 1.0 - smoothstep(-0.12, 0.02, mu);
   amb += vec3f(0.30, 0.45, 0.85) * 0.16 * smoothstep(-0.1, 0.35, mum) * G.moon.w * mix(1.0, 0.7, G.cloud.x);
-  amb += vec3f(0.0016, 0.0024, 0.0048) * night;
+  amb += vec3f(0.0011, 0.0021, 0.0052) * night;
   // The towns' light sent back down by the haze and the cloud base above.
   var cup = vec3f(0.0);
   if (glow_on()) { cup = city_up(P, 600.0) * (GLOW_GAIN / PI); }
-  amb += cup * (0.012 + 0.05 * clamp(G.cloud.x, 0.0, 1.0));
+  amb += cup * (0.0025 + 0.032 * clamp(G.cloud.x, 0.0, 1.0));
   var sun_s = sun;
   if (G.nimbo[0].w > 0.0) {
     // Under the rain deck: only the flat grey light diffusing through it (the
@@ -2417,7 +2446,7 @@ fn light_at_nv(P: vec3f) -> Light {
 fn env_reflect(P: vec3f, R: vec3f, upn: vec3f, clouds: bool) -> vec3f {
   let ru = dot(R, upn);
   var sky = sky_lut(normalize(R + upn * max(0.015 - ru, 0.0)));
-  if (clouds && ru > 0.02) {
+  if (clouds && ru > 0.02 && G.cloud.x > 0.001 && G.lite.y > 0.5) {
     let pp = P - G.planet.xyz;
     let h = length(pp) - G.planet.w;
     let mid = G.cloud.y + 400.0;
@@ -2444,7 +2473,28 @@ fn env_reflect(P: vec3f, R: vec3f, upn: vec3f, clouds: bool) -> vec3f {
 // Light of a fire: a glowing ball of radius light_pos.w whose light falls off
 // with the square of the distance beyond it.
 fn point_light(P: vec3f, N: vec3f) -> vec3f {
-  return fire_light(P, N) + spot_light(P, N);
+  return fire_light(P, N) + spot_light(P, N) + flood_light(P, N);
+}
+// Apron floodlights on their masts (G.flood): wide beams aimed down at the
+// apron, bright pools under each mast fading into the dark beyond, falling
+// off with the square of the distance. No shadows: what stands under them is
+// lit where it faces the mast.
+fn flood_light(P: vec3f, N: vec3f) -> vec3f {
+  var c = 0.0;
+  for (var i = 0; i < 8; i++) {
+    let s = G.flood[2 * i];
+    if (s.w <= 0.0) { break; }
+    let b = G.flood[2 * i + 1];
+    let d = s.xyz - P;
+    let r2 = max(dot(d, d), 25.0);
+    let l = d * inverseSqrt(r2);
+    let ca = dot(-l, b.xyz);
+    if (ca <= b.w) { continue; }
+    let x = (ca - b.w) / (1.0 - b.w);
+    let beam = x * x * (3.0 - 2.0 * x) * (0.4 + 0.6 * x);
+    c += s.w * beam * max(dot(N, l), 0.0) / r2 * exp(-sqrt(r2) * 2.5e-5 * max(G.weather.w, 0.2));
+  }
+  return vec3f(1.0, 0.88, 0.70) * c;
 }
 // The one burning light (a crash's fire, the afterburners).
 fn fire_light(P: vec3f, N: vec3f) -> vec3f {
@@ -2610,9 +2660,19 @@ fn snow_track_at(P: vec3f, dist: f32, fw: f32) -> vec4f {
 fn shade(P: vec3f, N: vec3f, albedo: vec3f) -> vec3f {
   let l = light_at(P);
   let ndl = max(dot(N, G.sun_dir.xyz), 0.0);
-  let sh = shadow_at(P, N);
+  var sh = 1.0;
+  if (ndl > 0.0 && (l.sun.x + l.sun.y + l.sun.z) > 0.0) { sh = shadow_at(P, N); }
+  return shade_lit(P, N, albedo, l, sh);
+}
+// The same with the light at P (light_at) and its shadow for N (shadow_at)
+// already in hand: both cost texture reads (shadow_at up to 36 compares), and
+// the drivers do not merge a second identical call.
+fn shade_lit(P: vec3f, N: vec3f, albedo: vec3f, l: Light, sh: f32) -> vec3f {
+  let ndl = max(dot(N, G.sun_dir.xyz), 0.0);
   let sky = 0.55 + 0.45 * dot(N, l.upn);
-  let moon = moon_light(l.upn, l.h) * max(dot(N, G.moon.xyz), 0.0);
+  let ndm = max(dot(N, G.moon.xyz), 0.0);
+  var moon = vec3f(0.0);
+  if (ndm > 0.0 && G.moon.w > 0.0) { moon = moon_light(l.upn, l.h) * ndm; }
   // Light bounced off the ground: what keeps walls and overhangs from going
   // flat blue-black in shade.
   let mu = max(dot(l.upn, G.sun_dir.xyz), 0.0);

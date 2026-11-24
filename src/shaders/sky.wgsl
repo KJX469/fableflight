@@ -32,7 +32,7 @@ fn stars(rd: vec3f) -> vec3f {
   let gp = normalize(vec3f(-0.42, 0.55, 0.72));
   let lat = dot(q, gp);
   let band = exp(-lat * lat / 0.03);
-  if (band > 0.01) {
+  if (band > 0.01 && (night_cam() > 0.0 || G.up.w > 15000.0)) {
     let n1 = textureSampleLevel(t_noise, s_repeat, q * 1.7 + vec3f(0.2, 0.5, 0.1), 0.0);
     let n2 = textureSampleLevel(t_noise, s_repeat, q * 6.5 + vec3f(0.7, 0.3, 0.9), 0.0);
     let core = exp(-pow(length(q - normalize(vec3f(0.62, 0.71, -0.33))), 2.0) / 0.35);

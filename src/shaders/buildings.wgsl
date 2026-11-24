@@ -21,7 +21,7 @@ struct VOut {
 };
 struct GOut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f32 };
 
-@vertex fn vs(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) uv: vec2f, @location(3) col: vec4f, @location(4) sty: vec4u, @builtin(instance_index) lod: u32) -> VOut {
+@vertex fn vs(@location(0) pos: vec3f, @location(1) nrm8: vec4f, @location(2) uv: vec2f, @location(3) col: vec4f, @location(4) sty: vec4u, @builtin(instance_index) lod: u32) -> VOut {
   let P = pos + T.offset.xyz;
   // The roof atlas is the satellite image of this map tile, so its texture
   // coordinate is (very nearly) a linear function of position.
@@ -33,7 +33,7 @@ struct GOut { @location(0) c: vec4f, @location(1) n: vec4f, @location(2) amb: f3
   let d = lod_dist(P, lod);
   let l = lod & 7u;
   if ((l == 1u || l == 3u) && d > FAR1 + 250.0) || (l == 2u && d > LOD2_FAR) || (l == 4u && d < FAR0 - 250.0) { clip = vec4f(2.0, 2.0, 2.0, 1.0); }
-  return VOut(clip, P, nrm, uv, col, sty, auv, lod);
+  return VOut(clip, P, nrm8.xyz, uv, col, sty, auv, lod);
 }
 // Distance the levels of detail go by: towers keep theirs out to a multiple of
 // the usual distances (buildings::HCLASS; the draw's instance index carries 4x
@@ -305,12 +305,14 @@ fn shade_building(in: VOut) -> GOut {
   var extra = vec3f(0.0);
   var Nout = N;
   var mirror = 0.0;  // how much of this pixel is a mirror, for screen-space reflections
+  var sh = -1.0;     // shadow_at(in.P, N), once a branch has needed it
   if (kind == 0u) {
     // Facade frame: x along the wall (the way uv.x runs).
     var Tw = cross(l.upn, N);
     Tw = select(G.east.xyz, Tw / max(length(Tw), 1e-4), length(Tw) > 1e-3);
     if (dot(dPx, Tw) * dUx.x + dot(dPy, Tw) * dUy.x < 0.0) { Tw = -Tw; }
-    let fs = facade_shade(in.P, V, N, Tw, in.uv, fw, base, in.sty.y & 15u, seed, wealth, f32(in.sty.w), false);
+    sh = shadow_at(in.P, N);
+    let fs = facade_shade(in.P, V, N, Tw, in.uv, fw, base, in.sty.y & 15u, seed, wealth, f32(in.sty.w), false, l, sh);
     albedo = fs.albedo;
     extra = fs.extra;
     Nout = fs.N;
@@ -345,12 +347,12 @@ fn shade_building(in: VOut) -> GOut {
     if (dot(dPx, Tr) * dUx.x + dot(dPy, Tr) * dUy.x < 0.0) { Tr = -Tr; }
     N = normalize(N - Tr * ro.bend);
     let fspec = mix(vec3f(ro.f0), ro.albedo, ro.metal);
-    let sh = shadow_at(in.P, N);
+    sh = shadow_at(in.P, N);
     extra = l.sun * roof_glint(N, V, fspec, ro.rough) * sh;
     // Smooth sheet mirrors the sky; rough coverings only scatter it, which the ambient term already has.
     let gloss = (1.0 - ro.rough) * (1.0 - ro.rough);
     let Fe = fspec + (1.0 - fspec) * pow(1.0 - max(dot(N, -V), 0.0), 5.0);
-    extra += env_reflect(in.P, reflect(V, N), l.upn, false) * Fe * gloss;
+    if (gloss > 0.0) { extra += env_reflect(in.P, reflect(V, N), l.upn, false) * Fe * gloss; }
     albedo = ro.albedo * (1.0 - 0.75 * ro.metal);
     // Snow on the roof (snow.rs), sliding off the steep ones; it hides the
     // covering's glint and reflections.
@@ -434,6 +436,7 @@ fn shade_building(in: VOut) -> GOut {
       albedo = base * (0.8 + 0.2 * n);
     }
   }
-  let c = shade(in.P, N, albedo) + extra;
+  if (sh < 0.0) { sh = shadow_at(in.P, N); }
+  let c = shade_lit(in.P, N, albedo, l, sh) + extra;
   return GOut(vec4f(c, 1.0), vec4f(Nout, -mirror), amb_share(c));
 }

@@ -267,8 +267,11 @@ fn every_aircraft_runs_straight_and_turns_on_the_ground() {
         }
         let d = p.pos - start;
         let side = (d - dir * d.dot(dir) - up(&p) * d.dot(up(&p))).length();
-        let yaw = p.forward().dot(dir).clamp(-1.0, 1.0).acos().to_degrees();
-        println!("{}: {:.0} kt after {t:.0} s, {:.0} m: {side:.2} m off the line, {yaw:.2}° off heading, pedal up to {pedal_max:.2}", spec.name, ground_speed(&p) * KT, d.length());
+        // heading only, across the ground (not the nose rising as it nears flying speed)
+        let flat = |v: DVec3| (v - up(&p) * v.dot(up(&p))).normalize();
+        let yaw = flat(p.forward()).dot(flat(dir)).clamp(-1.0, 1.0).acos().to_degrees();
+        let pitch = (p.forward().dot(up(&p)).asin() - dir.dot(up(&p)).asin()).to_degrees();
+        println!("{}: {:.0} kt after {t:.0} s, {:.0} m: {side:.2} m off the line, {yaw:.2}° off heading, nose {pitch:+.1}°, pedal up to {pedal_max:.2}", spec.name, ground_speed(&p) * KT, d.length());
         assert!(side < 2.0 && yaw < 2.0, "{} wanders on the runway", spec.name);
         assert!(pedal_max < 0.9, "{} needs full pedal to hold the line", spec.name);
 

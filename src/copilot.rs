@@ -293,7 +293,6 @@ impl Game {
             "altimeter_setting_hpa": num(self.radios.setting(self.wx.qnh)),
             "qnh_hpa": num(self.wx.qnh),
             "altimeter_follows_qnh": self.radios.baro.is_none(),
-            "nav_display_on": self.radios.show,
         })
     }
 

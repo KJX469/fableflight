@@ -833,7 +833,7 @@ pub struct NightLights {
 /// Blocks kept unpacked at once (57.6 KB each).
 const NL_CACHE: usize = 1024;
 /// Light of a saturated map pixel (1 = the terrain shader's brightest downtown).
-const NL_PEAK: f32 = 0.5;
+pub const NL_PEAK: f32 = 0.5;
 /// Exponent from the map's grey to linear light.
 const NL_CURVE: f32 = 4.4;
 

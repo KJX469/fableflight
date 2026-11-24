@@ -80,7 +80,7 @@ fn world(p: vec3f, w: f32, m0: vec4f, m1: vec4f, m2: vec4f) -> vec3f {
     if (in.tint.a > 1.5 && m < 0.5 && in.Ln.y > 0.5 && in.ext.z != 0.0) {
       let st = u32(in.ext.w);
       let fty = (st >> 8u) & 255u;
-      let fs = facade_shade(in.P, V, N, in.T, fuv, ffw, in.col.rgb * in.tint.rgb, fty & 15u, f32(st & 255u) / 255.0, f32((st >> 16u) & 255u) / 255.0, abs(in.ext.z), (fty & 128u) != 0u);
+      let fs = facade_shade(in.P, V, N, in.T, fuv, ffw, in.col.rgb * in.tint.rgb, fty & 15u, f32(st & 255u) / 255.0, f32((st >> 16u) & 255u) / 255.0, abs(in.ext.z), (fty & 128u) != 0u, l, sh);
       c = shade(in.P, fs.N, fs.albedo) + fs.extra;
       Nout = fs.N;
       mirror = fs.mirror;

@@ -13,8 +13,7 @@ pub const BASE: u32 = crate::cars::M_REBAR + crate::cars::N_REBAR;
 pub const N_TYPES: usize = 5;
 /// Per aircraft type: body, livery (fin and winglets, tinted separately), gear.
 pub const M_BODY: u32 = BASE;
-// (the livery and gear follow each body by these offsets; the names only
-// document the table, which is filled in order)
+// livery and gear follow each body at these offsets.
 #[allow(dead_code)]
 pub const M_LIVERY: u32 = BASE + 1;
 #[allow(dead_code)]
@@ -32,7 +31,7 @@ pub const M_LOADER: u32 = M_PAPI + 9;
 pub const M_PUSHBACK: u32 = M_PAPI + 10;
 pub const M_STAIRS: u32 = M_PAPI + 11;
 pub const M_CONE: u32 = M_PAPI + 12;
-#[allow(dead_code)] // (the last slot of the table, filled in order)
+#[allow(dead_code)] // the table's last slot.
 pub const M_SIGN: u32 = M_PAPI + 13;
 pub const COUNT: usize = 3 * N_TYPES + 14;
 

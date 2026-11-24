@@ -4,11 +4,35 @@
 //! The cockpit lives in `cabin.rs`.
 pub mod cabin;
 
-use crate::aircraft::{Engine, Handling, Hole, Hull, Leg, Part, Piston, Sound, Spec, Tail};
-use crate::aircraft::Tyre;
+use crate::aircraft::{Engine, Governor, Handling, Hole, Hull, Leg, Livery, Part, Piston, Sound, Spec, Tail, Tyre};
 use crate::airframe::*;
 use glam::{DVec3, Mat4, Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+
+/// Paint schemes offered by the aircraft picker (`aircraft::liveries`): main
+/// colour (`colours[0]`, its w 1 for painted) and trim (`colours[1]`), linear
+/// RGB. plane.wgsl (`livery`, its Cessna branch) paints them over the
+/// white airframe: the main colour on the cheat line, the top of the fin, the
+/// wing and stabiliser tips, the spinner and the registration; the trim on the
+/// pinstripes. `None` is no paint at all: bare aluminium, registration in black.
+/// All of them are fictional, period-inspired schemes, not factory liveries:
+/// period photographs of 1981 172RG Cutlasses show white-and-blue cheat lines,
+/// but no single factory paint recipe is established.
+/// References: https://blueskyaviation.cz/wp-content/uploads/2023/12/Cessna_172RG_C172RG_Cutlass_1981_POH.pdf
+/// and https://www.planesales.com.au/details/Listing/Single-Engine-Propeller/7574/1981-Cessna-172RG-Cutlass-Aircraft
+pub const LIVERIES: &[Livery] = &[
+    Livery { name: "None", colours: [[0.0; 4]; 4], title: "", paint: None, swatch: [[0.62, 0.63, 0.65], [0.40, 0.41, 0.43]], still: include_bytes!("../../../assets/aircraft/liveries/c172_none.png") },
+    painted("Navy & red", [0.010, 0.024, 0.075], [0.34, 0.018, 0.012], include_bytes!("../../../assets/aircraft/liveries/c172_navy.png")),
+    painted("Royal blue", [0.025, 0.12, 0.48], [0.20, 0.45, 0.80], include_bytes!("../../../assets/aircraft/liveries/c172_royal.png")),
+    painted("Forest green", [0.035, 0.22, 0.12], [0.86, 0.68, 0.12], include_bytes!("../../../assets/aircraft/liveries/c172_green.png")),
+    painted("Burgundy", [0.30, 0.025, 0.075], [0.88, 0.72, 0.48], include_bytes!("../../../assets/aircraft/liveries/c172_burgundy.png")),
+];
+const fn painted(name: &'static str, m: [f32; 3], t: [f32; 3], still: &'static [u8]) -> Livery {
+    Livery { name, colours: [[m[0], m[1], m[2], 1.0], [t[0], t[1], t[2], 0.0], [0.0; 4], [0.0; 4]], title: "", paint: None, swatch: [m, t], still }
+}
+
+/// The scheme a new session starts with (the long-standing navy and red).
+pub const DEFAULT_LIVERY: usize = 1;
 
 pub fn build() -> Model {
     let mut b = Builder::default();
@@ -144,6 +168,7 @@ pub static SPEC: Spec = Spec {
     slats_at: 0,
     lever: None,
     gear_rate: 1.0 / 6.0,
+    electric_actuators: true,
     // 163 kt indicated; flutter sets in past 185.
     vne: 83.9,
     mmo: 0.0,
@@ -170,6 +195,9 @@ pub static SPEC: Spec = Spec {
         fric0: 15.0,
         fric1: 35.0,
         blade_break_y: PROP_HUB.y + 0.42,
+        // The propeller lever coarsens the blades below full forward,
+        // holding 1800 to 2700 rpm; fully forward it is the fixed fine pitch.
+        governor: Some(Governor { rpm: [1800.0, 2700.0], at_full: false, coarse_max: 2.0, ct: 0.3, cp: 1.0, j: 0.2, rate: 0.08 }),
     }),
     handling: Handling {
         q_ref: 2200.0,

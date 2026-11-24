@@ -162,6 +162,19 @@ impl Drop for Mp {
     }
 }
 
+/// A pilot name for someone who has not chosen one: two English words and
+/// a number ("SwiftKestrel27"), at most 17 bytes, well under `NAME_MAX`.
+pub fn random_name() -> String {
+    const ADJ: &[&str] = &["Swift", "Silent", "Brave", "Lucky", "Steady", "Bold", "Quiet", "Rapid", "Sunny", "Stormy", "Misty", "Polar", "Golden", "Silver", "Crimson", "Azure", "Wild", "Calm", "Clever", "Happy", "Noble", "Rusty", "Gentle", "Proud"];
+    const NOUN: &[&str] = &["Kestrel", "Falcon", "Heron", "Swallow", "Albatros", "Condor", "Osprey", "Petrel", "Gannet", "Merlin", "Harrier", "Skylark", "Puffin", "Pelican", "Raven", "Swift", "Comet", "Glider", "Zephyr", "Pilot", "Aviator", "Nomad", "Voyager", "Navigator"];
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+    h.write_u32(std::process::id());
+    let r = h.finish();
+    format!("{}{}{:02}", ADJ[(r % ADJ.len() as u64) as usize], NOUN[((r >> 16) % NOUN.len() as u64) as usize], (r >> 32) % 100)
+}
+
 fn v3(a: [f64; 3]) -> DVec3 {
     DVec3::new(a[0], a[1], a[2])
 }
@@ -386,7 +399,7 @@ impl Drop for Directory {
 fn read_list(urls: &[String], get: impl Fn(&str) -> Result<Vec<u8>, String>, cache: Option<&std::path::Path>) -> (Option<(Vec<ServerEntry>, bool)>, Option<String>) {
     let mut error = None;
     for u in urls {
-        match get(u).and_then(|d| parse_servers(&d, u).ok_or_else(|| "unreadable list".to_string())) {
+        match get(u).and_then(|d| parse_servers(&d, u).ok_or_else(|| crate::i18n::tr("mp.unreadable_list").to_string())) {
             Ok(mut list) => {
                 if let Some(c) = cache {
                     let _ = std::fs::write(c, cache_json(&list));
@@ -408,7 +421,7 @@ fn read_list(urls: &[String], get: impl Fn(&str) -> Result<Vec<u8>, String>, cac
             }
             (Some((list, true)), error)
         }
-        _ => (None, error.or_else(|| Some("no server list".into()))),
+        _ => (None, error.or_else(|| Some(crate::i18n::tr("mp.no_server_list").into()))),
     }
 }
 
@@ -546,6 +559,15 @@ mod tests {
         assert!((at(1, &p, 1.05).unwrap().pos.y - 2.5).abs() < 1e-6, "halfway");
         assert!((at(1, &p, 1.3).unwrap().pos.y - 15.0).abs() < 1e-6, "flown on at 50 m/s");
         assert!((at(1, &p, 9.0).unwrap().pos.y - 55.0).abs() < 1e-6, "for a second at most");
+    }
+
+    #[test]
+    fn random_names_are_valid_and_vary() {
+        let names: std::collections::HashSet<String> = (0..50).map(|_| random_name()).collect();
+        assert!(names.len() > 40, "{names:?}");
+        for n in &names {
+            assert!(n.len() <= proto::NAME_MAX && proto::clean_name(n) == *n && n.chars().all(|c| c.is_ascii_alphanumeric()), "{n}");
+        }
     }
 
     #[test]

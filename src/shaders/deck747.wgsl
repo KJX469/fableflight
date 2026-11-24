@@ -1,8 +1,7 @@
 // The 747-400's flight deck (aircraft/b747/deck.rs): printed panel legends,
 // button faces and knob scales, and the six CRT displays (PFD, ND and the two
 // EICAS screens), the CDUs and the small readouts, all drawn from the
-// instrument readings. Appended to plane.wgsl, with the string table (STRS,
-// from deck.rs) in front of it.
+// instrument readings. Appended to plane.wgsl, with string IDs from deck.rs.
 //
 // params[0] IAS kt, altitude ft, vertical speed fpm, heading deg
 // params[1] pitch deg, bank deg, turn rate, slip
@@ -10,8 +9,8 @@
 // params[3] Mach, ground speed kt, radio altitude ft, TAT C
 // params[4] throttle 0..1, local time s, gear 0..1, flaps deg
 
-fn str_len(id: u32) -> u32 { return STRS[id].w >> 24u; }
-fn str_glyph(id: u32, k: u32) -> u32 { return (STRS[id][k / 4u] >> (8u * (k % 4u))) & 255u; }
+fn str_len(id: u32) -> u32 { return font.strings[id].w >> 24u; }
+fn str_glyph(id: u32, k: u32) -> u32 { return (font.strings[id][k / 4u] >> (8u * (k % 4u))) & 255u; }
 
 // Ink of one glyph cell: q in glyph units (1 wide, 2 tall), stroke half width w.
 fn glyph_ink(g: u32, q: vec2f, w: f32, aa: f32) -> f32 {
