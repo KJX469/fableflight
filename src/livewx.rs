@@ -192,19 +192,8 @@ impl LiveWx {
         self.owns_rain = true;
         // The winds aloft eased in like the rest (a new report must not jolt
         // the aircraft), level by level in components.
-        if !t.aloft.is_empty() {
-            if wx.aloft.len() == t.aloft.len() {
-                for (a, b) in wx.aloft.iter_mut().zip(&t.aloft) {
-                    let v = |l: &crate::weather::Aloft| glam::DVec2::from_angle(l.from.to_radians()) * l.speed;
-                    let w = v(a) + (v(b) - v(a)) * k;
-                    a.alt += (b.alt - a.alt) * k;
-                    a.speed = w.length();
-                    a.from = w.to_angle().to_degrees().rem_euclid(360.0);
-                }
-            } else {
-                wx.aloft.clone_from(&t.aloft);
-            }
-        }
+        let lat = at.map_or(0.0, |(la, _)| la.to_radians());
+        ease_aloft(wx, &t.aloft, lat, k);
         wx.wind += (t.wind - wx.wind) * k;
         wx.gusts += (t.gusts - wx.gusts) * k;
         if let Some(q) = t.qnh {
@@ -717,6 +706,47 @@ fn haze(vis_km: Option<f64>, foggy: bool) -> f32 {
     }
 }
 
+/// Ease the weather's winds aloft towards the report's `target` levels by
+/// `k` (0..1). A report with a different set of levels first has the wind
+/// now sampled at its heights, so nothing jumps; a report with none (the
+/// model did not answer) eases towards the made-up profile and then drops
+/// the old levels, rather than keeping winds from wherever they were read.
+fn ease_aloft(wx: &mut Weather, target: &[crate::weather::Aloft], lat: f64, k: f64) {
+    use crate::weather::Aloft;
+    // (The levels are a kilometre and more up: the ground is taken at sea level.)
+    let sample = |wx: &Weather, alt: f64| {
+        let (speed, from) = wx.profile(lat, alt, alt);
+        Aloft { alt, speed, from }
+    };
+    let goal: Vec<Aloft> = if target.is_empty() {
+        if wx.aloft.is_empty() {
+            return;
+        }
+        let saved = std::mem::take(&mut wx.aloft);
+        let made_up = saved.iter().map(|l| sample(wx, l.alt)).collect();
+        wx.aloft = saved;
+        made_up
+    } else {
+        target.to_vec()
+    };
+    if wx.aloft.len() != goal.len() {
+        let now: Vec<Aloft> = goal.iter().map(|l| sample(wx, l.alt)).collect();
+        wx.aloft = now;
+    }
+    let v = |l: &Aloft| glam::DVec2::from_angle(l.from.to_radians()) * l.speed;
+    let mut off = 0.0f64;
+    for (a, b) in wx.aloft.iter_mut().zip(&goal) {
+        let w = v(a) + (v(b) - v(a)) * k;
+        a.alt += (b.alt - a.alt) * k;
+        a.speed = w.length();
+        a.from = w.to_angle().to_degrees().rem_euclid(360.0);
+        off = off.max((v(b) - w).length());
+    }
+    if target.is_empty() && off < 0.3 {
+        wx.aloft.clear();
+    }
+}
+
 /// The pressure levels the winds aloft are read at (hPa): about 1.5, 3, 5.5,
 /// 9 and 10.4 km up.
 const LEVELS: [u32; 5] = [850, 700, 500, 300, 250];
@@ -839,6 +869,32 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn winds_aloft_ease_in_and_out_without_jumps() {
+        use crate::weather::Aloft;
+        let lat = 50f64.to_radians();
+        let mut wx = Weather::new(0.1);
+        (wx.wind, wx.wind_from) = (6.0, 240.0);
+        let report = vec![Aloft { alt: 1500.0, speed: 12.0, from: 250.0 }, Aloft { alt: 5500.0, speed: 30.0, from: 290.0 }, Aloft { alt: 9300.0, speed: 50.0, from: 300.0 }];
+        let probe = |wx: &Weather| wx.profile(lat, 7000.0, 7000.0).0;
+        // A first report, then a step of it: only a little of the way.
+        let before = probe(&wx);
+        ease_aloft(&mut wx, &report, lat, 0.05);
+        assert_eq!(wx.aloft.len(), 3);
+        assert!((probe(&wx) - before).abs() < 0.1 * (39.0 - before).abs() + 0.5, "{before} -> {}", probe(&wx));
+        ease_aloft(&mut wx, &report, lat, 1.0);
+        assert!(wx.aloft.iter().zip(&report).all(|(a, b)| (a.alt - b.alt).abs() < 1e-9 && (a.speed - b.speed).abs() < 1e-9 && (a.from - b.from).abs() < 1e-9));
+        // The model stops answering: it eases back to the made-up profile, then lets go.
+        let mut last = probe(&wx);
+        for _ in 0..300 {
+            ease_aloft(&mut wx, &[], lat, 0.05);
+            let p = probe(&wx);
+            assert!((p - last).abs() < 2.0, "{last} -> {p}");
+            last = p;
+        }
+        assert!(wx.aloft.is_empty());
+    }
 
     #[test]
     fn winds_aloft_from_open_meteo() {

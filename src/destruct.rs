@@ -511,6 +511,18 @@ pub fn resistance(height: f32, vol: f32) -> f64 {
     vol.max(30.0) as f64 * per
 }
 
+/// Area (m2) of a building's footprint ring (world positions), flattened on
+/// the ground plane at its middle.
+pub fn ring_area_m2(ring: &[DVec3]) -> f64 {
+    if ring.len() < 3 {
+        return 0.0;
+    }
+    let c = ring.iter().fold(DVec3::ZERO, |a, p| a + *p) / ring.len() as f64;
+    let (e, n, _) = geo::enu(c);
+    let r: Vec<Vec2> = ring.iter().map(|p| Vec2::new((*p - c).dot(e) as f32, (*p - c).dot(n) as f32)).collect();
+    ring_area(&r) as f64
+}
+
 impl Destruction {
     pub fn new(seed: u64) -> Self {
         Self {

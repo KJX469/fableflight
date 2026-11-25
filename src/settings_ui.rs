@@ -389,6 +389,9 @@ impl Game {
             row(ui, t!("settings.arcade_mode"), t!("settings.missiles_boost_on_any_aircraft"), |ui| {
                 menu::switch(ui, &mut self.arcade);
             });
+            row(ui, t!("settings.topple_buildings"), t!("settings.a_building_you_crash_into"), |ui| {
+                menu::switch(ui, &mut self.topple_buildings);
+            });
             row(ui, t!("settings.auto_trim"), t!("settings.winds_the_trim_for_you"), |ui| {
                 menu::switch(ui, &mut self.auto_trim);
             });

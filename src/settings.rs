@@ -34,6 +34,9 @@ pub struct Settings {
     pub landing_guidance: bool,
     /// arcade mode: the game's fun features (missiles, boost, respawn at will, weather keys)
     pub arcade: bool,
+    /// a building the aircraft crashes into always comes down as a whole,
+    /// whatever its size against the impact energy (destruct::resistance)
+    pub topple_buildings: bool,
     /// the auto-trim assist: winds the elevator trim while the pilot flies the
     /// stick, on aircraft with a real trim (on by default)
     pub auto_trim: bool,
@@ -93,7 +96,7 @@ impl LastStart {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, invert_look_cockpit: false, invert_look_outside_x: false, invert_look_outside_y: false, show_hud: true, hud_cockpit: false, path_marker: false, minimap: true, landing_guidance: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, map_airports: true, map_navaids: true, taa: true, fullscreen: true, live_traffic: true, live_weather: true, real_time: true, snow: crate::snow::Mode::Auto, last: None, multiplayer: true, mp_server: "auto".into(), mp_name: String::new(), auto_trim: true }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, invert_look_cockpit: false, invert_look_outside_x: false, invert_look_outside_y: false, show_hud: true, hud_cockpit: false, path_marker: false, minimap: true, landing_guidance: true, arcade: false, topple_buildings: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, map_airports: true, map_navaids: true, taa: true, fullscreen: true, live_traffic: true, live_weather: true, real_time: true, snow: crate::snow::Mode::Auto, last: None, multiplayer: true, mp_server: "auto".into(), mp_name: String::new(), auto_trim: true }
     }
 }
 
@@ -145,6 +148,7 @@ impl Settings {
             minimap: b("minimap", d.minimap),
             landing_guidance: b("landing_guidance", d.landing_guidance),
             arcade: b("arcade", d.arcade),
+            topple_buildings: b("topple_buildings", d.topple_buildings),
             auto_trim: b("auto_trim", d.auto_trim),
             minimap_plan: b("minimap_plan", d.minimap_plan),
             minimap_heading_up: b("minimap_heading_up", d.minimap_heading_up),
@@ -186,6 +190,7 @@ impl Settings {
             "minimap": self.minimap,
             "landing_guidance": self.landing_guidance,
             "arcade": self.arcade,
+            "topple_buildings": self.topple_buildings,
             "auto_trim": self.auto_trim,
             "minimap_plan": self.minimap_plan,
             "minimap_heading_up": self.minimap_heading_up,
@@ -226,7 +231,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Lang::parse("fr"), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, invert_look_cockpit: true, invert_look_outside_x: true, invert_look_outside_y: false, show_hud: false, hud_cockpit: true, path_marker: true, minimap: false, landing_guidance: false, arcade: true, auto_trim: false, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, map_airports: false, map_navaids: false, taa: false, fullscreen: false, live_traffic: false, live_weather: false, real_time: false, snow: crate::snow::Mode::Always, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }), multiplayer: true, mp_server: "example.org:7000".into(), mp_name: "Dany".into() };
+        let s = Settings { lang: Lang::parse("fr"), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, invert_look_cockpit: true, invert_look_outside_x: true, invert_look_outside_y: false, show_hud: false, hud_cockpit: true, path_marker: true, minimap: false, landing_guidance: false, arcade: true, auto_trim: false, topple_buildings: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, map_airports: false, map_navaids: false, taa: false, fullscreen: false, live_traffic: false, live_weather: false, real_time: false, snow: crate::snow::Mode::Always, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }), multiplayer: true, mp_server: "example.org:7000".into(), mp_name: "Dany".into() };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         // Multiplayer: on by default, and once for settings saved before it was;
         // turned off since, it stays off.

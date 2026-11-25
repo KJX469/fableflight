@@ -13,7 +13,7 @@ weather and terrain, so every aircraft, built-in or downloaded, gets all of it.
 | thermals, storm drafts | `weather.rs`, `storm.rs` | sun, clouds, storm cells |
 | ridge lift, lee waves, rotor | `orographic.rs` | the world's terrain, wind, stability |
 | wake vortices | `wake.rs` | airport and live traffic |
-| how the airframe feels all that | `plane.rs` `Plane::turbulence` (and `strip_gusts` on the surface-element core) | the aircraft's geometry |
+| how the airframe feels all that | `plane.rs` `Plane::turbulence` | the aircraft's geometry |
 
 ## The wind profile
 
@@ -47,18 +47,18 @@ the field never jumps. It drifts with the mean wind, and its eddies turn over
 slowly so still air still gusts. Eddies much smaller than the wing chord are
 tapered by the Sears function, as a real wing barely responds to them.
 
-Because it is a field, it is sampled where each part of the airframe is:
-
-- **Every aircraft** samples it at the CG, four stations along each wing, the
-  nose and the tail (`gust_probes`, from `wing_sect`, `contacts` and
-  `tail.fin_base`). The mean over the wing is the gust; the fit of its
-  variation along the span and the fuselage gives the air's rolling, pitching
-  and yawing (`gust_rot`). The roll gust this gives matches MIL-F-8785C's
-  (σ_p² = σ_w² 0.8 π² (πL/4b)^(1/3) / (8 b L)) within about 10% from a C172
-  to a 747 (`gust_gradients_follow_the_airframe`), without per-aircraft tuning.
-- **Aircraft on the surface-element core** (`aero.rs`) sample it at every
-  strip of the wing, tailplane and fin (`strip_gusts`), so each strip flies in
-  its own gust and the rolling, pitching and yawing come out of the strips.
+Because it is a field, it is sampled where each part of the airframe is.
+Every aircraft samples it at the CG, four stations along each wing, the nose
+and the tail (`gust_probes`, from `wing_sect`, `contacts` and
+`tail.fin_base`). The mean over the wing is the gust; the fit of its
+variation along the span and the fuselage gives the air's rolling, pitching
+and yawing (`gust_rot`). The roll gust this gives is close to MIL-F-8785C's (σ_p² = σ_w² 0.8 π²
+(πL/4b)^(1/3) / (8 b L)) for conventional wings, without per-aircraft tuning:
+within about 10% for the C172, DR400, 747 and G650. Long-chord and delta
+wings come out lower (F-18, F-4 and F-22 about 70–85%, Concorde and SR-71
+about 65%, Starship under half), because the Sears taper averages more over
+their chord than the span-only formula allows
+(`gust_gradients_follow_the_airframe` accepts 0.4–1.6 times the formula).
 
 Turbulence bursts (patches of rough air, `burst`) scale the whole field up
 and down, lognormal with the mean variance unchanged.
@@ -93,11 +93,25 @@ reaches about 80° of bank in 4 s, a 747 about 14°).
 
 ## Limits
 
-- The gust field is homogeneous over the airframe; intensity and scale come
-  from the aircraft's position, not each strip's.
+- The airframe feels the field at its eleven probes only, not at each wing
+  strip, and intensity and scale come from the aircraft's position. The
+  field drifts with the mean wind at the aircraft's own height, so climbing
+  through a shear changes how fast the whole field moves past.
 - Lee waves are 2-D along the wind line through the aircraft, from linear
   theory with a single stability; no hydraulic jumps or downslope windstorms.
-- The terrain profile only exists where the world has loaded ground.
+- The terrain profile only exists where the world has loaded ground. The
+  line reaches 50 km upwind, usually beyond the loaded tiles, so the slope
+  flow (local) is reliable but lee waves come only from the ridges loaded so
+  far: they can be missing from distant ranges and strengthen as tiles load.
+  Gaps are skipped, never treated as cliffs.
+- A wake node takes the ground under the point where it was laid (or the
+  ground round the player, where that is not loaded) for deciding when it
+  stops sinking and spreads.
+- Wake nodes more than 3 km from the player, where nothing samples them, are
+  moved every 0.25 s instead of every frame (`wake::NEAR`, `COARSE`). By
+  the time they come back into reach, what the airframe feels differs from
+  per-frame stepping by about a twentieth of what changing the frame rate
+  between 30 and 120 fps already does.
 - Airport traffic sheds a wake only above 10 m (the traffic model's own
   limit); a player's wake is laid from 20 m/s, so also on a fast takeoff roll.
 - `Weather::at`'s gust swells are uniform in space (they stand for the

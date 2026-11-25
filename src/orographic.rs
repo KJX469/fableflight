@@ -116,19 +116,18 @@ impl Orography {
             _ => 0.0,
         };
         let span = (1500.0 / STEP) as isize;
-        let near: Vec<f64> = (here - span..=here + span).filter_map(h).collect();
-        let relief = if near.is_empty() { 0.0 } else { near.iter().cloned().fold(f64::MIN, f64::max) - near.iter().cloned().fold(f64::MAX, f64::min) };
+        let (n_near, lo, hi) = (here - span..=here + span).filter_map(h).fold((0usize, f64::MAX, f64::MIN), |(n, lo, hi), v| (n + 1, lo.min(v), hi.max(v)));
+        let relief = if n_near == 0 { 0.0 } else { hi - lo };
         let ground_here = h(here).unwrap_or(alt - agl);
         let (u_low, _) = wx.profile(lat, ground_here + 150.0, 150.0);
         let depth = (0.6 * relief).max(80.0);
         let w_slope = u_low * slope.clamp(-0.6, 0.6) * (-agl.max(0.0) / depth).exp();
 
         // Lee waves: the ridge tops upwind, the wind across them and the air's stability.
-        let upwind: Vec<f64> = (0..=here).filter_map(h).collect();
-        if upwind.len() < 4 {
+        let (known, top) = (0..=here).filter_map(h).fold((0usize, f64::MIN), |(n, top), v| (n + 1, top.max(v)));
+        if known < 4 {
             return Oro { w: w_slope, slope: w_slope, ..Default::default() };
         }
-        let top = upwind.iter().cloned().fold(f64::MIN, f64::max);
         let (u_c, _) = wx.profile(lat, top + 1000.0, (top + 1000.0 - ground_here).max(10.0));
         let stab = wx.stability();
         // Brunt-Väisälä frequency: ~0.01/s in a standard atmosphere, more in

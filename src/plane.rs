@@ -5396,7 +5396,7 @@ mod tests {
             let mut sp = p0 - n * 1500.0;
             while t < 40.0 {
                 let src = Source { id: 1, pos: sp, vel: n * 75.0, span: 64.4, mass: 230_000.0 };
-                wk.step(0.1, t, &[src], |_| DVec3::ZERO, 0.0, p0);
+                wk.step(0.1, t, &[src], |_, _| DVec3::ZERO, |_| Some(0.0), 0.0, p0);
                 sp += n * 7.5;
                 t += 0.1;
             }

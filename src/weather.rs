@@ -804,7 +804,9 @@ impl Weather {
     /// frame, `agl` metres above the ground: see `profile`.
     pub fn steady(&self, pos: DVec3, agl: f64) -> DVec3 {
         let (e, n, _) = geo::enu(pos);
-        let (lat, _, alt) = geo::pos_to_lla(pos);
+        // (`geo::pos_to_lla` without the longitude, which is not needed.)
+        let r = pos.length();
+        let (lat, alt) = ((pos.z / r).clamp(-1.0, 1.0).asin(), r - geo::R);
         // (Some callers ask for a height above the ground near the ground:
         // the sea-level height is then at least that.)
         let (speed, from) = self.profile(lat, alt.max(agl), agl);

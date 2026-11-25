@@ -1,7 +1,7 @@
 //! Turbulence as a field in space: a frozen von Kármán gust field that drifts
 //! with the wind, which the aircraft flies through. Any point can be sampled,
-//! so every part of the airframe (each wing strip, the tailplane, the fin, or
-//! a few probes on an aircraft without strips) feels the gust where it is.
+//! so every part of the airframe (probes at the CG, along each wing, at the
+//! nose and at the tail: see `plane.rs` `gust_probes`) feels the gust where it is.
 //! What a gust does to the aircraft then comes from its geometry rather than
 //! from tuned gains: a vertical gust that differs from one wing tip to the
 //! other rolls it, one that differs from the nose to the tail pitches it, a
@@ -32,21 +32,26 @@ const K_MIN: f64 = std::f64::consts::TAU / 6000.0;
 const K_MAX: f64 = std::f64::consts::TAU / 2.0;
 /// Waves per shell: two orthogonal triads.
 const PER: usize = 6;
+const WAVES: usize = SHELLS * PER;
 
-#[derive(Clone, Copy, Debug)]
-struct Wave {
+/// The waves, one array per quantity (so the sampling loop vectorises),
+/// shell by shell: wave `n` is in shell `n / PER`.
+#[derive(Clone, Debug)]
+struct Waves {
     /// wavevector (rad/m), planet frame
-    k: DVec3,
+    kx: [f64; WAVES],
+    ky: [f64; WAVES],
+    kz: [f64; WAVES],
     /// unit velocity direction, perpendicular to `k`
-    pol: DVec3,
-    phase: f64,
+    pol: [DVec3; WAVES],
+    phase: [f64; WAVES],
     /// phase drift per (m/s of turbulence intensity) per second: the eddy turning over
-    turn: f64,
+    turn: [f64; WAVES],
 }
 
 #[derive(Clone, Debug)]
 pub struct GustField {
-    waves: Vec<Wave>,
+    waves: Box<Waves>,
     /// each shell's wavenumber and width (rad/m)
     k: [f64; SHELLS],
     dk: [f64; SHELLS],
@@ -56,6 +61,10 @@ pub struct GustField {
     /// the lifting surfaces' mean chord (m): eddies much smaller than it
     /// barely lift a wing (Sears), so their share is tapered
     chord: f64,
+    /// the last length scales `set` was given and their spectrum shares
+    /// (horizontal, vertical): the scales change rarely, the intensity every step
+    shares_h: (f64, [f64; SHELLS]),
+    shares_w: (f64, [f64; SHELLS]),
     /// how far the air mass has moved with the wind (planet frame, m): the
     /// field is frozen in the air, so it is sampled at (position - drift)
     pub drift: DVec3,
@@ -114,7 +123,8 @@ impl GustField {
         let ratio = (K_MAX / K_MIN).ln() / (SHELLS - 1) as f64;
         let mut k = [0.0; SHELLS];
         let mut dk = [0.0; SHELLS];
-        let mut waves = Vec::with_capacity(SHELLS * PER);
+        let mut waves = Box::new(Waves { kx: [0.0; WAVES], ky: [0.0; WAVES], kz: [0.0; WAVES], pol: [DVec3::ZERO; WAVES], phase: [0.0; WAVES], turn: [0.0; WAVES] });
+        let mut n = 0;
         for i in 0..SHELLS {
             k[i] = K_MIN * (ratio * i as f64).exp();
             // (The shell covers half a step either side, in log space.)
@@ -128,17 +138,27 @@ impl GustField {
                 // Each shell's wavenumber jittered a little, so no two triads share it.
                 for a in 0..3 {
                     let kk = k[i] * (ratio * (r.unit() - 0.5)).exp();
-                    waves.push(Wave { k: e[a] * kk, pol: e[(a + 1) % 3], phase: r.unit() * std::f64::consts::TAU, turn: kk * (0.2 + 0.3 * r.unit()) * if r.unit() < 0.5 { -1.0 } else { 1.0 } });
+                    let kv = e[a] * kk;
+                    (waves.kx[n], waves.ky[n], waves.kz[n], waves.pol[n]) = (kv.x, kv.y, kv.z, e[(a + 1) % 3]);
+                    waves.phase[n] = r.unit() * std::f64::consts::TAU;
+                    waves.turn[n] = kk * (0.2 + 0.3 * r.unit()) * if r.unit() < 0.5 { -1.0 } else { 1.0 };
+                    n += 1;
                 }
             }
         }
-        Self { waves, k, dk, amp_h: [0.0; SHELLS], amp_w: [0.0; SHELLS], chord: 0.0, drift: DVec3::ZERO }
+        Self { waves, k, dk, amp_h: [0.0; SHELLS], amp_w: [0.0; SHELLS], chord: 0.0, shares_h: (f64::NAN, [0.0; SHELLS]), shares_w: (f64::NAN, [0.0; SHELLS]), drift: DVec3::ZERO }
     }
 
     /// The intensity (RMS, m/s) and length scale (m) of the horizontal and
     /// the vertical gusts the weather asks for here.
     pub fn set(&mut self, sigma_h: f64, len_h: f64, sigma_w: f64, len_w: f64) {
-        let (sh, sw) = (shares(&self.k, &self.dk, len_h), shares(&self.k, &self.dk, len_w));
+        if self.shares_h.0 != len_h {
+            self.shares_h = (len_h, shares(&self.k, &self.dk, len_h));
+        }
+        if self.shares_w.0 != len_w {
+            self.shares_w = (len_w, shares(&self.k, &self.dk, len_w));
+        }
+        let (sh, sw) = (self.shares_h.1, self.shares_w.1);
         // Each wave carries a²/2 of variance along its direction; a shell's
         // two triads put 2 · a²/2 on every component.
         let per = (PER / 3) as f64;
@@ -154,27 +174,54 @@ impl GustField {
     /// Carry the field along with the air (`wind`, planet frame m/s) and let
     /// its eddies turn over at the intensity `sigma` (m/s).
     pub fn advance(&mut self, dt: f64, wind: DVec3, sigma: f64) {
+        // (Never reset: that would jump the gust at every probe at once. The
+        // positions are planet-frame, millions of metres out, so a drift of
+        // even thousands of km costs no precision in f64.)
         self.drift += wind * dt;
-        // Keep it near the origin, so the phases keep their precision (the
-        // field is random everywhere, so moving it is harmless).
-        if self.drift.length_squared() > 1.0e10 {
-            self.drift = DVec3::ZERO;
-        }
         let s = sigma.clamp(0.0, 15.0) * dt;
-        for w in &mut self.waves {
-            w.phase = (w.phase + w.turn * s).rem_euclid(std::f64::consts::TAU);
+        const TAU: f64 = std::f64::consts::TAU;
+        let w = &mut *self.waves;
+        for (p, t) in w.phase.iter_mut().zip(&w.turn) {
+            let x = *p + t * s;
+            // `rem_euclid(TAU)` without the division: a phase in [0, 2π)
+            // moved by less than a turn needs at most one 2π added or taken
+            // away, which gives exactly the same bits (x - 2π is exact for x
+            // in [2π, 4π), and rem_euclid adds 2π to a negative x itself).
+            *p = if x >= TAU {
+                if x < 2.0 * TAU { x - TAU } else { x.rem_euclid(TAU) }
+            } else if x < 0.0 {
+                if x >= -TAU { x + TAU } else { x.rem_euclid(TAU) }
+            } else {
+                x
+            };
         }
     }
 
     /// The gust (planet frame, m/s) at `pos` (planet frame), `up` the local vertical.
     pub fn at(&self, pos: DVec3, up: DVec3) -> DVec3 {
         let x = pos - self.drift;
+        let w = &*self.waves;
+        // Each wave's cosine, all at once (this loop vectorises), then their
+        // sum in the same order as ever. The fast cosine is as accurate as
+        // the library's (see `cos_reduced`) for phases up to about 5e7 rad,
+        // which covers every point within 8,000 km of the planet's centre
+        // along each axis; further out it falls back on `f64::cos`.
+        let mut c = [0.0; WAVES];
+        let (kx, ky, kz, ph) = (&w.kx, &w.ky, &w.kz, &w.phase);
+        if x.abs().max_element() < FAST_COS_REACH {
+            cosines(w, x, &mut c);
+        } else {
+            for n in 0..WAVES {
+                c[n] = (kx[n] * x.x + ky[n] * x.y + kz[n] * x.z + ph[n]).cos();
+            }
+        }
         let (mut vh, mut vw) = (DVec3::ZERO, DVec3::ZERO);
-        for (n, w) in self.waves.iter().enumerate() {
-            let i = n / PER;
-            let c = (w.k.dot(x) + w.phase).cos();
-            vh += w.pol * (c * self.amp_h[i]);
-            vw += w.pol * (c * self.amp_w[i]);
+        for i in 0..SHELLS {
+            let (ah, aw) = (self.amp_h[i], self.amp_w[i]);
+            for n in i * PER..(i + 1) * PER {
+                vh += w.pol[n] * (c[n] * ah);
+                vw += w.pol[n] * (c[n] * aw);
+            }
         }
         vh - up * vh.dot(up) + up * vw.dot(up)
     }
@@ -183,6 +230,78 @@ impl GustField {
     pub fn calm(&self) -> bool {
         self.amp_h.iter().chain(self.amp_w.iter()).all(|a| *a == 0.0)
     }
+}
+
+/// Each wave's cosine at `x` (field frame), by `cos_reduced`. With AVX2 four
+/// at a time where the processor has it (the same operations, so the same
+/// bits: no fused multiply-adds), else two at a time.
+fn cosines(w: &Waves, x: DVec3, c: &mut [f64; WAVES]) {
+    #[inline(always)]
+    fn each(w: &Waves, x: DVec3, c: &mut [f64; WAVES]) {
+        for n in 0..WAVES {
+            c[n] = cos_reduced(w.kx[n] * x.x + w.ky[n] * x.y + w.kz[n] * x.z + w.phase[n]);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2")]
+        unsafe fn wide(w: &Waves, x: DVec3, c: &mut [f64; WAVES]) {
+            each(w, x, c)
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the processor has just been found to support AVX2.
+            return unsafe { wide(w, x, c) };
+        }
+    }
+    each(w, x, c)
+}
+
+/// Where `at` can use `cos_reduced` (planet-frame m, per axis): the largest
+/// wavenumber (K_MAX with its jitter, under 3.7 rad/m) times √3 times this
+/// stays under 2^25 · π/2, the reach of the three-part reduction below.
+const FAST_COS_REACH: f64 = 8.0e6;
+
+/// cos(x) for |x| up to 2^25 · π/2, branch-free so a loop of them
+/// vectorises, as accurate as the C library's (within an ulp or so).
+/// Cody-Waite reduction by π/2 in three parts (the first two 26 bits long,
+/// so n times them is exact for n < 2^27), then the fdlibm/musl kernels
+/// (`__sin`, `__cos`) on |r| ≤ π/4, picked and signed by the quadrant.
+#[inline(always)]
+fn cos_reduced(x: f64) -> f64 {
+    const PIO2_1: f64 = 1.570_796_310_901_641_8; // first 26 bits of π/2
+    const PIO2_2: f64 = 1.589_325_471_229_585_7e-8; // next 26
+    const PIO2_3: f64 = 6.123_233_995_736_766e-17; // the rest
+    // 1.5 · 2^52: adding it rounds to an integer and leaves it in the low bits.
+    const MAGIC: f64 = 6_755_399_441_055_744.0;
+    let t = x * std::f64::consts::FRAC_2_PI + MAGIC;
+    let q = t.to_bits();
+    let n = t - MAGIC;
+    let r = ((x - n * PIO2_1) - n * PIO2_2) - n * PIO2_3;
+    let z = r * r;
+    let w = z * z;
+    // musl __sin(r, 0, 0)
+    const S1: f64 = -1.666_666_666_666_663_243_48e-01;
+    const S2: f64 = 8.333_333_333_322_489_461_24e-03;
+    const S3: f64 = -1.984_126_982_985_794_931_34e-04;
+    const S4: f64 = 2.755_731_370_707_006_767_89e-06;
+    const S5: f64 = -2.505_076_025_340_686_341_95e-08;
+    const S6: f64 = 1.589_690_995_211_550_102_21e-10;
+    let rs = S2 + z * (S3 + z * S4) + z * w * (S5 + z * S6);
+    let sin = r + z * r * (S1 + z * rs);
+    // musl __cos(r, 0)
+    const C1: f64 = 4.166_666_666_666_660_190_37e-02;
+    const C2: f64 = -1.388_888_888_887_410_957_49e-03;
+    const C3: f64 = 2.480_158_728_947_672_941_78e-05;
+    const C4: f64 = -2.755_731_435_139_066_330_35e-07;
+    const C5: f64 = 2.087_572_321_298_174_827_90e-09;
+    const C6: f64 = -1.135_964_755_778_819_482_65e-11;
+    let rc = z * (C1 + z * (C2 + z * C3)) + w * w * (C4 + z * (C5 + z * C6));
+    let hz = 0.5 * z;
+    let one = 1.0 - hz;
+    let cos = one + (((1.0 - one) - hz) + z * rc);
+    // cos(nπ/2 + r) = cos r, -sin r, -cos r, sin r for n = 0, 1, 2, 3 (mod 4).
+    let v = if q & 1 == 0 { cos } else { sin };
+    f64::from_bits(v.to_bits() ^ (((q.wrapping_add(1)) & 2) << 62))
 }
 
 #[cfg(test)]
@@ -196,8 +315,6 @@ mod tests {
 
     #[test]
     fn the_gusts_have_the_intensity_asked_for() {
-        let mut f = GustField::new(7);
-        f.set(2.0, 400.0, 1.0, 100.0);
         // Many seeds' worth of independent stretches.
         let (mut h, mut w, mut n) = (0.0, 0.0, 0.0);
         for s in 0..40u64 {
@@ -256,6 +373,35 @@ mod tests {
             // Small steps, small changes.
             assert!((f.at(p, DVec3::Z) - f.at(p + DVec3::X * 0.05, DVec3::Z)).length() < 0.2);
         }
+    }
+
+    #[test]
+    fn the_fast_cosine_matches_the_library() {
+        // Across the whole range it is used on, planet-frame phases included.
+        let mut r = Mix(5);
+        let mut worst: f64 = 0.0;
+        for i in 0..2_000_000 {
+            let mag = [1.0, 10.0, 1e3, 1e5, 2.5e7, 5.0e7][i % 6];
+            let x = (r.unit() * 2.0 - 1.0) * mag;
+            worst = worst.max((cos_reduced(x) - x.cos()).abs());
+        }
+        // Special points: the quadrant edges.
+        for n in -40..40 {
+            let x = n as f64 * std::f64::consts::FRAC_PI_4;
+            worst = worst.max((cos_reduced(x) - x.cos()).abs());
+        }
+        assert!(worst < 4e-16, "{worst:e}");
+    }
+
+    #[test]
+    fn far_from_the_planet_it_falls_back_on_the_library() {
+        let mut f = GustField::new(4);
+        f.set(2.0, 300.0, 2.0, 300.0);
+        // Either side of the switch-over, the field is continuous.
+        let p = DVec3::new(FAST_COS_REACH - 0.001, 1.0e6, 2.0e6);
+        let (a, b) = (f.at(p, DVec3::Z), f.at(p + DVec3::X * 0.002, DVec3::Z));
+        assert!(a.is_finite() && (a - b).length() < 1e-2);
+        assert!(f.at(DVec3::splat(4.0e7), DVec3::Z).is_finite());
     }
 
     #[test]
