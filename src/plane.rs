@@ -1534,7 +1534,12 @@ impl Plane {
             let air = (density(h), sound_speed(h));
             let (trim, alpha) = self.trim_for(af, v, air, 1.0);
             let body = qs * (s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / sound_speed(h)));
-            return self.strip_pitch(af, v, air, alpha, trim).2 + body;
+            let (_, lift, drag) = self.strip_pitch(af, v, air, alpha, trim);
+            // Too slow for the wing to carry the weight at all: no level flight.
+            if lift < 0.98 * self.mass() * 9.81 {
+                return f64::INFINITY;
+            }
+            return drag + body;
         }
         let cl = self.mass() * 9.81 / qs.max(1.0);
         qs * (s.cd0 + s.k_ind * cl * cl + s.cd_flap[0] * flaps + s.cd_flap[1] * flaps * flaps + s.cd_gear * gear + self.wave_cd(v / sound_speed(h)))
@@ -6671,6 +6676,10 @@ mod tests {
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             if lifted.is_none() && !p.on_ground && t > 5.0 {
                 lifted = Some(((p.pos - start).length(), ias, t));
+            }
+            // Gear up once it is climbing away (a positive rate, clear of the
+            // runway), not on the first moment the oleos unload.
+            if lifted.is_some() && p.gear_down && hh > 10.0 && p.vel.dot(p.pos.normalize()) > 1.0 {
                 p.toggle_gear();
             }
             if at_1000.is_none() && hh > 304.8 {
@@ -6714,7 +6723,10 @@ mod tests {
             let (mut t, mut down, mut sink) = (0.0, None, 0.0f64);
             while t < 60.0 {
                 let touched = down.is_some();
-                let c = Controls { throttle: -1.0, brake: touched, reverse: touched && reverse, pitch: if touched { -0.1 } else { 0.1 }, ..Default::default() };
+                // Down the glide trimmed hands off, the flare from 20 ft.
+                let (_, _, hh) = geo::pos_to_lla(p.pos);
+                let flare = if hh < 6.0 + p.wheel_height() { 0.1 } else { 0.0 };
+                let c = Controls { throttle: -1.0, brake: touched, reverse: touched && reverse, pitch: if touched { -0.1 } else { flare }, ..Default::default() };
                 let vn = p.vel.dot(p.pos.normalize());
                 assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
                 if down.is_none() && p.on_ground {

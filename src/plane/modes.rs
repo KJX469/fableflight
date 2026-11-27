@@ -287,6 +287,11 @@ fn handling_of_a_bonanza() {
 }
 
 #[test]
+fn handling_of_a_c130() {
+    check("C-130H at 280 KTAS, 20,000 ft", &crate::aircraft::c130::SPEC, 6_100.0, 144.0, "MIL-F-8785C Level 1, class III (its yaw damper on)");
+}
+
+#[test]
 fn handling_of_a_747() {
     let h = 10_668.0;
     check("747 at M0.84, FL350", &b747::SPEC, h, 0.84 * sound_speed(h), "Heffley & Jewell: short period ~7 s ζ ~0.35 | phugoid ~90-100 s ζ ~0.05 | Dutch roll ~5-6 s, ζ ~0.05-0.1 without the yaw dampers (on here) | roll ~10-20°/s");
@@ -491,10 +496,12 @@ fn every_aircraft_is_statically_stable_and_damped() {
     // The signs a flyable airframe needs at a typical flight point, from
     // the strip model's own force and moment differences: pitch and weather-
     // cock stability, dihedral effect, and damping in pitch, roll and yaw.
-    use crate::aircraft::{b747, c172, concorde, dr400, f22, f4, fa18, g650, sr71};
+    use crate::aircraft::{b747, bonanza, c130, c172, concorde, dr400, f22, f4, fa18, g650, sr71};
     let h = 10668.0;
-    let points: [(&'static Spec, f64, f64); 9] = [
+    let points: [(&'static Spec, f64, f64); 11] = [
         (&c172::SPEC, 1500.0, 55.0),
+        (&bonanza::SPEC, 1800.0, 77.0),
+        (&c130::SPEC, 6100.0, 144.0),
         (&dr400::SPEC, 1500.0, 60.0),
         (&b747::SPEC, h, 0.84 * sound_speed(h)),
         (&g650::SPEC, 12_500.0, 0.85 * sound_speed(12_500.0)),

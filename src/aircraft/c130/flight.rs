@@ -118,29 +118,31 @@
 //!
 //! # Reference targets and measured results
 //!
-//! (sea level ISA unless stated; KTAS true, KIAS indicated)
+//! (sea level ISA unless stated; KTAS true, KIAS indicated; flown on the
+//! surface-element rig, `RIG`, whose stalls come from its strips: the
+//! stall rows are the `Spec`'s own formula)
 //!
 //! | Point | Configuration | Target (source) | Measured |
 //! |---|---|---|---|
 //! | Stall, power off | 155,000 lb clean / 50% | ~124 / ~111 kt [est] | 124 / 111 KIAS (formula) |
 //! | Stall, power off | 130,000 lb clean / 100% | ~114 (<=115, S3) / ~93 kt [est, anec 91] | 114 / 93 KIAS |
 //! | Stall, `--fly-check` | 56.2 t (123,800 lb) clean, 1,500 m | 105-115 [est] | 110 KIAS at 15.7° |
-//! | Take-off run | 155,000 lb, 50% flaps | 3,586 ft, 1,093 m (S1) | 1,179 m (3,867 ft), off at 131 KIAS |
-//! | Climb | 155,000 lb clean, 180 KIAS, 1,000-2,700 ft | 1,830-1,900 fpm at sea level (S1, S2) | 1,601 fpm |
-//! | Time to climb | 155,000 lb, 1,000 to 10,000 ft at 180 KIAS | 6-8 min [est] | 7.9 min (839 lb from brake release) |
-//! | Ceiling (100 fpm left) | 155,000 lb at 23,000 ft | 23,000 ft (S1) | 167 fpm left there (ceiling ~24,500 ft) |
-//! | Ceiling (100 fpm left) | 47 t at 33,000 ft | 33,000 ft "empty" (S1) | 332 fpm left there |
-//! | Max level speed | 56.2 t, 20,000 ft | 320 KTAS (S1) | 299 KTAS (222 KIAS) |
-//! | Max level speed | 56.2 t, 1,000 ft / 1,500 m | ~300-310 KTAS [est from power] | 315 KTAS / 290 KIAS (`--fly-check`) |
+//! | Take-off run | 155,000 lb, 50% flaps | 3,586 ft, 1,093 m (S1) | 1,067 m (3,502 ft), off at 124 KIAS |
+//! | Climb | 155,000 lb clean, 180 KIAS, 1,000-2,700 ft | 1,830-1,900 fpm at sea level (S1, S2) | 1,699 fpm |
+//! | Time to climb | 155,000 lb, 1,000 to 10,000 ft at 180 KIAS | 6-8 min [est] | 8.2 min (879 lb from brake release) |
+//! | Ceiling (100 fpm left) | 155,000 lb at 23,000 ft | 23,000 ft (S1) | 157 fpm left there (ceiling ~24,500 ft) |
+//! | Ceiling (100 fpm left) | 47 t at 33,000 ft | 33,000 ft "empty" (S1) | 317 fpm left there |
+//! | Max level speed | 56.2 t, 20,000 ft | 320 KTAS (S1) | 298 KTAS (221 KIAS) |
+//! | Max level speed | 56.2 t, 1,000 ft / 1,500 m | ~300-310 KTAS [est from power] | 314 KTAS / 309 KIAS |
 //! | Cruise | 56.2 t, 20,000 ft, 280 KTAS | 280-292 KTAS (S1, S4); ~4,400 lb/h (ferry range) | held at 92% throttle, 4,395 lb/h, alpha 2.3° |
 //! | Range at that burn | all 62,400 lb | 3,995 nm ferry (S1) | 3,976 nm |
 //! | Static thrust | 4 engines | 2.6-3.2 lbf/shp [est] | 220 kN, 0.32 of 155,000 lb |
 //! | Propeller efficiency implied | sea level, 60/90/150 m/s | ~0.7/0.8/0.85 + jet [est] | 0.71/0.86/0.93 |
 //! | Power response | flight idle to 90% thrust | 1-4 s [est] | 2.5 s |
-//! | Roll rate | full aileron, 200 KIAS, 56.2 t | 15-30°/s [est; light boosted controls, S6] | 25°/s |
-//! | Final approach | 56.2 t, 100% flaps, gear, 3° | 1.35 Vs + 10 = 132 kt (S4) | 130 kt hands off, 654 fpm, throttle 0.50, alpha -0.1° |
-//! | Landing from 50 ft | 130,000 lb, 100% flaps, 125 KIAS, brakes + reverse | 2,750 ft total [1: a search summary of a NATA C-130 sheet, not read]; roll 1,150-2,020 ft (S7) | 314 m air + 541 m roll (1,776 ft) = 855 m (2,806 ft); 119 KIAS at touch-down |
-//! | Landing roll, brakes only | same | longer | 815 m (2,675 ft): reverse saves a third |
+//! | Roll rate | full aileron, 200 KIAS, 56.2 t | 15-30°/s [est; light boosted controls, S6] | 27°/s |
+//! | Final approach | 56.2 t, 100% flaps, gear, 3° | 1.35 Vs + 10 = 132 kt (S4) | 129 kt hands off, 566 fpm, throttle 0.54, alpha 3.1° |
+//! | Landing from 50 ft | 130,000 lb, 100% flaps, 125 KIAS, brakes + reverse | 2,750 ft total [1: a search summary of a NATA C-130 sheet, not read]; roll 1,150-2,020 ft (S7) | 245 m air + 492 m roll (1,614 ft) = 737 m (2,418 ft); 121 KIAS at touch-down |
+//! | Landing roll, brakes only | same | longer | 683 m (2,240 ft): reverse saves a quarter |
 //!
 //! # Simulator limitations and remaining discrepancies
 //!
@@ -214,7 +216,47 @@ const fn main_leg(x: f32, z: f32, name: &'static str, kick: f64) -> Leg {
     }
 }
 
+/// The surface-element rig (aero.rs). Geometry is the drawing's own (`dims`):
+/// the wing from `wing_sect`; the tailplane and fin quarter chords and chords
+/// from `STAB_LE`/`STAB_TE` and `FIN_LE`/`FIN_TE` (Table C.6 chords); the
+/// flaps (inboard and outboard Lockheed-Fowler, one span here: the 0.1 m gap
+/// between them left out), ailerons, elevator and rudder from their spans
+/// and hinge lines. The rest:
+///
+/// - wing section NACA 64A318 at the root to 64A412 at the tip (Abbott & von
+///   Doenhoff: a ≈ 0.105/deg, α0 ≈ -2°, cm ≈ -0.05; cl_max set to give the
+///   stalls in the table above);
+/// - control travel [est, the Dash-1's figures not to hand]: aileron 25° up
+///   / 15° down, elevator 40° up / 15° down, rudder 35° each way, the trim
+///   tabs worth about 6° of elevator nose down and 12° nose up;
+/// - the Fowler flaps' extra lift, the tailplane's incidence and the
+///   fuselage's coefficients [est], tuned to the stalls, the hands-off
+///   final and the handling harness (plane/modes.rs);
+/// - a yaw damper, as the C-130H's autopilot carries [est gains].
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.035, cl_max: 1.55, cd0: 0.006, cm0: -0.05 },
+    wing_strips: 14,
+    oswald: 0.74,
+    flap: crate::aero::Ctrl { span: [FLAP_IB[0] as f64, FLAP_OB[1] as f64], chord: (1.0 - XF_FLAP) as f64, travel: [0.0, FLAP_MAX_DEG as f64 * std::f64::consts::PI / 180.0] },
+    flap_dcl_max: 1.0,
+    aileron_chord: (1.0 - XF_AIL) as f64,
+    aileron_travel: [0.4363, 0.2618],
+    // Quarter chords: root 4.64 m from 24.66 m behind the nose, tip 1.72 m
+    // from 27.33 m, 1.3 m above the CG.
+    htail: crate::aero::Planform { root: DVec3::new(0.0, 1.30, 13.718), tip: DVec3::new(STAB_SPAN as f64, 1.30, 15.656), chord: [4.643, 1.725], incidence: [0.0, 0.0] },
+    elevator: crate::aero::Ctrl { span: [ELEV_ROOT as f64, STAB_SPAN as f64], chord: (1.0 - ELEV_HINGE) as f64, travel: [0.5236, 0.2618] },
+    trim: [0.1047, 0.2094],
+    // Quarter chords: root 6.35 m from 22.20 m on the crown, tip 1.88 m from
+    // 26.77 m at the top.
+    fin: crate::aero::Planform { root: DVec3::new(0.0, 1.40, 11.688), tip: DVec3::new(0.0, 8.96, 15.14), chord: [6.35, 1.88], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [RUDDER_SPAN[0] as f64, RUDDER_SPAN[1] as f64], chord: (1.0 - RUDDER_HINGE) as f64, travel: [0.6109, 0.6109] },
+    fuse: crate::aero::Fuse { cm_a: 1.4, cn_b: -0.10, cl_b: -0.03, cy_b: -0.35, cl_a: 0.0 },
+    fcs: crate::aero::Fcs { damp: [0.0, 0.0, 2.0], damp_auth: 0.3, ..crate::aero::Fcs::NONE },
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
+    rig: Some(&RIG),
     id: 11,
     name: "Lockheed C-130H Hercules",
     keys: &["c130", "c130h", "hercules"],
