@@ -465,12 +465,14 @@ fn ping(server: &str) -> Option<u32> {
 }
 
 /// Which traffic model stands for each of our aircraft (airmodels::TYPES:
-/// light single, business jet, regional, narrow-body, wide-body).
+/// light single, business jet, regional, narrow-body, wide-body). (The
+/// C-130, 40 m span and 70 t, is nearest the narrow-body.)
 pub fn size_of(aircraft: u8) -> u8 {
     match aircraft {
         0 | 8 => 0,
         1 => 4,
         6 => 2,
+        11 => 3,
         _ => 1,
     }
 }

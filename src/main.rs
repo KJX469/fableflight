@@ -2436,6 +2436,13 @@ impl Game {
             // power, an estimate (no published figures found).)
             let (idle_t, rise) = match self.spec.id { 2 | 4 => (400.0, 380.0), 3 => (250.0, 330.0), 6 => (350.0, 400.0), 7 => (80.0, 740.0), 9 => (440.0, 430.0), _ => (440.0, 200.0) };
             let egt = oat + (idle_t - oat + rise * x.powf(1.4)) * running;
+            // (The C-130's T56s show turbine inlet temperature: taken as about 560 C at
+            // low-speed ground idle rising to about 1,010 C at take-off power, the
+            // T56-A-15's commonly quoted normal limit (TO 1C-130H-1 not seen) [est].)
+            let egt = match &self.spec.engine {
+                aircraft::Engine::Fan(f) if self.spec.turboprop_shp().is_some() => oat + (560.0 - oat + 450.0 * ((p.n1 - f.idle) / (1.0 - f.idle)).clamp(0.0, 1.1)) * running,
+                _ => egt,
+            };
             // Fuel flow per engine (kg/h) and the fuel on board (kg), from the engines' burn.
             let n_eng = match &self.spec.engine { aircraft::Engine::Fan(f) => f.n as f64, _ => 1.0 };
             let ff = p.fuel_flow * 3600.0 / n_eng;
@@ -2447,9 +2454,10 @@ impl Game {
                 g[0],
                 g[1],
                 [p.n1 as f32, egt as f32, ff as f32, fuel as f32],
-                [mach as f32, gs as f32, (agl * 3.28084) as f32, tat as f32],
+                // (The C-130 has no Machmeter: its elevator trim tab indicator reads the pitch trim from that slot.)
+                [if self.spec.id == 11 { p.trim as f32 } else { mach as f32 }, gs as f32, (agl * 3.28084) as f32, tat as f32],
                 [p.throttle as f32, local as f32, p.gear as f32, p.flap_deg() as f32],
-                [lit + card.rem_euclid(360.0), strobe * pw, beacon as f32 * pw, if (if matches!(self.spec.id, 0 | 9) { p.landing_lights } else { p.gear_down }) && p.sys.powered() { 1.0 } else { 0.0 }],
+                [lit + card.rem_euclid(360.0), strobe * pw, beacon as f32 * pw, if (if matches!(self.spec.id, 0 | 9 | 10) { p.landing_lights } else { p.gear_down }) && p.sys.powered() { 1.0 } else { 0.0 }],
             ];
         }
         // Row 5's first slot carries the nav lights (on above 1000) and the compass card.
@@ -2941,8 +2949,9 @@ impl Game {
         if pw {
             flags |= mp_proto::F_NAV | mp_proto::F_STROBE | mp_proto::F_BEACON;
         }
-        // (The G650's landing lights follow their switches alone.)
-        if pw && (if p.spec.id == 9 { p.landing_lights } else { p.gear_down }) {
+        // (The G650's and the C-130's landing lights follow their switches alone, as
+        // their own exteriors show them.)
+        if pw && (if matches!(p.spec.id, 9 | 10) { p.landing_lights } else { p.gear_down }) {
             flags |= mp_proto::F_LANDING;
         }
         if p.on_ground {
@@ -3266,6 +3275,12 @@ impl Game {
         let on_off = |b: bool| if b { "ON" } else { "OFF" };
         Some(match id {
             "master" => on_off(p.sys.elec.master).into(),
+            // The C-130 (id 10): its condition levers are the one fuel control,
+            // its ramp switch works the cargo ramp and door, its flap lever and
+            // indicator read percent of full travel.
+            "ignition" if self.spec.id == 11 => format!("{}{}", if p.ignition { "RUN" } else { "GROUND STOP" }, if p.starter_on || p.cranking { " · START" } else { "" }),
+            "canopy" if self.spec.id == 11 => if p.canopy_open { "OPEN" } else { "CLOSED" }.into(),
+            "flaps_up" if self.spec.id == 11 => format!("{:.0} %", 100.0 * self.spec.flaps.get(p.flap_set as usize).copied().unwrap_or(0.0) / self.spec.flaps.last().copied().unwrap_or(1.0).max(1.0)),
             "ignition" if self.spec.is_jet() => format!("{}{}", if p.ignition { "RUN" } else { "CUTOFF" }, if p.starter_on || p.cranking { " · START" } else { "" }),
             "ignition" => format!("{}{}", on_off(p.ignition), if p.starter_on || p.cranking { " · START" } else { "" }),
             "fuel_control_l" | "fuel_control_r" | "battery_l" | "battery_r" => {
@@ -3366,6 +3381,8 @@ impl Game {
             "flaps_up" if self.spec.lever.is_some() => t!("game.raise_nose_visor"),
             "flaps_down" if self.spec.lever.is_some() => t!("game.lower_nose_visor"),
             "speedbrake" if self.spec.chute.is_some() => t!("game.drag_chute"),
+            "ignition" if self.spec.id == 11 => t!("game.condition_levers"),
+            "canopy" if self.spec.id == 11 => t!("game.cargo_ramp_door"),
             _ => bind::ACTIONS.iter().find(|a| a.id == id).map(|a| a.label()).unwrap_or_else(|| aircraft::c172::cabin::action_label(id)),
         };
         if aim.is_some() || self.vcursor {
@@ -5370,7 +5387,10 @@ impl Game {
                 self.plane.pair_off[0] = [false; 2];
                 self.plane.ignition = !self.plane.ignition;
                 let on = self.plane.ignition;
-                self.status = if self.spec.is_jet() {
+                self.status = if self.spec.turboprop_shp().is_some() {
+                    // (A turboprop's engines are started and stopped with their condition levers.)
+                    if on { t!("game.condition_levers_run") } else { t!("game.condition_levers_ground_stop") }
+                } else if self.spec.is_jet() {
                     if on { t!("game.fuel_control_switches_run") } else { t!("game.fuel_control_switches_cutoff") }
                 } else if on {
                     t!("game.magnetos_on")
@@ -6513,6 +6533,7 @@ impl Game {
             fighter: match p.spec.sound { aircraft::Sound::Fighter => 1.0, aircraft::Sound::Turbojet => 2.0, _ => 0.0 },
             burner: p.burner as f32,
             four: if matches!(&p.spec.engine, aircraft::Engine::Fan(f) if f.n >= 4) { 1.0 } else { 0.0 },
+            turboprop: if matches!(p.spec.sound, aircraft::Sound::Turboprop) { 1.0 } else { 0.0 },
             rocket: if matches!(p.spec.sound, aircraft::Sound::Rocket) { p.n1 as f32 } else { 0.0 },
             air: (plane::density(geo::pos_to_lla(p.pos).2) / plane::RHO0) as f32,
             g_load: p.g_load as f32,
@@ -9220,6 +9241,9 @@ impl Game {
             t!("game.of_lit_0", lit, n, p.throttle * 100.0)
         } else if p.spec.is_jet() && p.reheat > 0.0 {
             format!("N1 {:.0}%  ·  {} {:.0}%", p.n1 * 100.0, t!("game.reheat"), p.reheat * 100.0)
+        } else if p.spec.turboprop_shp().is_some() {
+            // (A turboprop: the propellers' speed, and the power levers.)
+            format!("{rpm:.0} rpm  ·  {} {:.0}%", t!("game.throttle_2"), p.throttle * 100.0)
         } else if p.spec.is_jet() {
             format!("N1 {:.0}%  ·  {} {:.0}%", p.n1 * 100.0, t!("game.thrust_2"), p.throttle * 100.0)
         } else {

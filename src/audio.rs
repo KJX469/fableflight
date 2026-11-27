@@ -78,6 +78,8 @@ pub struct Params {
     pub burner: f32,
     /// there are four of those engines, in pods far behind the flight deck (1), not a pair behind the seat (0)
     pub four: f32,
+    /// the engines are four turboprops (1, see `Turboprop`; `rpm` is then the propellers' speed)
+    pub turboprop: f32,
     /// a rocket's engines (see `Rocket`): how hard they burn, 0..1 of all of them flat out, and
     /// the air's density there as a fraction of sea level's (what carries their sound)
     pub rocket: f32,
@@ -596,6 +598,91 @@ impl Engine {
         let wob = 1.0 + (1.0 - p.prop).clamp(0.0, 1.0) * 1.4 * (TAU * self.wob_ph).sin();
         let prop = (tone * 0.1 + whop * (0.28 + 0.6 * self.prop_bright)) * level * wob;
         (ex, prop, mech)
+    }
+}
+
+/// How far each of the four propellers runs from the governed speed: the
+/// synchrophaser holds them close but not together, so their drones beat
+/// (a few tenths of a hertz apart at 68 Hz) [est].
+const TP_DETUNE: [f32; 4] = [-0.0042, 0.0013, -0.0011, 0.0038];
+/// The T56: turbine revolutions per propeller revolution (13,820 rpm through
+/// a 13.54:1 reduction gearbox to the propeller's 1,020 rpm), and the
+/// compressor's and the gearbox's tones as multiples of the turbine's speed
+/// [est: picked to sit near 4.6 kHz and 2.1 kHz at 100%, no published
+/// figures found].
+const T56_RATIO: f32 = 13.54;
+const T56_WHINE: [f32; 2] = [20.0, 9.3];
+
+/// Four turboprops (the C-130's T56s, `Params::turboprop`): the propellers'
+/// heavy drone at their blade-passing frequency (four blades: 68 Hz at the
+/// governed 1,020 rpm) and its harmonics, more of them as the blades take up
+/// power, the four engines beating against each other; the broadband
+/// "whop" of the blades through the air; the turbines' whine (strong on the
+/// ground at idle, where little else is), the gearboxes' tone and the
+/// exhaust's rush.
+struct Turboprop {
+    /// each propeller's blade-passing phase
+    ph: [f32; 4],
+    drift: [Slow; 4],
+    /// the drone's harmonics
+    gain: [f32; 8],
+    bright: f32,
+    whine_ph: [f32; 2],
+    whop: Bq,
+    roar: Bq,
+    hiss: Bq,
+}
+
+impl Turboprop {
+    fn new() -> Self {
+        Self { ph: [0.0, 0.31, 0.57, 0.83], drift: Default::default(), gain: [0.0; 8], bright: 0.0, whine_ph: [0.0; 2], whop: Bq::new(Bq::bp, 420.0, 0.8), roar: Bq::new(Bq::lp, 300.0, 0.7), hiss: Bq::new(Bq::bp, 3000.0, 1.0) }
+    }
+    fn control(&mut self, p: &Params) {
+        // The blade tips (6 ft 9 in out) near Mach 0.65 at 1,020 rpm; loaded, the pulses sharpen.
+        let mach = p.rpm * TAU / 60.0 * 2.057 / 340.0;
+        self.bright = (0.2 + 0.6 * smooth(0.05, 1.0, p.power) + 0.25 * smooth(0.5, 0.7, mach)).min(1.0);
+        let ex = 1.9 - 1.1 * self.bright;
+        for (h, g) in self.gain.iter_mut().enumerate() {
+            *g = ((h + 1) as f32).powf(-ex);
+        }
+        self.hiss.bp(2400.0 + 1600.0 * p.n1, 1.0);
+    }
+    /// The turbines and exhaust, the propellers, the gearboxes.
+    fn sample(&mut self, p: &Params, rng: &mut Rng) -> (f32, f32, f32) {
+        let rev = p.rpm.max(0.0) / 60.0;
+        let bpf = rev * 4.0;
+        let run = if p.health > 0.0 { 1.0 } else { 0.25 };
+        let load = if p.health > 0.0 { 0.3 + 0.7 * p.power.clamp(0.0, 1.2) } else { 0.12 };
+        let mut tone = 0.0;
+        for k in 0..4 {
+            let drift = self.drift[k].run(rng.f(), 0.002) * 0.0004;
+            self.ph[k] = (self.ph[k] + bpf * (1.0 + TP_DETUNE[k] + drift) * DT).fract();
+            // The harmonics by recurrence: sin((h + 1) t) = 2 cos t sin(h t) - sin((h - 1) t).
+            let (s1, c1) = (TAU * self.ph[k] + 1.3 * k as f32).sin_cos();
+            let (mut s0, mut s) = (0.0f32, s1);
+            for g in &self.gain {
+                tone += g * s;
+                let n = 2.0 * c1 * s - s0;
+                (s0, s) = (s, n);
+            }
+        }
+        let blade = 0.5 + 0.5 * (TAU * self.ph[0]).cos();
+        let whop = self.whop.run(rng.f()) * blade * blade;
+        // (Spinning up from a standstill, then at the governed speed whatever the power.)
+        let level = (rev / 17.0).powi(2).min(1.3);
+        let prop = (tone * 0.075 + whop * (0.25 + 0.6 * self.bright)) * level * load;
+        let shaft = rev * T56_RATIO;
+        let mut whine = 0.0;
+        for (k, m) in T56_WHINE.iter().enumerate() {
+            self.whine_ph[k] = (self.whine_ph[k] + shaft * m * DT).fract();
+            whine += (TAU * self.whine_ph[k]).sin() * if k == 0 { 0.014 } else { 0.007 };
+        }
+        let nz = rng.f();
+        let thrust = p.power.clamp(0.0, 1.2);
+        let roar = self.roar.run(nz) * (0.06 + 0.5 * thrust.powf(1.3));
+        let hiss = self.hiss.run(nz) * (0.03 + 0.08 * p.n1);
+        let spool = smooth(0.5, 6.0, rev);
+        ((whine * level + roar + hiss) * run * spool, prop * run, whine * 0.4 * level * run)
     }
 }
 
@@ -1474,6 +1561,7 @@ struct Synth {
     p: Params,
     eng: Engine,
     jet: Jet,
+    tprop: Turboprop,
     fighter: Fighter,
     rocket: Rocket,
     wind: Wind,
@@ -1507,6 +1595,7 @@ impl Synth {
             p: Params::default(),
             eng: Engine::new(),
             jet: Jet::new(),
+            tprop: Turboprop::new(),
             fighter: Fighter::new(),
             rocket: Rocket::new(),
             wind: Wind::new(),
@@ -1658,6 +1747,7 @@ impl Synth {
         sm(&mut p.burner, t.burner, 0.05);
         (p.jet, p.fighter, p.vne) = (t.jet, t.fighter, t.vne);
         p.four = t.four;
+        p.turboprop = t.turboprop;
         (p.rocket, p.air) = (t.rocket, t.air);
         p.health = if t.health <= 0.0 { 0.0 } else { p.health };
         p.warn = t.warn;
@@ -1668,6 +1758,7 @@ impl Synth {
 
         self.eng.control(&p);
         self.jet.control(&p);
+        self.tprop.control(&p);
         self.fighter.control(&p, self.t.burner > 0.5);
         self.rocket.control(&p);
         self.wind.control(&p);
@@ -1713,11 +1804,14 @@ impl Iterator for Synth {
         // The aircraft's own sources.
         let jet = p.jet > 0.5;
         let fighter = p.fighter > 0.5;
+        let tp = p.turboprop > 0.5;
         let (ex, prop, mech) = if p.live > 0.001 && p.rpm > 1.0 {
             if fighter {
                 // The recordings carry the roar: of the synthesised engine only the fan's tones are wanted.
                 // (A turbojet has no fan to sing: less of them still.)
                 (self.jet.sample(&Params { power: p.power.min(1.0) * 0.12, ..p }, rng) * if p.fighter > 1.5 { 0.12 } else { 0.3 }, 0.0, 0.0)
+            } else if tp {
+                self.tprop.sample(&p, rng)
             } else if jet {
                 (self.jet.sample(&p, rng), 0.0, 0.0)
             } else {
@@ -1759,7 +1853,8 @@ impl Iterator for Synth {
         let c = &mut self.cab;
         let dg = self.dist_gain;
         let wg = dg.sqrt().min(1.0);
-        let eng = (ex + prop * 1.1 + mech * 0.6) * if jet { 3.2 } else { 1.0 };
+        // (Four turboprops: the propellers' drone carries well, the turbines less than a turbofan's roar.)
+        let eng = (ex + prop * 1.1 + mech * 0.6) * if tp { 2.6 } else if jet { 3.2 } else { 1.0 };
         let mut el = (eng + fx[0] + ml + sl * 0.3) * dg + w[0] * wg + rx[0] * rg;
         let mut er = (eng + fx[1] + mr + sr * 0.3) * dg + w[1] * wg + rx[1] * rg;
         let k = c.abs_k;
@@ -1776,7 +1871,8 @@ impl Iterator for Synth {
         if p.cabin > 0.001 {
             // (An airliner's flight deck is far ahead of its engines, and well insulated.)
             // (A fighter's engines are right behind the seat: more of them comes through the airframe.)
-            let ie = (ex * 1.0 + prop * 1.5 + mech * 0.3) * if jet { 0.18 } else { 1.0 } + (fx[0] + fx[1]) * f_in;
+            // (A turboprop's flight deck has the propellers' tips a metre or so outside it: their drone comes through loud.)
+            let ie = (ex * 1.0 + prop * 1.5 + mech * 0.3) * if tp { 0.55 } else if jet { 0.18 } else { 1.0 } + (fx[0] + fx[1]) * f_in;
             let ie = c.eng_lp[0].run(ie);
             let ie = c.eng_lp[1].run(ie);
             let ie = c.eng_boom.run(ie) * 0.75 + ex * 0.03;
@@ -2043,6 +2139,41 @@ mod tests {
     }
 
     #[test]
+    fn turboprops_drone_at_the_blade_passing_frequency() {
+        // The C-130 as main.rs sends it: a "jet" (its airflow scaling) with four turboprops; rpm the propellers'.
+        let tp = |rpm: f32, power: f32, cabin: f32| Params { jet: 1.0, turboprop: 1.0, four: 1.0, n1: rpm / 1020.0, rpm, power, throttle: power, airspeed: 0.0, dist: 30.0, cabin, vne: 120.0, ..flying() };
+        let band = |x: &[[f32; 2]], f: f32| {
+            let mut b = Bq::new(Bq::bp, f, 10.0);
+            let y: Vec<[f32; 2]> = x.iter().map(|s| { let v = b.run(s[0]); [v, v] }).collect();
+            rms(&y) / rms(x)
+        };
+        let full = render(tp(1020.0, 1.0, 0.0), &[], 3.0);
+        assert!(full.iter().all(|s| s[0].is_finite() && s[0].abs() <= 1.0 && s[1].abs() <= 1.0));
+        // Four blades at 1,020 rpm: 68 Hz, with its harmonics, not the frequencies between.
+        let (f1, f2, gap) = (band(&full, 68.0), band(&full, 136.0), band(&full, 98.0));
+        // At low-speed ground idle (72%: 49 Hz) the drone follows the propellers down.
+        let idle = render(tp(734.4, 0.05, 0.0), &[], 3.0);
+        let (i1, i_gap) = (band(&idle, 49.0), band(&idle, 68.0));
+        let (loud, quiet) = (rms(&full), rms(&idle));
+        // The four drift against each other: the 68 Hz band swells and fades.
+        let mut b = Bq::new(Bq::bp, 68.0, 10.0);
+        let env: Vec<f32> = full.chunks(RATE as usize / 10).map(|c| (c.iter().map(|s| b.run(s[0]).powi(2)).sum::<f32>() / c.len() as f32).sqrt()).collect();
+        let beat = env[2..].iter().cloned().fold(0.0, f32::max) / env[2..].iter().cloned().fold(f32::MAX, f32::min).max(1e-6);
+        // Aboard: duller, and more of it the drone.
+        let deck = render(tp(1020.0, 1.0, 1.0), &[], 3.0);
+        let jet = rms(&render(Params { jet: 1.0, n1: 1.0, rpm: 3600.0, power: 1.0, throttle: 1.0, airspeed: 0.0, dist: 30.0, vne: 85.0, ..flying() }, &[], 1.0));
+        println!(
+            "turboprops: 68 Hz band {f1:.2}, 136 Hz {f2:.2}, between (98 Hz) {gap:.2}; at idle 49 Hz {i1:.2} vs 68 Hz {i_gap:.2}; take-off {:.1} dB over idle; beating {beat:.2}x; flight deck {:.1} dB re outside, its 68 Hz band {:.2}; an airliner flat out {:.1} dB re the turboprops",
+            db(loud, quiet), db(rms(&deck), loud), band(&deck, 68.0), db(jet, loud)
+        );
+        assert!(f1 > 2.0 * gap && f2 > 1.5 * gap, "no drone at the blade-passing frequency: {f1:.3} {f2:.3} against {gap:.3}");
+        assert!(i1 > 1.5 * i_gap, "the drone does not follow the propellers' speed: {i1:.3} against {i_gap:.3}");
+        assert!(db(loud, quiet) > 6.0, "take-off power only {:.1} dB over idle", db(loud, quiet));
+        assert!(beat > 1.3, "the four propellers do not beat: {beat:.2}");
+        assert!(bright(&deck) < bright(&full) * 0.8 && band(&deck, 68.0) > f1, "the flight deck is not muffled to the drone");
+    }
+
+    #[test]
     fn rockets_roar_and_fall_silent_in_space() {
         let burn = |rocket: f32, air: f32, cabin: f32| Params { rocket, air, cabin, rpm: 0.0, airspeed: 0.0, dist: 230.0, ..flying() };
         let (pad, part, quiet) = (rms(&render(burn(1.0, 1.0, 0.0), &[], 1.0)), rms(&render(burn(0.09, 1.0, 0.0), &[], 1.0)), rms(&render(burn(0.0, 1.0, 0.0), &[], 1.0)));
@@ -2131,6 +2262,9 @@ mod tests {
             ("turbojets at 80%, cockpit", Params { jet: 1.0, fighter: 2.0, n1: 0.8, rpm: 6000.0, power: 0.35, throttle: 0.5, airspeed: 30.0, cabin: 1.0, ..f }, vec![], 4.0),
             ("turbojets at military power", Params { jet: 1.0, fighter: 2.0, n1: 1.0, rpm: 7460.0, power: 1.0, throttle: 1.0, airspeed: 30.0, dist: 26.0, ..f }, vec![], 4.0),
             ("turbojets in afterburner", Params { jet: 1.0, fighter: 2.0, n1: 1.0, rpm: 7460.0, power: 1.8, throttle: 1.0, burner: 1.0, airspeed: 30.0, dist: 26.0, ..f }, vec![], 5.0),
+            ("turboprops at ground idle", Params { jet: 1.0, turboprop: 1.0, four: 1.0, n1: 0.72, rpm: 734.4, power: 0.05, throttle: 0.0, airspeed: 0.0, dist: 30.0, ..f }, vec![], 4.0),
+            ("turboprops at take-off power", Params { jet: 1.0, turboprop: 1.0, four: 1.0, n1: 1.0, rpm: 1020.0, power: 1.0, throttle: 1.0, airspeed: 20.0, dist: 30.0, ..f }, vec![], 5.0),
+            ("turboprops cruising, flight deck", Params { jet: 1.0, turboprop: 1.0, four: 1.0, n1: 1.0, rpm: 1020.0, power: 0.75, throttle: 0.75, airspeed: 60.0, cabin: 1.0, ..f }, vec![], 5.0),
         ];
         let scenes: Vec<_> = scenes.into_iter().filter(|s| std::env::var("AUDIO_SCENES").map_or(true, |k| s.0.contains(&k))).collect();
         let mut out: Vec<i16> = Vec::new();
