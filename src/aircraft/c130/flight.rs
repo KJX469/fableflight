@@ -169,7 +169,7 @@
 //!   warnings use `VNE_KT`, 320 KIAS (S8's VD, S6's redline) and Mach 0.64
 //!   (S3, S8).
 use super::dims::*;
-use crate::aircraft::{Engine, Fan, Handling, Hole, Hull, Leg, Part, Sound, Spec, Tail};
+use crate::aircraft::{Engine, Fan, Handling, Hole, Hull, Leg, Part, Sound, Spec, Tail, Tyre};
 use glam::DVec3;
 
 const KT: f64 = 1.0 / 1.94384;
@@ -202,12 +202,12 @@ const fn main_leg(x: f32, z: f32, name: &'static str, kick: f64) -> Leg {
         nf_max: 1.6e6,
         steer: 0.0,
         brakes: true,
-        side_k: 2.6e5,
-        side_mu: 0.8,
-        roll_k: 5.0e3,
+        mu: 0.8,
         roll_mu: 0.015,
-        brake_k: 1.3e5,
         brake_mu: 0.5,
+        // a 56x20-20 low-pressure tyre for unpaved strips, about 95 psi
+        // loaded [est]; the H has anti-skid brakes
+        tyre: Tyre { wheels: 1, pressure: 655.0, caster: 0.0, oleo: true, antiskid: true },
         fold_vn: 4.5,
         fold_kick: DVec3::new(0.3, 0.0, kick),
         name,
@@ -307,12 +307,11 @@ pub static SPEC: Spec = Spec {
             nf_max: 9.0e5,
             steer: 1.0,
             brakes: false,
-            side_k: 1.5e5,
-            side_mu: 0.8,
-            roll_k: 3.0e3,
+            mu: 0.8,
             roll_mu: 0.015,
-            brake_k: 0.0,
             brake_mu: 0.0,
+            // twin 39x13-16s, about 60 psi [est]
+            tyre: Tyre { wheels: 2, pressure: 414.0, caster: 0.0, oleo: true, antiskid: false },
             fold_vn: 3.8,
             fold_kick: DVec3::new(-0.4, 0.0, 0.0),
             name: "NOSE GEAR",
