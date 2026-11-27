@@ -147,6 +147,12 @@ const VS_ALT: f64 = 7.5;
 /// Glide slope angle (degrees).
 const GS_DEG: f64 = 3.0;
 
+/// the vertical speed a level change flies at (m/s): 1800 fpm for a jet,
+/// 600 for a light single, about what each manages in a cruise climb.
+pub fn level_rate(spec: &crate::aircraft::Spec) -> f64 {
+    (if spec.is_jet() { 1800.0 } else { 600.0 }) / 196.85
+}
+
 impl Autopilot {
     /// Engages it in ROL and PIT (or keeps the modes chosen beforehand),
     /// taking up the heading, altitude and speed of the moment where unset.
@@ -164,6 +170,18 @@ impl Autopilot {
         if self.spd <= 0.0 {
             self.spd = s.ias;
         }
+    }
+
+    /// the altitude ALT holds (m).
+    pub fn holding(&self) -> f64 {
+        self.alt_hold
+    }
+
+    /// to the preselected altitude at a vertical speed, capturing it (VS, ALT armed).
+    pub fn level_change(&mut self, s: &State, rate: f64) {
+        self.vert = Vert::Vs;
+        self.alt_cap = false;
+        self.vs = if self.alt > s.alt { rate.abs() } else { -rate.abs() };
     }
 
     pub fn disengage(&mut self) {
@@ -263,12 +281,19 @@ impl Autopilot {
                             want_hdg = Some(s.hdg + wrap(want_trk - s.trk));
                             bank_max = BANK_NAV;
                         } else {
-                            want_hdg = Some(self.hdg);
+                            // armed: the flight plan's track while there is one, else the bug.
+                            want_hdg = Some(match self.gps_trk {
+                                Some(trk) => s.hdg + wrap(trk - s.trk),
+                                None => self.hdg,
+                            });
                         }
                     }
                     _ => {
                         self.nav_cap = false;
-                        want_hdg = Some(self.hdg);
+                        want_hdg = Some(match self.gps_trk {
+                            Some(trk) => s.hdg + wrap(trk - s.trk),
+                            None => self.hdg,
+                        });
                     }
                 }
             }
@@ -379,6 +404,7 @@ impl Autopilot {
             Lat::Hdg => format!("HDG {:03.0}", self.hdg.rem_euclid(360.0)),
             Lat::Nav if self.nav_cap => "NAV".into(),
             Lat::Apr if self.nav_cap => "LOC".into(),
+            Lat::Nav | Lat::Apr if self.gps_trk.is_some() => "GPS".into(),
             Lat::Nav | Lat::Apr => format!("HDG {:03.0}", self.hdg.rem_euclid(360.0)),
             Lat::Gps if self.gps_trk.is_some() => "GPS".into(),
             Lat::Gps => format!("HDG {:03.0}", self.hdg.rem_euclid(360.0)),
@@ -542,6 +568,26 @@ mod tests {
             assert_eq!(ap.vert, Vert::Alt, "{}: never captured ({:.0} m)", spec.name, s.alt);
             assert!((s.alt - 1600.0).abs() * 3.28 < 50.0, "{}: {:.0} ft", spec.name, s.alt * 3.28);
             assert!(over * 3.28 < 120.0, "{}: overshot by {:.0} ft", spec.name, over * 3.28);
+        }
+    }
+
+    /// a new altitude on the knob: up and back down at the type's level change rate, captured both ways.
+    #[test]
+    fn level_change_up_and_down() {
+        let w = flat();
+        for spec in planes() {
+            let (mut p, mut ap) = cruising(spec, 1200.0);
+            for target in [1800.0, 1200.0] {
+                ap.alt = target;
+                let s = State::of(&p);
+                ap.level_change(&s, level_rate(spec));
+                fly(&mut p, &mut ap, &w, 420.0, None, 0.0, |_, ap, _| ap.vert == Vert::Alt).unwrap_or_else(|e| panic!("{}: let go ({e:?})", spec.name));
+                fly(&mut p, &mut ap, &w, 20.0, None, 0.0, |_, _, _| false).unwrap();
+                let s = State::of(&p);
+                println!("{:16} to {:.0} ft: {:.0} ft {:?}", spec.name, target * 3.28, s.alt * 3.28, ap.vert);
+                assert_eq!(ap.vert, Vert::Alt, "{}: never captured {:.0} ft", spec.name, target * 3.28);
+                assert!((s.alt - target).abs() * 3.28 < 60.0, "{}: {:.0} ft for {:.0}", spec.name, s.alt * 3.28, target * 3.28);
+            }
         }
     }
 

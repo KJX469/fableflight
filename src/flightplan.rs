@@ -109,11 +109,13 @@ pub struct Waypoint {
     pub course: Option<f64>,
     /// the procedure it came from, and its name.
     pub phase: Option<(Phase, String)>,
+    /// the airway or procedure the leg to it is flown on, none for direct.
+    pub via: Option<String>,
 }
 
 impl Waypoint {
     fn new(ident: String, name: String, kind: Kind, lat: f64, lon: f64) -> Self {
-        Waypoint { ident, name, kind, lat, lon, leg: Leg::Fix { direct: false }, alt: None, speed: None, course: None, phase: None }
+        Waypoint { ident, name, kind, lat, lon, leg: Leg::Fix { direct: false }, alt: None, speed: None, course: None, phase: None, via: None }
     }
 
     pub fn user(lat: f64, lon: f64, n: usize) -> Self {
@@ -334,6 +336,7 @@ pub fn from_legs(legs: &[navdata::RawLeg], phase: Phase, name: &str, start: Opti
                 w.speed = l.speed;
                 w.course = if l.pt == "CF" { l.course } else { None };
                 w.phase = tag.clone();
+                w.via = Some(name.to_string());
                 push(&mut out, &mut prev, w);
             }
             _ => {}
@@ -372,6 +375,7 @@ impl Plan {
         let ways = navdata::Db::get();
         // where the route goes in: before the star, approach and destination when those are set.
         let mut at = self.insert_point();
+        let mut pending_via: Option<String> = None;
         for (k, tok) in toks.iter().enumerate() {
             // an airway between the fix before and the fix after.
             if ways.airways.contains_key(tok.as_str()) {
@@ -380,9 +384,13 @@ impl Plan {
                     (Some(a), Some(b)) => match ways.airway(tok, &a, b) {
                         Some(fixes) => {
                             for (id, la, lo) in fixes {
-                                self.wps.insert(at, Waypoint::fix(&id, la, lo));
+                                let mut w = Waypoint::fix(&id, la, lo);
+                                w.via = Some(tok.clone());
+                                self.wps.insert(at, w);
                                 at += 1;
                             }
+                            // the fix after is reached on the airway too.
+                            pending_via = Some(tok.clone());
                         }
                         None => bad.push(format!("{tok} ({a} {b})")),
                     },
@@ -392,7 +400,8 @@ impl Plan {
             }
             let near = if at > 0 { self.wps.get(at - 1).map(|w| w.at()) } else { None }.or(self.tail(dep));
             match resolve(tok, near, self.next_user()) {
-                Ok(w) => {
+                Ok(mut w) => {
+                    w.via = pending_via.take();
                     self.wps.insert(at, w);
                     at += 1;
                 }
@@ -481,15 +490,6 @@ impl Plan {
         self.sid = None;
         self.star = None;
         self.app = None;
-    }
-
-    /// reverses the route, dropping the procedures that no longer fit.
-    pub fn reverse(&mut self) {
-        self.wps.retain(|w| w.phase.is_none());
-        self.sid = None;
-        self.star = None;
-        self.app = None;
-        self.wps.reverse();
     }
 
     /// legs as from, to, metres, course.
@@ -635,7 +635,30 @@ impl Plan {
         if let Some(p) = &self.sid {
             out.push(match &p.trans { Some(t) => format!("{}.{t}", p.name), None => p.name.clone() });
         }
-        out.extend(self.wps.iter().filter(|w| w.phase.is_none()).map(|w| if w.kind == Kind::User { format!("{:.4},{:.4}", w.lat, w.lon) } else { w.ident.clone() }));
+        // the destination is not part of the route string.
+        let dest = self.dest_index();
+        let enroute: Vec<&Waypoint> = self.wps.iter().enumerate().filter(|(i, w)| w.phase.is_none() && Some(*i) != dest).map(|(_, w)| w).collect();
+        let airway = |w: &Waypoint| w.via.clone().filter(|v| v != "DCT");
+        let mut on: Option<String> = None;
+        for (i, w) in enroute.iter().enumerate() {
+            let name = if w.kind == Kind::User { format!("{:.4},{:.4}", w.lat, w.lon) } else { w.ident.clone() };
+            match airway(w) {
+                Some(a) => {
+                    if on.as_ref() != Some(&a) {
+                        out.push(a.clone());
+                        on = Some(a.clone());
+                    }
+                    // fixes along an airway are left out, only its exit is named.
+                    if enroute.get(i + 1).and_then(|n| airway(n)).as_ref() != Some(&a) {
+                        out.push(name);
+                    }
+                }
+                None => {
+                    on = None;
+                    out.push(name);
+                }
+            }
+        }
         for p in [&self.star, &self.app].into_iter().flatten() {
             out.push(match &p.trans { Some(t) => format!("{t}.{}", p.name), None => p.name.clone() });
         }

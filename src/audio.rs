@@ -26,6 +26,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+pub(crate) mod radio;
+
 /// The cockpit warnings that are sounding.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Warn {
@@ -148,6 +150,8 @@ pub enum Event {
 struct Shared {
     params: Mutex<Params>,
     events: Mutex<Vec<Event>>,
+    /// ATC messages waiting to go out on the radio (see `radio`)
+    radio: Mutex<std::collections::VecDeque<radio::Transmission>>,
 }
 
 pub struct Audio {
@@ -227,6 +231,14 @@ impl Audio {
     }
     pub fn boom(&self, power: f32) {
         self.event(Event::Boom(power));
+    }
+    /// A message on the radio (atc): heard in the headset, whatever the
+    /// camera, after any still playing; it holds while the game is paused.
+    pub fn radio(&self, t: radio::Transmission) {
+        let mut q = self.shared.radio.lock();
+        if q.len() < 8 {
+            q.push_back(t);
+        }
     }
 }
 
@@ -1478,6 +1490,8 @@ struct Synth {
     lim_k: f32,
     dc: [Bq; 2],
     right: Option<f32>,
+    /// the radio message playing
+    radio: Option<radio::Transmission>,
     /// sums of squares of each part of the mix, for tuning the levels in the tests
     #[cfg(test)]
     meter: [f64; 10],
@@ -1508,6 +1522,7 @@ impl Synth {
             lim_k: decay(0.15),
             dc: [Bq::new(Bq::hp, 18.0, 0.7); 2],
             right: None,
+            radio: None,
             #[cfg(test)]
             meter: [0.0; 10],
         }
@@ -1801,6 +1816,18 @@ impl Iterator for Synth {
         let alarm = self.alarms.sample(&p.warn) * (0.55 + 0.45 * x) * 0.32;
         l += alarm;
         r += alarm;
+        // The radio: in the headset, both ears, the same inside and out; held while paused.
+        if self.radio.is_none() && self.n % TICK == 1 {
+            self.radio = self.s.radio.lock().pop_front();
+        }
+        if let Some(t) = self.radio.as_mut().filter(|_| p.live > 0.5) {
+            let v = t.sample() * 0.42;
+            l += v;
+            r += v;
+            if t.done() {
+                self.radio = None;
+            }
+        }
 
         #[cfg(test)]
         for (m, v) in self.meter.iter_mut().zip([ex, prop, mech, w[0], w[2], sl, ml, il - w[2] - sl, alarm, l]) {
@@ -1868,6 +1895,30 @@ mod tests {
     }
     fn db(a: f32, b: f32) -> f32 {
         20.0 * (a / b).log10()
+    }
+
+    #[test]
+    fn radio_plays_and_holds_while_paused() {
+        // a second of a 1 kHz tone as a voice at 24 kHz, on the radio
+        let tone: Vec<f32> = (0..24_000).map(|i| (TAU * 1000.0 * i as f32 / 24_000.0).sin() * 0.5).collect();
+        let shared = Arc::new(Shared::default());
+        let mut p = Params { master: 1.0, ..Default::default() };
+        *shared.params.lock() = p;
+        shared.radio.lock().push_back(radio::Transmission::new(tone, 24_000, radio::Station::TOWER, 1.0, 1));
+        let mut s = Synth::new(shared.clone());
+        s.p = p;
+        let level = |s: &mut Synth, secs: f32| (0..(secs * RATE as f32) as usize).map(|_| { let l = s.next().unwrap(); s.next(); l * l }).sum::<f32>() / (secs * RATE as f32);
+        // paused (not live): nothing comes out and the message waits
+        assert!(level(&mut s, 0.5) < 1e-6);
+        p.live = 1.0;
+        *shared.params.lock() = p;
+        s.t = p;
+        s.p = p;
+        let on = level(&mut s, 0.8);
+        assert!(on > 1e-3, "the radio is silent: {on}");
+        // and it ends
+        level(&mut s, 1.0);
+        assert!(s.radio.is_none() && shared.radio.lock().is_empty());
     }
 
     #[test]

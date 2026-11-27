@@ -49,6 +49,8 @@ pub struct Ext {
     pub travel: Vec<f32>,
     /// span (m), for sorting its parts into the breakable groups
     pub span: f32,
+    /// a `.glb` model's scale and turn about the vertical (deg), custom.rs
+    pub gltf: [f32; 2],
 }
 
 // ------------------------------------------------------------------ AC3D
@@ -708,6 +710,9 @@ fn srgb_to_linear(c: f32) -> f32 {
 impl Ext {
     /// Reads the model and builds ours from it.
     pub fn build(&self) -> Result<Model, String> {
+        if self.model.extension().is_some_and(|e| e.eq_ignore_ascii_case("glb")) {
+            return crate::custom::build_glb(self);
+        }
         let t0 = std::time::Instant::now();
         let root = std::fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
         let mut ld = Loader { ext: self, root, stack: Vec::new(), loads: 0, acs: Vec::new(), objs: Vec::new(), anims: Vec::new(), order: 0, warn: Vec::new() };
@@ -1031,7 +1036,7 @@ mod tests {
             "<PropertyList><model><path>../secret.xml</path></model><model><path>main.xml</path></model><model><path>main.xml</path></model></PropertyList>",
         )
         .unwrap();
-        let ext = Ext { dir: aircraft.clone(), fg_dir: "myplane".into(), model: model.clone(), origin: Vec3::ZERO, steer_max: 0.5, travel: Vec::new(), span: 10.0 };
+        let ext = Ext { dir: aircraft.clone(), fg_dir: "myplane".into(), model: model.clone(), origin: Vec3::ZERO, steer_max: 0.5, travel: Vec::new(), span: 10.0, gltf: [1.0, 0.0] };
         let root = std::fs::canonicalize(&aircraft).unwrap();
         let mut ld = Loader { ext: &ext, root: root.clone(), stack: Vec::new(), loads: 0, acs: Vec::new(), objs: Vec::new(), anims: Vec::new(), order: 0, warn: Vec::new() };
         assert!(ld.resolve(&aircraft, "../secret.xml").is_none(), "traversal must be refused");

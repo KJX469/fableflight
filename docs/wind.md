@@ -13,6 +13,8 @@ weather and terrain, so every aircraft, built-in or downloaded, gets all of it.
 | thermals, storm drafts | `weather.rs`, `storm.rs` | sun, clouds, storm cells |
 | ridge lift, lee waves, rotor | `orographic.rs` | the world's terrain, wind, stability |
 | wake vortices | `wake.rs` | airport and live traffic |
+| clear air turbulence | `weather.rs` `Weather::clear_air` | the shear of the winds aloft |
+| temperature and pressure | `plane.rs` `set_air` / `atmosphere` | live weather's QNH and surface temperature |
 | how the airframe feels all that | `plane.rs` `Plane::turbulence` | the aircraft's geometry |
 
 ## The wind profile
@@ -90,6 +92,31 @@ The vortices' velocity is added wherever the airframe samples the air, so a
 light aircraft that flies a wing into a heavy's vortex rolls hard and a big
 one much less (`a_heavy_jets_wake_rolls_a_light_aircraft`: a C172 hands off
 reaches about 80° of bank in 4 s, a 747 about 14°).
+
+## The day's air: temperature and pressure
+
+The atmosphere every aircraft flies in is the USSA 1976 shifted to the day:
+sea-level pressure is the QNH and the whole column is as much warmer or
+colder than standard as the surface report says (`Weather::isa_dev`, the
+METAR or Open-Meteo temperature brought down to sea level at 6.5 K/km), with
+the standard lapse rates above. Density, the speed of sound and the pitot's
+static pressure all come from it, so a hot day at a high field gives the long
+take-off run and the slow climb it should: `--fly-check c172 --oat 40` lifts
+off after about 500 m against 414 m on a standard day, close to the POH's
+temperature correction. The altimeter reads the pressure altitude of the
+actual static pressure (`pressure_alt`), so on a cold day it reads high, as a
+real one does. Hand-set weather stays standard.
+
+## Clear air turbulence
+
+`Weather::clear_air` gives turbulence aloft (4.5 to 16 km) where the wind
+changes quickly with height: from about 4 kt per 1000 ft of shear it starts,
+past about 10 it is moderate to severe (the vertical wind shear rule
+forecasters use, after Ellrod and Knapp 1992). It comes in patches tens of
+kilometres long and a few hundred metres deep (a smooth lattice noise), so
+climbing or descending a couple of thousand feet often finds smooth air, as
+pilots do. The shear comes from the live winds aloft; the default profile is
+too gentle to make any.
 
 ## Limits
 

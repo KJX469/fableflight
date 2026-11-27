@@ -100,12 +100,14 @@ jobs:
           New-ItemProperty -Force $key -Name DumpType -PropertyType DWord -Value 1 | Out-Null
           New-ItemProperty -Force $key -Name DumpCount -PropertyType DWord -Value 4 | Out-Null
       - name: Run the game (Windows, WARP)
+        id: smoke_windows
         if: runner.os == 'Windows'
         run: python .github/scripts/smoke.py target/release/fablegame.exe smoke-shots
       # Print the crashing thread's stack (and every thread's) from the dump,
       # with our PDB and Microsoft's public symbols for the driver and DXC.
+      # only when the game run failed, not after a failed build or test.
       - name: Crash stack (Windows)
-        if: failure() && runner.os == 'Windows'
+        if: failure() && steps.smoke_windows.outcome == 'failure'
         shell: pwsh
         run: |
           $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe', 'C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe' -ErrorAction SilentlyContinue | Select-Object -First 1

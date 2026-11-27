@@ -17,11 +17,13 @@ pub struct Config {
     pub installed_tag: Option<String>,
     /// the graphics test's results, newest last
     pub bench: Vec<BenchResult>,
+    /// seconds the game has run, started from here
+    pub play_secs: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { stage_ms: Vec::new(), minimize_on_ready: true, check_updates: true, installed_tag: None, bench: Vec::new() }
+        Config { stage_ms: Vec::new(), minimize_on_ready: true, check_updates: true, installed_tag: None, bench: Vec::new(), play_secs: 0 }
     }
 }
 
@@ -76,22 +78,13 @@ impl Verdict {
             Verdict::Struggles
         }
     }
+}
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Verdict::Smooth => "Stable",
-            Verdict::Playable => "Playable",
-            Verdict::Struggles => "Unstable",
-        }
-    }
-
-    pub fn about(self) -> &'static str {
-        match self {
-            Verdict::Smooth => "Smooth flying: even the slowest frames stay above 50 fps.",
-            Verdict::Playable => "Flyable, with dips under 50 fps in busy scenery. Fine for most flights.",
-            Verdict::Struggles => "Frame rate drops below 30 fps. Pick a lower preset or a lower render resolution.",
-        }
-    }
+/// The hours in the air in the game's logbook (`<config>/fablegame/profile.json`).
+pub fn logbook_secs() -> f64 {
+    let Some(p) = dirs::config_dir().map(|d| d.join("fablegame").join("profile.json")) else { return 0.0 };
+    let Some(j) = std::fs::read(p).ok().and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok()) else { return 0.0 };
+    j["log"].as_array().map_or(0.0, |l| l.iter().filter_map(|e| e["air_s"].as_f64()).sum())
 }
 
 fn path() -> Option<PathBuf> {

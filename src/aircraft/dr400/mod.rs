@@ -18,6 +18,28 @@
 //! and oil door. The two round cooling inlets in the nose bowl are cut out
 //! of the skin there too (`inlet_dr400`), onto ducts built here.
 //!
+//! The shape was checked in Blender against these, overlaid in orthographic
+//! side, top and front views:
+//! - a three-view line drawing, "Dreiseitenansicht Robin DR 400.svg" by
+//!   Frank Murmann, CC BY 3.0,
+//!   <https://commons.wikimedia.org/wiki/File:Dreiseitenansicht_Robin_DR_400.svg>.
+//!   Its views are not drawn to one scale: the side view was scaled to the
+//!   6.96 m length (187.5 px/m at 2400 px wide), the top and front views to
+//!   the 8.72 m span (about 174 px/m). Read from it: the centre section out
+//!   to 2.63 m, tip chord about 0.93 m, the root glove 0.42 m ahead of the
+//!   leading edge, flap chord about 0.25 m, the canopy line from 0.60 m over
+//!   the windscreen frame to 0.15 m at the fin fillet, the belly from 0.74 m
+//!   under the cabin to 0.45 m under the rudder (heights from the hub).
+//! - side photographs of F-GNNE, "Robin DR400 F-GNNE at Blois in 2015" by
+//!   Mike Illien, CC BY 2.0, <https://commons.wikimedia.org/wiki/File:Robin_DR400_F-GNNE_at_Blois_in_2015.jpg>
+//!   (taken a little from ahead, so lengths there were not measured; it
+//!   settled the glazing ending behind the rear seats, the deep tail cone and
+//!   the gear's height), and a head-on photograph,
+//!   <https://commons.wikimedia.org/wiki/File:Robin_DR400-140B_Dauphin_-_front_view.jpg>,
+//!   showing the flat centre section running well past the main wheels.
+//! Where the drawing and the 2.23 m height disagree (it puts the fin 0.1 m
+//! higher), the height was kept.
+//!
 //! Body frame as everywhere: +X right, +Y up, -Z forward; the geometry is
 //! laid out in a design frame `DZ` ahead of it (see `DZ`).
 pub mod cabin;
@@ -69,7 +91,7 @@ const KT: f64 = 1.0 / 1.94384;
 const V_NONE: f64 = 1e9;
 
 /// The tyres touch the ground here (body y), the gear at rest.
-pub const GROUND_Y: f32 = -1.20;
+pub const GROUND_Y: f32 = -1.27;
 
 /// 380x150 tyres on oleo-pneumatic legs, about 1.8 bar (an estimate).
 const TYRE: Tyre = Tyre { pressure: 180.0, ..Tyre::LIGHT };
@@ -97,19 +119,29 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.021, cl_max: 1.55, cd0: 0.0065, cm0: -0.01 },
     wing_strips: 12,
     oswald: 0.78,
-    flap: crate::aero::Ctrl { span: [FLAP[0] as f64, FLAP[1] as f64], chord: 0.25, travel: [0.0, 1.047] },
-    flap_dcl_max: 1.4,
+    // The flaps: 0.27 m deep along their span (`FLAP_C`), about 18 % of the
+    // chord there.
+    flap: crate::aero::Ctrl { span: [FLAP[0] as f64, FLAP[1] as f64], chord: 0.18, travel: [0.0, 1.047] },
+    flap_dcl_max: 1.0,
     aileron_chord: 0.24,
     aileron_travel: [0.3142, 0.2094],
-    htail: crate::aero::Planform { root: DVec3::new(0.0, 0.06, 3.84 + DZ64), tip: DVec3::new(1.60, 0.06, 3.87 + DZ64), chord: [1.03, 0.77], incidence: [0.0, 0.0] },
+    // The tailplane as `tail()` draws it (leading edge 2.90-2.96 m, 1.60 m a
+    // side), its chords scaled to the manual's 2.88 m².
+    htail: crate::aero::Planform { root: DVec3::new(0.0, 0.0, 3.135 + DZ64), tip: DVec3::new(1.60, 0.0, 3.175 + DZ64), chord: [0.94, 0.86], incidence: [0.0, 0.0] },
     // The stabilator (estimated travel: 13° trailing edge up, 4° down); its
     // trim, the anti-servo tab, holds it where the stick force is nil.
     elevator: crate::aero::Ctrl { span: [0.0, 1.60], chord: 1.0, travel: [0.2269, 0.0698] },
     trim: [0.0524, 0.1047],
     trim_stab: true,
-    fin: crate::aero::Planform { root: DVec3::new(0.0, 0.06, 3.45 + DZ64), tip: DVec3::new(0.0, 1.03, 3.90 + DZ64), chord: [1.19, 0.53], incidence: [0.0, 0.0] },
-    rudder: crate::aero::Ctrl { span: [0.0, 0.97], chord: 0.40, travel: [0.4363, 0.4363] },
+    // The fin and the rudder that runs on below the tail cone to 0.45 m
+    // under the thrust line, as one surface: about 1.0 m², the rudder half
+    // of it (the manual's 0.63 m² rudder).
+    fin: crate::aero::Planform { root: DVec3::new(0.0, -0.45, 3.45 + DZ64), tip: DVec3::new(0.0, 1.00, 3.841 + DZ64), chord: [0.90, 0.46], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.0, 1.45], chord: 0.50, travel: [0.4363, 0.4363] },
     fuse: crate::aero::Fuse { cm_a: 0.17, cn_b: -0.03, cl_b: 0.0, cy_b: -0.25, cl_a: 0.0 },
+    // The tailplane sits 3.7 m behind the wing's quarter chord, where a
+    // horseshoe vortex gives 87 % of the far wake's downwash.
+    downwash: 0.87,
     prop_hub: DVec3::new(0.0, -0.05, -2.46),
     swirl: 0.25,
     ..crate::aero::Rig::BASE
@@ -177,18 +209,18 @@ pub static SPEC: Spec = Spec {
         DVec3::new(0.0, -0.05, -2.11),
         DVec3::new(-4.36, -0.06, 0.0),
         DVec3::new(4.36, -0.06, 0.0),
-        DVec3::new(0.0, 0.04, 4.90),
-        DVec3::new(0.0, 1.03, 4.60),
+        DVec3::new(0.0, -0.46, 4.40),
+        DVec3::new(0.0, 1.00, 4.55),
         DVec3::new(0.0, -0.74, 0.55),
         DVec3::new(0.0, -0.965, NOSE_AXLE.z as f64 + DZ64),
     ],
     gear: &[
-        leg(DVec3::new(0.0, -1.20, NOSE_AXLE.z as f64 + DZ64), NOSE_R, 0.10, 45_000.0, 1.0, "NOSE GEAR"),
-        leg(DVec3::new(-1.30, -1.20, MAIN_AXLE.z as f64 + DZ64), MAIN_R, 0.08, 120_000.0, 0.0, "LEFT MAIN GEAR"),
-        leg(DVec3::new(1.30, -1.20, MAIN_AXLE.z as f64 + DZ64), MAIN_R, 0.08, 120_000.0, 0.0, "RIGHT MAIN GEAR"),
+        leg(DVec3::new(0.0, -1.27, NOSE_AXLE.z as f64 + DZ64), NOSE_R, 0.10, 45_000.0, 1.0, "NOSE GEAR"),
+        leg(DVec3::new(-1.30, -1.27, MAIN_AXLE.z as f64 + DZ64), MAIN_R, 0.08, 120_000.0, 0.0, "LEFT MAIN GEAR"),
+        leg(DVec3::new(1.30, -1.27, MAIN_AXLE.z as f64 + DZ64), MAIN_R, 0.08, 120_000.0, 0.0, "RIGHT MAIN GEAR"),
     ],
     hull: Hull { k: 50_000.0, c: 7_500.0, nf_max: 100_000.0, drag: 2600.0 },
-    hole: Hole { fus: [0.56, 0.62, -0.30, 0.45], wing: [-0.66, 0.14, 0.13, 0.08], stab: [0.06, 0.05, 1.60], fin: [0.06, 0.97, 0.12, 0.06], pods: [[0.0; 3]; 2] },
+    hole: Hole { fus: [0.59, 0.62, -0.30, 0.45], wing: [-0.66, 0.14, 0.13, 0.08], stab: [0.0, 0.05, 1.60], fin: [0.06, 0.94, 0.12, 0.06], pods: [[0.0; 3]; 2] },
     // Two aboard and half the fuel: about 600 kg empty, 160 kg of people, 68 kg of fuel.
     mass: 900.0,
     // 190 l of avgas usable: 110 l in the main tank behind the firewall, 40 l in each wing.
@@ -296,6 +328,8 @@ pub static SPEC: Spec = Spec {
     approach: (34.0, 2),
     cam_dist: 13.0,
     shadow_r: 5.2,
+    rotor: None,
+    floats: false,
     sound: Sound::Piston,
 };
 
@@ -304,30 +338,36 @@ pub static SPEC: Spec = Spec {
 /// Fuselage cross-section keys: station z, half width, top, waist height,
 /// bottom, squareness of the upper and the lower half. Under the canopy
 /// (`CANOPY`) the top is the sill the glass sits on; the skin there is open.
-const FUSE: [[f32; 7]; 17] = [
+const FUSE: [[f32; 7]; 19] = [
     [-2.40, 0.20, 0.08, -0.05, -0.20, 2.0, 2.0],
     [-2.36, 0.30, 0.13, -0.06, -0.31, 2.3, 2.3],
-    [-2.28, 0.38, 0.18, -0.08, -0.42, 2.6, 2.6],
-    [-2.10, 0.45, 0.22, -0.10, -0.52, 2.9, 3.0],
-    [-1.80, 0.50, 0.26, -0.12, -0.58, 3.2, 3.4],
-    [-1.50, 0.53, 0.28, -0.14, -0.63, 3.6, 3.8],
-    [-1.25, 0.55, 0.20, -0.18, -0.70, 5.0, 4.0],
-    [-0.80, 0.56, 0.10, -0.20, -0.74, 7.0, 4.0],
-    [0.60, 0.56, 0.10, -0.20, -0.74, 7.0, 4.0],
-    [1.00, 0.54, 0.24, -0.19, -0.71, 4.0, 3.8],
-    [1.50, 0.45, 0.24, -0.15, -0.58, 3.0, 3.3],
-    [2.20, 0.33, 0.18, -0.09, -0.42, 2.6, 2.8],
-    [2.90, 0.22, 0.12, -0.04, -0.27, 2.4, 2.5],
-    [3.60, 0.13, 0.08, -0.01, -0.14, 2.2, 2.2],
-    [4.10, 0.06, 0.055, 0.01, -0.06, 2.0, 2.0],
-    [4.30, 0.03, 0.045, 0.01, -0.03, 2.0, 2.0],
-    [4.35, 0.015, 0.04, 0.01, -0.01, 2.0, 2.0],
+    [-2.28, 0.38, 0.17, -0.08, -0.42, 2.6, 2.6],
+    [-2.10, 0.45, 0.20, -0.10, -0.52, 2.9, 3.0],
+    [-1.80, 0.52, 0.22, -0.12, -0.60, 3.2, 3.4],
+    [-1.50, 0.56, 0.235, -0.14, -0.65, 3.6, 3.8],
+    [-1.25, 0.58, 0.238, -0.17, -0.69, 4.5, 4.0],
+    // (The sill: the glass comes down to the elbows, and rises again
+    // behind the rear seats into the spine.)
+    [-0.92, 0.59, -0.06, -0.22, -0.72, 7.0, 4.0],
+    [0.10, 0.59, -0.06, -0.22, -0.735, 7.0, 4.0],
+    [0.32, 0.58, 0.12, -0.21, -0.728, 5.5, 4.0],
+    [0.54, 0.565, 0.46, -0.20, -0.715, 3.5, 3.8],
+    // A deep tail cone: the belly runs nearly straight back to the rudder
+    // post, the spine down from the canopy into the fin's fillet.
+    [1.30, 0.46, 0.37, -0.18, -0.665, 3.0, 3.4],
+    [2.00, 0.32, 0.25, -0.17, -0.60, 2.8, 3.2],
+    [2.70, 0.20, 0.15, -0.16, -0.535, 2.6, 3.0],
+    [3.20, 0.11, 0.12, -0.15, -0.50, 2.4, 2.8],
+    [3.48, 0.05, 0.10, -0.15, -0.475, 2.2, 2.4],
+    [3.56, 0.025, 0.09, -0.15, -0.468, 2.0, 2.0],
+    [3.58, 0.012, 0.09, -0.15, -0.465, 2.0, 2.0],
+    [3.581, 0.005, 0.09, -0.15, -0.465, 2.0, 2.0],
 ];
 pub const NOSE_Z: f32 = -2.40;
-pub const TAIL_Z: f32 = 4.35;
+pub const TAIL_Z: f32 = 3.58;
 pub const FIREWALL_Z: f32 = -1.50;
 /// The opening under the canopy: windscreen base, rear of the canopy.
-pub const CANOPY: [f32; 2] = [-1.30, 1.05];
+pub const CANOPY: [f32; 2] = [-1.24, 0.52];
 
 #[derive(Clone, Copy, Debug)]
 pub struct Sec {
@@ -622,14 +662,14 @@ fn fuselage(b: &mut Builder) {
         cabin.rbox(&mt(mat::BLACK, 0.03, 0.03, 0.03).pat(pat::NONSLIP), foot + Vec3::new(sx * 0.02, 0.008, 0.0), Vec3::new(0.055, 0.007, 0.045), 0.004, Quat::IDENTITY);
     }
     // The tow release under the tail cone (it tows gliders).
-    let s = sec(4.0);
-    let p = Vec3::new(0.0, s.bot - 0.004, 4.0);
+    let s = sec(3.0);
+    let p = Vec3::new(0.0, s.bot - 0.004, 3.0);
     tailcone.rbox(&mt(mat::SATIN, 0.05, 0.05, 0.055), p + Vec3::new(0.0, -0.016, 0.0), Vec3::new(0.018, 0.016, 0.045), 0.005, Quat::IDENTITY);
     let ring: Vec<Vec3> = (0..=16).map(|k| { let a = k as f32 / 16.0 * TAU; p + Vec3::new(0.0, -0.045 - 0.016 * a.cos(), 0.05 + 0.016 * a.sin()) }).collect();
     tailcone.tube(&STEEL, &ring, &|_| 0.004, 6, false);
     // Tie-down ring under the tail, the beacon on the spine behind the canopy.
-    let s = sec(3.9);
-    let p = Vec3::new(0.0, s.bot - 0.005, 3.9);
+    let s = sec(3.35);
+    let p = Vec3::new(0.0, s.bot - 0.005, 3.35);
     let ring: Vec<Vec3> = (0..=16).map(|k| { let a = k as f32 / 16.0 * TAU; p + Vec3::new(0.0, -0.03 - 0.03 * a.cos(), 0.03 * a.sin()) }).collect();
     tailcone.tube(&STEEL, &ring, &|_| 0.005, 6, false);
     let s = sec(1.6);
@@ -656,12 +696,15 @@ fn fuselage(b: &mut Builder) {
 /// Half span, and where the flat centre section ends and the outer panels'
 /// dihedral begins.
 /// (Measured along the panels: the tip is 4.36 m out, the span 8.72 m.)
-pub const SPAN: f32 = 4.44;
-pub const KINK: f32 = 1.95;
+pub const SPAN: f32 = 4.41;
+/// The flat centre section's half span: the outer panels start outboard of the main wheels.
+pub const KINK: f32 = 2.63;
 /// 14 degrees of dihedral on the outer panels.
 const DIH: f32 = 0.2493;
-pub const FLAP: [f32; 2] = [0.60, 1.90];
-pub const AILERON: [f32; 2] = [2.10, 4.05];
+pub const FLAP: [f32; 2] = [0.60, 2.55];
+pub const AILERON: [f32; 2] = [2.72, 4.22];
+/// The flaps' chord: narrow plain flaps along the centre section's trailing edge.
+const FLAP_C: f32 = 0.27;
 /// The span the wing tank in each wing fills (the main tank is in the fuselage).
 pub const TANK: [f32; 2] = [0.60, 1.60];
 /// Leading edge and chord at the root, height of the chord plane.
@@ -674,10 +717,13 @@ const ROOT_Y: f32 = -0.66;
 pub fn wing_sect(xs: f32) -> Sect {
     let out = (xs - KINK).max(0.0);
     let t = out / (SPAN - KINK);
-    // Straight leading edge, the trailing edge tapering in on the outer panels.
-    let mut le = ROOT_LE + 0.06 * t;
-    let mut c = ROOT_C - 0.56 * t;
-    let mut tf = 1.0 - 0.15 * t;
+    // The outer panels taper at both edges. Inboard, the leading edge runs
+    // forward into the root fillet beside the cowl (as thick as the wing:
+    // the fillet is a flat glove, not a deeper wing).
+    let glove = 0.42 * (1.0 - ((xs - 0.56) / 0.78).clamp(0.0, 1.0)).powf(1.15);
+    let mut le = ROOT_LE + 0.29 * t - glove;
+    let mut c = ROOT_C - 0.78 * t + glove;
+    let mut tf = (1.0 - 0.10 * t) * (ROOT_C - 0.78 * t) / c;
     if xs > SPAN - 0.18 {
         let u = ((xs - (SPAN - 0.18)) / 0.18).min(1.0);
         let k = 1.0 - (1.0 - u * u).max(0.0).sqrt();
@@ -691,6 +737,10 @@ pub fn wing_sect(xs: f32) -> Sect {
     let d = if xs > KINK { DIH } else { 0.0 };
     let up = Vec3::new(-d.sin(), d.cos() * inc.cos(), inc.sin()).normalize();
     Sect { le: Vec3::new(x, y, le), c, cdir: Vec3::new(0.0, -inc.sin(), inc.cos()), up, tf }
+}
+/// The flap hinge as a fraction of the chord at span station s.
+fn flap_x(s: f32) -> f32 {
+    1.0 - FLAP_C / wing_sect(s).c
 }
 pub fn wing_foil() -> Foil {
     Foil { at: Box::new(wing_sect), t: 0.15, camber: 0.02 }
@@ -712,7 +762,7 @@ fn wings(b: &mut Builder) {
     let one = |_: f32| 1.0;
     let zero = |_: f32| 0.0;
     // Hinge lines: flaps at 75% of the chord, ailerons at 76%.
-    let fh = |_: f32| 0.75;
+    let fh = |s: f32| flap_x(s);
     let ah = |_: f32| 0.76;
     f.skin(&mut w, &skin, 0.0, FLAP[0], 6, &zero, &one, 28, false);
     f.skin(&mut w, &skin, FLAP[0], FLAP[1], 16, &zero, &fh, 28, false);
@@ -721,14 +771,14 @@ fn wings(b: &mut Builder) {
     f.skin(&mut w, &skin, AILERON[1], SPAN, 14, &zero, &one, 28, false);
     f.web(&mut w, &PRIMER, FLAP[0], FLAP[1], 10, &fh);
     f.web(&mut w, &PRIMER, AILERON[0], AILERON[1], 12, &ah);
-    f.cap(&mut w, &PRIMER, FLAP[0], 0.75, 1.0, false);
-    f.cap(&mut w, &PRIMER, FLAP[1], 0.75, 1.0, false);
+    f.cap(&mut w, &PRIMER, FLAP[0], flap_x(FLAP[0]), 1.0, false);
+    f.cap(&mut w, &PRIMER, FLAP[1], flap_x(FLAP[1]), 1.0, false);
     f.cap(&mut w, &PRIMER, AILERON[0], 0.76, 1.0, false);
     f.cap(&mut w, &PRIMER, AILERON[1], 0.76, 1.0, false);
     // Fuel filler on the centre section, inspection plates under the wing.
     let (p, n) = foil_frame(&f, 1.2, 0.30, 1.0);
     w.lathe(&ALU, p, n, &[[0.045, -0.002], [0.045, 0.002], [0.038, 0.004], [0.0, 0.004]], 24, false);
-    for &(s, xc) in &[(0.9f32, 0.40f32), (2.6, 0.40), (3.5, 0.38)] {
+    for &(s, xc) in &[(0.9f32, 0.40f32), (3.1, 0.40), (3.8, 0.38)] {
         let (p, n) = foil_frame(&f, s, xc, -1.0);
         inspection_plate(&mut w, p + n * 0.0012, n, Vec3::Z, 0.05, 6);
     }
@@ -739,10 +789,10 @@ fn wings(b: &mut Builder) {
         w.rbox(&PAINT_WHITE, p + n * 0.012, Vec3::new(0.0035, 0.016, 0.03), 0.002, rot);
         w.bolt(&STEEL, p + n * 0.02 + rot * Vec3::X * 0.0035, rot * Vec3::X, 0.003);
     };
-    for s in [0.80f32, 1.25, 1.75] {
-        bracket(&mut w, s, 0.75);
+    for s in [0.9f32, 1.6, 2.3] {
+        bracket(&mut w, s, flap_x(s));
     }
-    for s in [2.25f32, 3.05, 3.90] {
+    for s in [2.95f32, 3.55, 4.1] {
         bracket(&mut w, s, 0.76);
     }
     // The fairing strip over the joint where the outer panel meets the centre section.
@@ -793,7 +843,7 @@ fn wings(b: &mut Builder) {
     let mut ribs = Vec::new();
     let mut s = 0.45;
     while s < SPAN - 0.15 {
-        let to = if (FLAP[0]..FLAP[1]).contains(&s) { 0.73 } else if (AILERON[0]..AILERON[1]).contains(&s) { 0.74 } else { 0.97 };
+        let to = if (FLAP[0]..FLAP[1]).contains(&s) { flap_x(s) - 0.02 } else if (AILERON[0]..AILERON[1]).contains(&s) { 0.74 } else { 0.97 };
         ribs.push((s, 0.03, to));
         s += 0.29;
     }
@@ -804,11 +854,13 @@ fn wings(b: &mut Builder) {
 
     // Flaps: plain flaps on the centre section, hinged at their nose, down to 60°.
     let mut fl = Mesh::default();
-    f.skin(&mut fl, &ctrl, FLAP[0] + 0.01, FLAP[1] - 0.01, 16, &|_| 0.755, &one, 14, true);
-    f.cap(&mut fl, &ctrl, FLAP[0] + 0.01, 0.755, 1.0, true);
-    f.cap(&mut fl, &ctrl, FLAP[1] - 0.01, 0.755, 1.0, true);
-    let axis = (f.pt(FLAP[1], 0.76, 0.0, -1.0) - f.pt(FLAP[0], 0.76, 0.0, -1.0)).normalize();
-    let pivot = f.pt((FLAP[0] + FLAP[1]) * 0.5, 0.76, 0.0, -1.0);
+    let fx = |s: f32| flap_x(s) + 0.005;
+    f.skin(&mut fl, &ctrl, FLAP[0] + 0.01, FLAP[1] - 0.01, 24, &fx, &one, 14, true);
+    f.cap(&mut fl, &ctrl, FLAP[0] + 0.01, fx(FLAP[0] + 0.01), 1.0, true);
+    f.cap(&mut fl, &ctrl, FLAP[1] - 0.01, fx(FLAP[1] - 0.01), 1.0, true);
+    let axis = (f.pt(FLAP[1], fx(FLAP[1]) + 0.005, 0.0, -1.0) - f.pt(FLAP[0], fx(FLAP[0]) + 0.005, 0.0, -1.0)).normalize();
+    let mid = (FLAP[0] + FLAP[1]) * 0.5;
+    let pivot = f.pt(mid, fx(mid) + 0.005, 0.0, -1.0);
     let (l, r) = b.pair(["left flap", "right flap"], [G_LWING, G_RWING], fl, |_| Anim::hinge(Drive::new(Input::Flaps, 60f32.to_radians())), pivot, axis, [None, None]);
     b.role(l, Role::Flap(0)).role(r, Role::Flap(1));
 
@@ -827,18 +879,28 @@ fn wings(b: &mut Builder) {
 
 /// The all-moving tailplane: half span, root and tip chords, its pivot.
 const STAB_HALF: f32 = 1.60;
-const STAB_Y: f32 = 0.06;
-const STAB_PIVOT_Z: f32 = 3.78;
+const STAB_Y: f32 = 0.0;
+const STAB_PIVOT_Z: f32 = 3.10;
 /// The anti-servo tab's hinge line, and where it stops either side of the fuselage.
-const TAB_Z: f32 = 4.20;
+const TAB_Z: f32 = 3.62;
 const TAB_IN: f32 = 0.12;
+
+/// The fin's root (inside the spine) and its height above it; the rudder's
+/// bottom edge, level with the bottom of the tail cone.
+const FIN_ROOT: f32 = 0.05;
+const FIN_H: f32 = 0.95;
+const RUDDER_BOT: f32 = -0.45;
+/// The rudder's hinge line at height y: the tail cone's end post, leaning back.
+fn rudder_hinge(y: f32) -> f32 {
+    3.56 + (y + 0.57) * 0.144
+}
 
 fn tail(b: &mut Builder) {
     let stab = Foil {
         at: Box::new(|s: f32| {
             let a = s.abs();
-            let mut le = 3.58 + a / STAB_HALF * 0.10;
-            let te = 4.38 - a / STAB_HALF * 0.10;
+            let mut le = 2.90 + a / STAB_HALF * 0.06;
+            let te = 3.78 - a / STAB_HALF * 0.04;
             let mut c = te - le;
             let mut tf = 1.0;
             if a > STAB_HALF - 0.1 {
@@ -865,9 +927,10 @@ fn tail(b: &mut Builder) {
     };
     let one = |_: f32| 1.0;
     stab.skin(&mut st, &ctrl, -STAB_HALF, -TAB_IN, 26, &|_| 0.0, &tab_x, 22, false);
-    stab.skin(&mut st, &ctrl, -TAB_IN, TAB_IN, 6, &|_| 0.0, &one, 22, false);
+    // (Between the tabs it stops short of the rudder's hinge.)
+    stab.skin(&mut st, &ctrl, -TAB_IN, TAB_IN, 6, &|_| 0.0, &tab_x, 22, false);
     stab.skin(&mut st, &ctrl, TAB_IN, STAB_HALF, 26, &|_| 0.0, &tab_x, 22, false);
-    for (a, b) in [(-STAB_HALF + 0.12, -TAB_IN), (TAB_IN, STAB_HALF - 0.12)] {
+    for (a, b) in [(-STAB_HALF + 0.12, -TAB_IN), (-TAB_IN, TAB_IN), (TAB_IN, STAB_HALF - 0.12)] {
         stab.web(&mut st, &PRIMER, a, b, 10, &tab_x);
     }
     for s in [-STAB_HALF, STAB_HALF] {
@@ -898,49 +961,52 @@ fn tail(b: &mut Builder) {
     b.role(k, Role::Elevator);
     b.add("anti-servo tab", G_TAIL, tab, Anim::hinge2(Drive::new(Input::Elevator, -0.25), Drive::new(Input::Trim, 0.35)), Vec3::new(0.0, STAB_Y, TAB_Z), Vec3::X, Some(k));
 
-    // Fin, swept back, with its rudder.
+    // Fin, swept back out of a long fillet in the spine, and the rudder
+    // behind it, from the fin's top right down to the bottom of the tail cone.
     let fin = Foil {
         at: Box::new(|s: f32| {
-            let u = s / 0.97;
-            let mut le = 3.15 + 0.62 * u;
-            let te = 4.34 - 0.04 * u;
+            let y = FIN_ROOT + s;
+            let fillet = 0.42 * (1.0 - smoothstep(0.0, 0.28, s.max(0.0))).powi(2);
+            let mut le = (2.82 + (y - 0.11) * 1.118).min(rudder_hinge(y) - 0.06) - fillet;
+            let te = 4.00 + (y + 0.57) * 0.118;
             let mut c = te - le;
             let mut tf = 1.0;
-            if s > 0.90 {
-                let v = ((s - 0.90) / 0.07).min(1.0);
+            if s > FIN_H - 0.06 {
+                let v = ((s - (FIN_H - 0.06)) / 0.06).min(1.0);
                 let k = 1.0 - (1.0 - v * v).max(0.0).sqrt();
-                le += c * 0.15 * k;
-                c -= c * 0.15 * k;
+                le += c * 0.06 * k;
+                c -= c * 0.06 * k;
                 tf = (1.0 - v * v).max(0.05).sqrt();
             }
-            Sect { le: Vec3::new(0.0, 0.06 + s, le), c, cdir: Vec3::Z, up: Vec3::X, tf }
+            Sect { le: Vec3::new(0.0, y, le), c, cdir: Vec3::Z, up: Vec3::X, tf }
         }),
         t: 0.10,
         camber: 0.0,
     };
     let rh = |s: f32| {
         let k = (fin.at)(s);
-        (4.00 + 0.02 * s - k.le.z) / k.c
+        (rudder_hinge(FIN_ROOT + s) - k.le.z) / k.c
     };
     let mut m = Mesh::default();
-    fin.skin(&mut m, &tailc, 0.0, 0.97, 30, &|_| 0.0, &|s| rh(s) - 0.004, 22, false);
-    fin.web(&mut m, &PRIMER, 0.0, 0.97, 16, &|s| rh(s) - 0.004);
-    // The fin's root fairing into the spine, the white tail light.
-    let base = fin.pt(0.0, 0.0, 0.0, -1.0);
-    m.tube(&tailc, &[base + Vec3::new(0.0, -0.01, -0.35), base + Vec3::new(0.0, 0.0, 0.02)], &|t| 0.03 * (t * PI).sin() + 0.002, 10, true);
-    m.lathe(&mt(mat::LAMP, 0.95, 0.95, 0.95).x(lamp::TAIL), Vec3::new(0.0, 0.04, TAIL_Z + 0.004), Vec3::Z, &[[0.012, 0.0], [0.012, 0.01], [0.0, 0.016]], 12, true);
+    fin.skin(&mut m, &tailc, 0.0, FIN_H, 30, &|_| 0.0, &|s| rh(s) - 0.004, 22, false);
+    fin.web(&mut m, &PRIMER, 0.0, FIN_H, 16, &|s| rh(s) - 0.004);
+    let bot = RUDDER_BOT - FIN_ROOT;
     let mut ru = Mesh::default();
-    fin.skin(&mut ru, &ctrl, -0.05, 0.96, 30, &|s| rh(s) + 0.004, &|_| 1.0, 12, true);
-    fin.cap(&mut ru, &ctrl, -0.05, rh(-0.05) + 0.004, 1.0, true);
-    let rax = Vec3::new(0.0, 0.97, 0.02).normalize();
+    fin.skin(&mut ru, &ctrl, bot, FIN_H - 0.01, 40, &|s| rh(s) + 0.004, &|_| 1.0, 12, true);
+    fin.cap(&mut ru, &ctrl, bot, rh(bot) + 0.004, 1.0, true);
+    // The white tail light on the rudder's trailing edge, low down.
+    let ly = -0.36;
+    let lz = (fin.at)(ly - FIN_ROOT);
+    ru.lathe(&mt(mat::LAMP, 0.95, 0.95, 0.95).x(lamp::TAIL), Vec3::new(0.0, ly, lz.le.z + lz.c + 0.002), Vec3::Z, &[[0.012, 0.0], [0.012, 0.01], [0.0, 0.016]], 12, true);
+    let rax = Vec3::new(0.0, 1.53, 0.22).normalize();
     let mut ts = Mesh::default();
     structure(&stab, &mut ts, -1.5, 1.5, &[0.22, 0.6], &[(-1.1, 0.03, 0.9), (-0.6, 0.03, 0.9), (0.6, 0.03, 0.9), (1.1, 0.03, 0.9)]);
-    structure(&fin, &mut ts, 0.05, 0.9, &[0.3, 0.6], &[(0.3, 0.03, 0.72), (0.65, 0.03, 0.72)]);
+    structure(&fin, &mut ts, 0.05, FIN_H - 0.05, &[0.3, 0.55], &[(0.3, 0.03, 0.62), (0.6, 0.03, 0.62)]);
     let k = b.fixed("tail structure", G_TAIL, ts);
     b.role(k, Role::TailStructure);
     let k = b.fixed("fin", G_TAIL, m);
     b.role(k, Role::Stab);
-    let k = b.add("rudder", G_TAIL, ru, Anim::hinge(Drive::new(Input::Rudder, 0.45)), Vec3::new(0.0, 0.06, 4.00), rax, None);
+    let k = b.add("rudder", G_TAIL, ru, Anim::hinge(Drive::new(Input::Rudder, 0.45)), Vec3::new(0.0, FIN_ROOT, rudder_hinge(FIN_ROOT)), rax, None);
     b.role(k, Role::Rudder);
 }
 
@@ -959,7 +1025,7 @@ fn engine(b: &mut Builder) {
     // Spinner and two blades.
     let mut sp = Mesh::default();
     // A long pointed spinner (a tangent ogive, the point just rounded off).
-    let (sr, sl) = (0.165f32, 0.275f32);
+    let (sr, sl) = (0.165f32, 0.34f32);
     let rho = (sr * sr + sl * sl) / (2.0 * sr);
     let mut prof: Vec<[f32; 2]> = (0..=22).map(|k| { let h = sl * (1.0 - (1.0 - k as f32 / 22.0).powf(1.4)); [((rho * rho - h * h).max(0.0).sqrt() + sr - rho).max(0.0), h] }).collect();
     let n = prof.len();
@@ -1076,7 +1142,7 @@ fn gear(b: &mut Builder) {
     let (l, r) = b.pair(["left main wheel", "right main wheel"], [G_GEAR, G_GEAR], wh, |s| Anim::hinge(Drive::new(Input::Wheel(if s < 0.0 { 1 } else { 2 }), -1.0)), MAIN_AXLE, Vec3::X, [Some(ll), Some(lr)]);
     b.role(l, Role::Gear(1)).role(r, Role::Gear(2));
     let mut sp = Mesh::default();
-    spat(&mut sp, MAIN_AXLE, 0.82, 0.24, 0.42);
+    spat(&mut sp, MAIN_AXLE, 0.95, 0.25, 0.36);
     let (l, r) = b.pair(["left wheel fairing", "right wheel fairing"], [G_GEAR, G_GEAR], sp, |_| Anim::Fixed, MAIN_AXLE, Vec3::X, [Some(ll), Some(lr)]);
     b.role(l, Role::Gear(1)).role(r, Role::Gear(2));
 
@@ -1096,7 +1162,7 @@ fn gear(b: &mut Builder) {
     let k = b.add("nose wheel", G_GEAR, nw, Anim::hinge(Drive::new(Input::Wheel(0), -1.0)), NOSE_AXLE, Vec3::X, Some(fork));
     b.role(k, Role::Gear(0));
     let mut ns = Mesh::default();
-    spat(&mut ns, NOSE_AXLE, 0.66, 0.20, 0.40);
+    spat(&mut ns, NOSE_AXLE, 0.88, 0.21, 0.35);
     let k = b.add("nose fairing", G_GEAR, ns, Anim::Fixed, NOSE_AXLE, Vec3::X, Some(fork));
     b.role(k, Role::Gear(0));
 }

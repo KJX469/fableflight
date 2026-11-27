@@ -41,6 +41,8 @@ pub struct Upscale {
     pub t: Option<Targets>,
     /// whether last frame's upscaled history can be built on
     pub hist_ok: bool,
+    /// motion vectors are wanted whatever the upscaler (frame generation, framegen.rs).
+    pub want_motion: bool,
 }
 
 pub struct Targets {
@@ -100,6 +102,7 @@ impl Upscale {
             fsr3: None,
             t: None,
             hist_ok: false,
+            want_motion: false,
         }
     }
 
@@ -175,7 +178,7 @@ impl Upscale {
             }
         }
         let mode = self.active();
-        if mode == Upscaler::Bilinear {
+        if mode == Upscaler::Bilinear && !self.want_motion {
             self.t = None;
             self.fsr3 = None;
             return;

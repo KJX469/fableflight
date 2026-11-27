@@ -63,7 +63,7 @@ pub const SLIDE_COS: f64 = 0.5;
 /// The snow line in Always mode: below any ground.
 const ALWAYS_LINE: f64 = -1000.0;
 /// Standard lapse rate (K/m), for the freezing level from a surface temperature.
-const LAPSE: f64 = 0.0065;
+pub(crate) const LAPSE: f64 = 0.0065;
 /// How far below the freezing level snow can still lie (it fell during a
 /// colder spell and has not melted yet), and how far above it the snow line
 /// may stay (fresh snow falls a few hundred metres under the freezing level).

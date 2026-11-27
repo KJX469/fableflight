@@ -1141,7 +1141,7 @@ fn own_geometry(s: &mut Spec, base: &Spec, j: &jsbsim::Aircraft, fg: &FgFiles, f
         s.gear = Box::leak(legs.into_boxed_slice());
         s.gear_rate = if bogeys.iter().any(|c| c.retractable) { base.gear_rate.max(1.0 / 6.0) } else { 0.0 };
     }
-    s.ext = Some(Box::leak(Box::new(crate::fgmodel::Ext { dir: fg.dir.clone(), fg_dir: folder.to_string(), model: fg.model.clone(), origin, steer_max: s.steer_max as f32, travel, span: span as f32 })));
+    s.ext = Some(Box::leak(Box::new(crate::fgmodel::Ext { dir: fg.dir.clone(), fg_dir: folder.to_string(), model: fg.model.clone(), origin, steer_max: s.steer_max as f32, travel, span: span as f32, gltf: [1.0, 0.0] })));
     if let Some(still) = fg.still {
         s.still = still;
     }
@@ -1471,6 +1471,110 @@ pub fn load(dir: &Path) -> Result<&'static Spec, String> {
         spec.origin = Some(Box::leak(Box::new(Origin { license: l.to_string(), author, body: o.body })));
     }
     Ok(aircraft::register(spec))
+}
+
+/// the `-set.xml` files in a folder, as package ids (`c172p-set.xml` is `c172p`).
+fn set_ids(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix("-set.xml")).map(str::to_string)).collect();
+    v.sort();
+    v
+}
+
+/// copies an aircraft's files, without its sounds, scripts and manuals (as `unpack` does).
+fn copy_tree(from: &Path, to: &Path, rel: &Path, n: &mut usize, total: &mut u64) -> Result<(), String> {
+    for e in std::fs::read_dir(from.join(rel)).map_err(|e| e.to_string())?.flatten() {
+        let r = rel.join(e.file_name());
+        let ft = e.file_type().map_err(|e| e.to_string())?;
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            copy_tree(from, to, &r, n, total)?;
+            continue;
+        }
+        let top = r.components().next().and_then(|c| c.as_os_str().to_str()).unwrap_or("").to_string();
+        if skipped(if r.components().count() > 1 { &top } else { "" }, &r) {
+            continue;
+        }
+        let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+        *n += 1;
+        *total += len;
+        if *n > MAX_UNPACK_FILES || len > MAX_UNPACK_FILE || *total > MAX_UNPACK_TOTAL {
+            return Err("the folder is too big to import".into());
+        }
+        let out = to.join(&r);
+        if let Some(d) = out.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(e.path(), &out).map_err(|e| format!("{}: {e}", out.display()))?;
+    }
+    Ok(())
+}
+
+/// Imports aircraft from a folder on this computer: one aircraft's folder
+/// (with its `-set.xml`), or a folder of them (FlightGear's `Aircraft`, an
+/// FGAddon checkout). Each is copied in beside the downloaded ones, with a
+/// `source.json` saying where it came from, and added to the list. Gives back
+/// the names added and the ones that failed with why.
+pub fn import_local(path: &Path) -> (Vec<String>, Vec<String>) {
+    let dirs: Vec<PathBuf> = if !set_ids(path).is_empty() {
+        vec![path.to_path_buf()]
+    } else {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(path).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir() && !set_ids(p).is_empty()).collect();
+        v.sort();
+        v
+    };
+    let (mut ok, mut bad) = (Vec::new(), Vec::new());
+    if dirs.is_empty() {
+        bad.push(format!("{}: no -set.xml there", path.display()));
+    }
+    for d in dirs {
+        match import_one(&d) {
+            Ok(n) => ok.push(n),
+            Err(e) => bad.push(format!("{}: {e}", d.file_name().and_then(|s| s.to_str()).unwrap_or("?"))),
+        }
+    }
+    (ok, bad)
+}
+
+fn import_one(src: &Path) -> Result<String, String> {
+    let folder = src.file_name().and_then(|s| s.to_str()).ok_or("bad folder name")?.to_string();
+    if !safe_name(&folder) {
+        return Err("its folder name is not a plain name".into());
+    }
+    let ids = set_ids(src);
+    // the set file named after the folder, else the first.
+    let id = ids.iter().find(|i| i.eq_ignore_ascii_case(&folder)).or(ids.first()).ok_or("no -set.xml")?.clone();
+    let _ = std::fs::create_dir_all(install_dir());
+    let tmp = install_dir().join(format!(".{folder}.part"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let (mut n, mut total) = (0usize, 0u64);
+    if let Err(e) = copy_tree(src, &tmp, Path::new(""), &mut n, &mut total) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    let v = serde_json::json!({
+        "source": "Imported from a folder on this computer",
+        "path": src.display().to_string(),
+        "id": id,
+        "folder": folder,
+        "name": "",
+        "author": "",
+        "license": REPO_LICENSE,
+        "license_url": REPO_LICENSE_URL,
+        "repository_license": REPO_LICENSE,
+    });
+    std::fs::write(tmp.join("source.json"), serde_json::to_string_pretty(&v).unwrap_or_default()).map_err(|e| e.to_string())?;
+    let dst = install_dir().join(&folder);
+    let _ = std::fs::remove_dir_all(&dst);
+    std::fs::rename(&tmp, &dst).map_err(|e| e.to_string())?;
+    match load(&dst) {
+        Ok(spec) => Ok(spec.name.to_string()),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dst);
+            Err(e)
+        }
+    }
 }
 
 /// Adds every installed aircraft to the aircraft list (at start-up).

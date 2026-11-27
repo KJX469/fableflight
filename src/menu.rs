@@ -145,6 +145,8 @@ pub struct Menu {
     pub cold: bool,
     /// payload, as a fraction of the most the aircraft takes (None: as it comes)
     pub payload: Option<f64>,
+    /// fly was pressed on the main menu: free flight or career.
+    pub fly_pick: bool,
 }
 
 /// The screens of the start menu. The game boots into `Main`; `Fly` is the
@@ -155,6 +157,12 @@ pub enum Screen {
     Fly,
     Aircraft,
     Settings,
+    /// the pilot's logbook (logbook.rs).
+    Logbook,
+    /// the career (career.rs).
+    Career,
+    /// tutorials, checkrides, landing challenges and missions (activities.rs).
+    Activities,
 }
 
 impl Screen {
@@ -165,6 +173,9 @@ impl Screen {
             "fly" | "globe" | "start" => Screen::Fly,
             "aircraft" | "hangar" | "planes" => Screen::Aircraft,
             "settings" | "options" => Screen::Settings,
+            "logbook" | "profile" | "log" | "pilot" => Screen::Logbook,
+            "career" | "jobs" => Screen::Career,
+            "activities" | "challenges" | "tutorials" => Screen::Activities,
             _ => return None,
         })
     }
@@ -194,11 +205,13 @@ pub enum Start {
     Approach,
     /// in the air above it, at the chosen height
     Overhead,
+    /// parked at a stand, ready for pushback (ground.rs)
+    Stand,
 }
 
 impl Menu {
     pub fn new(lat: f64, lon: f64, hour: f64) -> Self {
-        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, set_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, liveries: std::collections::HashMap::new(), air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None }
+        Self { lat, lon, alt: 1.5e7, target_alt: 1.1e7, pick: None, pick_name: String::new(), search: String::new(), hour, press: None, dragged: 0.0, starting: false, screen: Screen::Main, air_back: Screen::Main, set_back: Screen::Main, air_view: 0, spin: 1.0, airport: None, start: Start::Runway, runway: None, start_agl: 450.0, markers: Vec::new(), aircraft: 0, liveries: std::collections::HashMap::new(), air_tab: crate::hangar_ui::Tab::Mine, hangar_sel: None, hangar_find: String::new(), hangar_all: false, fuel: 0.5, cold: false, payload: None, fly_pick: false }
     }
 
     /// The paint scheme picked for a type (an index of `aircraft::liveries`).
@@ -529,6 +542,301 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool, text: impl Into<egui::WidgetText
     resp
 }
 
+// ---- the shared form widgets: every panel builds its rows from these, so
+// buttons, sliders and labels look and line up the same everywhere.
+
+/// a whole number with its thousands set apart by a thin space ("87 000").
+pub fn thousands(v: f64) -> String {
+    let n = v.round() as i64;
+    let d = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, ch) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i) % 3 == 0 {
+            out.push('\u{2009}');
+        }
+        out.push(ch);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// `s` as a sentence: a capital first letter and a full stop.
+pub fn sentence(s: &str) -> String {
+    let s = s.trim();
+    let mut c = s.chars();
+    let Some(first) = c.next() else { return String::new() };
+    let mut out: String = first.to_uppercase().chain(c).collect();
+    if out.chars().last().is_some_and(|l| l.is_alphanumeric() || l == ')' || l == '%') {
+        out.push('.');
+    }
+    out
+}
+
+/// the small round "?" beside a name: what the setting does, on hover.
+pub fn help(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+    let lit = ease(ui.ctx(), resp.id, resp.hovered());
+    let p = ui.painter();
+    let c = rect.center();
+    p.circle_filled(c, 7.5, Color32::from_white_alpha((6.0 + 14.0 * lit) as u8));
+    p.circle_stroke(c, 7.5, Stroke::new(1.0, mix(FAINT, ACCENT, lit)));
+    p.text(c + egui::vec2(0.0, 0.5), egui::Align2::CENTER_CENTER, "?", semibold(11.5), mix(DIM, ACCENT, lit));
+    let text = sentence(text);
+    resp.on_hover_ui(|ui| {
+        ui.set_max_width(300.0);
+        ui.label(RichText::new(text).font(body()).color(TEXT));
+    })
+}
+
+/// A form row's name, with its "?" after it when there is help.
+pub fn field_name(ui: &mut egui::Ui, name: &str, help_text: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(RichText::new(name).font(label()).color(if ui.is_enabled() { TEXT } else { FAINT }));
+        if !help_text.is_empty() {
+            help(ui, help_text);
+        }
+    });
+}
+
+/// Lays `add` out left to right against the right edge, in reading order:
+/// it is placed by its width last frame (egui would otherwise reverse a row
+/// laid out from the right). `key` tells the rows apart.
+pub fn at_right<R>(ui: &mut egui::Ui, key: impl std::hash::Hash + std::fmt::Debug, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let id = ui.make_persistent_id(("at right", key));
+    let cw = ui.available_width().max(40.0);
+    let last = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(cw).min(cw);
+    let h = ui.available_height().clamp(0.0, 4096.0);
+    let at = egui::Rect::from_min_size(egui::pos2(ui.max_rect().right() - last, ui.cursor().top()), egui::vec2(cw, h));
+    let r = ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)), add);
+    let got = r.response.rect.width();
+    if (got - last).abs() > 0.5 {
+        ui.ctx().data_mut(|d| d.insert_temp(id, got));
+        ui.ctx().request_discard("menu at_right width");
+    }
+    r.inner
+}
+
+/// One form row: the name (and its "?") at the left, the control at the right.
+pub fn form_row<R>(ui: &mut egui::Ui, name: &str, help_text: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.set_min_height(32.0);
+        field_name(ui, name, help_text);
+        at_right(ui, name, add)
+    })
+    .inner
+}
+
+/// A switch on its own row, named at the left.
+pub fn toggle_row(ui: &mut egui::Ui, name: &str, help_text: &str, on: &mut bool) -> egui::Response {
+    form_row(ui, name, help_text, |ui| switch(ui, on))
+}
+
+/// Steps and scale of a `slider`.
+#[derive(Clone, Copy)]
+pub struct Scale {
+    pub lo: f64,
+    pub hi: f64,
+    /// snap to multiples of this (0: none)
+    pub step: f64,
+    /// even steps in ratio, for ranges over decades
+    pub log: bool,
+}
+
+impl Scale {
+    pub fn new(lo: f64, hi: f64) -> Self {
+        Scale { lo, hi, step: 0.0, log: false }
+    }
+    pub fn step(mut self, s: f64) -> Self {
+        self.step = s;
+        self
+    }
+    pub fn log(mut self) -> Self {
+        self.log = true;
+        self
+    }
+    fn to_t(self, v: f64) -> f64 {
+        let v = v.clamp(self.lo, self.hi);
+        if self.log && self.lo > 0.0 { (v / self.lo).ln() / (self.hi / self.lo).ln() } else { (v - self.lo) / (self.hi - self.lo).max(1e-12) }
+    }
+    fn from_t(self, t: f64) -> f64 {
+        let t = t.clamp(0.0, 1.0);
+        let v = if self.log && self.lo > 0.0 { self.lo * (self.hi / self.lo).powf(t) } else { self.lo + t * (self.hi - self.lo) };
+        let v = if self.step > 0.0 { (v / self.step).round() * self.step } else { v };
+        v.clamp(self.lo, self.hi)
+    }
+}
+
+/// A slider the game's way: the name and its "?" at the left and the value
+/// at the right on one line, a full width track under them. Arrow keys
+/// (and the gamepad's d-pad) move it while it has the focus.
+pub fn slider<N: egui::emath::Numeric>(ui: &mut egui::Ui, name: &str, help_text: &str, v: &mut N, scale: Scale, value: impl Fn(f64) -> String) -> egui::Response {
+    ui.scope(|ui| slider_in(ui, name, help_text, v, scale, value)).inner
+}
+
+fn slider_in<N: egui::emath::Numeric>(ui: &mut egui::Ui, name: &str, help_text: &str, v: &mut N, scale: Scale, value: impl Fn(f64) -> String) -> egui::Response {
+    let en = ui.is_enabled();
+    let w = ui.available_width();
+    ui.spacing_mut().item_spacing.y = 0.0;
+    // the name and the value.
+    let top = ui.horizontal(|ui| {
+        ui.set_min_height(20.0);
+        field_name(ui, name, help_text);
+    });
+    let head = egui::Rect::from_min_size(top.response.rect.min, egui::vec2(w, top.response.rect.height()));
+    // the track.
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::click_and_drag());
+    let (resp, x) = track(ui, rect, resp, v, scale);
+    // the value, at the right of the name's line.
+    let text = value(x);
+    ui.painter().text(head.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, &text, semibold(14.5), if en { Color32::WHITE } else { FAINT });
+    resp.widget_info(|| egui::WidgetInfo::slider(en, x, name));
+    ui.add_space(4.0);
+    resp
+}
+
+/// A slider on one line, for tight tiles: the name, the track, the value.
+pub fn slider_inline<N: egui::emath::Numeric>(ui: &mut egui::Ui, name: &str, v: &mut N, scale: Scale, value: impl Fn(f64) -> String) -> egui::Response {
+    let en = ui.is_enabled();
+    let w = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::hover());
+    let (name_w, value_w) = (92.0, 86.0);
+    let rect = egui::Rect::from_min_max(egui::pos2(row.left() + name_w, row.top()), egui::pos2(row.right() - value_w, row.bottom()));
+    let resp = ui.interact(rect, ui.make_persistent_id(("slider inline", name)), egui::Sense::click_and_drag());
+    let (resp, x) = track(ui, rect, resp, v, scale);
+    // in flight a slider that kept the focus would take the arrow keys that fly.
+    if resp.drag_stopped() || resp.clicked() {
+        resp.surrender_focus();
+    }
+    let p = ui.painter();
+    let ng = one_line(p, name, label(), if en { TEXT } else { FAINT }, name_w - 8.0);
+    p.galley(egui::pos2(row.left(), row.center().y - ng.size().y * 0.5), ng, TEXT);
+    let vg = one_line(p, &value(x), semibold(14.0), if en { Color32::WHITE } else { FAINT }, value_w - 6.0);
+    p.galley(egui::pos2(row.right() - vg.size().x, row.center().y - vg.size().y * 0.5), vg, Color32::WHITE);
+    resp.widget_info(|| egui::WidgetInfo::slider(en, x, name));
+    resp
+}
+
+/// A slider's track in `rect`: dragged or clicked, or the arrow keys while
+/// it has the focus, moves `v`; then the track, its fill and the knob are drawn.
+fn track<N: egui::emath::Numeric>(ui: &mut egui::Ui, rect: egui::Rect, mut resp: egui::Response, v: &mut N, scale: Scale) -> (egui::Response, f64) {
+    let en = ui.is_enabled();
+    let mut x = v.to_f64();
+    let before = x;
+    if en {
+        if let Some(p) = resp.interact_pointer_pos() {
+            if resp.dragged() || resp.clicked() || resp.is_pointer_button_down_on() {
+                x = scale.from_t(((p.x - rect.left() - 8.0) / (rect.width() - 16.0).max(1.0)) as f64);
+            }
+        }
+        if resp.has_focus() {
+            ui.memory_mut(|m| m.set_focus_lock_filter(resp.id, egui::EventFilter { horizontal_arrows: true, ..Default::default() }));
+            crate::padui::takes_sideways(resp.id);
+            let (l, r) = ui.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight)));
+            if l || r {
+                let t = scale.to_t(x);
+                let k = if scale.step > 0.0 && !scale.log { scale.step / (scale.hi - scale.lo).max(1e-12) } else { 0.02 };
+                let next = scale.from_t(t + if r { k } else { -k });
+                // a step too small to move after snapping takes one whole step.
+                x = if next == x && scale.step > 0.0 { (x + if r { scale.step } else { -scale.step }).clamp(scale.lo, scale.hi) } else { next };
+            }
+        }
+    }
+    if x != before {
+        *v = N::from_f64(x);
+        resp.mark_changed();
+    }
+    let x = v.to_f64();
+    let lit = ease(ui.ctx(), resp.id, en && (resp.hovered() || resp.dragged() || resp.has_focus()));
+    let p = ui.painter();
+    let line = egui::Rect::from_min_max(egui::pos2(rect.left() + 8.0, rect.center().y - 2.0), egui::pos2(rect.right() - 8.0, rect.center().y + 2.0));
+    let t = scale.to_t(x) as f32;
+    let knob_x = egui::lerp(line.left()..=line.right(), t);
+    p.rect_filled(line, 2.0, mix(RAISED, RAISED_HI, lit));
+    let fill = egui::Rect::from_min_max(line.min, egui::pos2(knob_x, line.bottom()));
+    p.rect_filled(fill, 2.0, if en { ACCENT } else { ACCENT.gamma_multiply(0.35) });
+    let r = 7.0 + 1.5 * lit;
+    p.circle_filled(egui::pos2(knob_x, line.center().y), r, if en { mix(Color32::from_rgb(222, 228, 236), Color32::WHITE, lit) } else { FAINT });
+    p.circle_stroke(egui::pos2(knob_x, line.center().y), r, Stroke::new(2.0, Color32::from_rgb(10, 13, 18)));
+    (resp, x)
+}
+
+/// How a `choice` button looks.
+fn choice_look(ui: &egui::Ui, resp: &egui::Response, rect: egui::Rect, on: bool) -> Color32 {
+    let en = ui.is_enabled();
+    let lit = ease(ui.ctx(), resp.id, en && (resp.hovered() || resp.has_focus()));
+    let p = ui.painter();
+    if on {
+        p.rect_filled(rect, R_WIDGET, if en { CHOSEN } else { RAISED });
+        p.rect_stroke(rect, R_WIDGET, Stroke::new(1.0, if en { ACCENT } else { LINE_HI }), egui::StrokeKind::Inside);
+    } else {
+        p.rect_filled(rect, R_WIDGET, mix(RAISED, RAISED_HI, lit));
+        p.rect_stroke(rect, R_WIDGET, Stroke::new(1.0, mix(LINE_HI, Color32::from_white_alpha(60), lit)), egui::StrokeKind::Inside);
+    }
+    if !en { FAINT } else if on { Color32::WHITE } else { mix(TEXT, Color32::WHITE, lit) }
+}
+
+/// Text in one line, cut with an ellipsis to `width`.
+pub fn one_line(p: &egui::Painter, text: &str, font: egui::FontId, col: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, col);
+    job.wrap = egui::text::TextWrapping { max_width: width.max(8.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    p.layout_job(job)
+}
+
+/// A button of the given width (0: as wide as its words), 32 high, lit when `on`.
+pub fn choice(ui: &mut egui::Ui, text: &str, on: bool, width: f32) -> egui::Response {
+    choice_sized(ui, text, on, width, 32.0)
+}
+
+/// `choice` of any height.
+pub fn choice_sized(ui: &mut egui::Ui, text: &str, on: bool, width: f32, height: f32) -> egui::Response {
+    let font = medium(if height < 28.0 { 13.5 } else { 14.5 });
+    let w = if width > 0.0 { width } else { ui.painter().layout_no_wrap(text.to_string(), font.clone(), TEXT).size().x + if height < 28.0 { 20.0 } else { 28.0 } };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, height), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), on, text));
+    let col = choice_look(ui, &resp, rect, on);
+    let g = one_line(ui.painter(), text, font, col, w - 16.0);
+    ui.painter().galley(rect.center() - g.size() * 0.5, g, col);
+    resp
+}
+
+/// A plain button: as `choice`, never lit.
+pub fn button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    choice(ui, text, false, 0.0)
+}
+
+/// Even buttons in `cols` columns filling the width: the one clicked, if any.
+pub fn choice_grid(ui: &mut egui::Ui, cols: usize, items: &[(&str, bool)]) -> Option<usize> {
+    let gap = 8.0;
+    let cols = cols.max(1);
+    let w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+    let mut hit = None;
+    for (r, row) in items.chunks(cols).enumerate() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (k, (text, on)) in row.iter().enumerate() {
+                if choice(ui, text, *on, w).clicked() {
+                    hit = Some(r * cols + k);
+                }
+            }
+        });
+        ui.add_space(gap - ui.spacing().item_spacing.y);
+    }
+    hit
+}
+
+/// A thin rule across the width with room around it.
+pub fn rule(ui: &mut egui::Ui) {
+    ui.add_space(6.0);
+    let y = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, Color32::from_white_alpha(14)));
+    ui.add_space(8.0);
+}
+
+/// A small dim line of words, wrapped, in sentence case.
+pub fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(sentence(text)).font(caption()).color(DIM)).wrap());
+}
+
 /// Pages of the in-flight panels: the flight panel (Tab) runs beside the
 /// game; the pause menu (Esc) stops it.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -544,13 +852,21 @@ pub enum Page {
     /// the keyboard and gamepad reference
     Controls,
     Failures,
+    /// the aircraft's checklists (checklist.rs)
+    Checklist,
+    /// the com radio and the controllers (atc.rs)
+    Atc,
+    /// saved flights and the replay (flightsave.rs, replay.rs)
+    Flights,
+    /// pushback, jet bridge, fuel and boarding (ground.rs)
+    Ground,
     /// the pilot's logbook (flightlog.rs)
     Logbook,
 }
 
 impl Page {
-    pub const INFO: [Page; 5] = [Page::Flight, Page::Places, Page::Radio, Page::Autopilot, Page::Weather];
-    pub const PAUSE: [Page; 5] = [Page::Game, Page::Settings, Page::Controls, Page::Failures, Page::Logbook];
+    pub const INFO: [Page; 8] = [Page::Flight, Page::Places, Page::Radio, Page::Autopilot, Page::Weather, Page::Checklist, Page::Atc, Page::Ground];
+    pub const PAUSE: [Page; 6] = [Page::Game, Page::Settings, Page::Controls, Page::Failures, Page::Flights, Page::Logbook];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -563,6 +879,10 @@ impl Page {
             Page::Settings => "Settings",
             Page::Controls => "Controls",
             Page::Failures => "Failures",
+            Page::Checklist => "Checklist",
+            Page::Atc => "ATC",
+            Page::Flights => "Flights",
+            Page::Ground => "Ground",
             Page::Logbook => "Logbook",
         }
     }
@@ -602,7 +922,7 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("A / D", "roll left / right"),
         ("Q / E", "rudder left / right"),
         ("Shift / Ctrl", "throttle up / down"),
-        ("F8", "mouse yoke: the pointer flies, the wheel is the throttle"),
+        ("\\", "mouse yoke: the pointer flies, the wheel is the throttle"),
         ("Space", "boost"),
         ("B", "wheel brakes"),
         ("F / V", "flaps down / up a notch"),
@@ -620,6 +940,7 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("[ / ]", "OBS course left / right"),
         ("X", "altimeter to the QNH"),
         (".", "parking brake"),
+        ("Caps Lock", "push to talk to atc (hold)"),
     ]),
     ("VIEW", &[
         ("C", "chase / cockpit camera"),
@@ -655,6 +976,8 @@ pub fn apply_theme(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.all_styles_mut(|s| {
         use egui::{FontFamily, FontId, TextStyle};
+        // words are read, not picked up: no text selection anywhere.
+        s.interaction.selectable_labels = false;
         s.text_styles = [
             (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
             (TextStyle::Body, FontId::new(15.0, FontFamily::Proportional)),
@@ -673,6 +996,8 @@ pub fn apply_theme(ctx: &egui::Context) {
         s.spacing.icon_spacing = 8.0;
         s.spacing.scroll = egui::style::ScrollStyle { bar_width: 6.0, floating_allocated_width: 4.0, ..egui::style::ScrollStyle::floating() };
         s.animation_time = 0.14;
+        // help lives in tooltips now: show them without much wait.
+        s.interaction.tooltip_delay = 0.15;
         let v = &mut s.visuals;
         v.dark_mode = true;
         v.window_fill = PANEL;
@@ -717,16 +1042,15 @@ pub fn apply_theme(ctx: &egui::Context) {
 
 /// A panel frame in the shared style.
 pub fn panel() -> egui::Frame {
-    egui::Frame::new().fill(PANEL).corner_radius(R_PANEL).inner_margin(20.0).stroke(Stroke::new(1.0, LINE_HI)).shadow(egui::Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(120) })
+    egui::Frame::new().fill(PANEL).corner_radius(R_PANEL).inner_margin(24.0).stroke(Stroke::new(1.0, LINE_HI)).shadow(egui::Shadow { offset: [0, 10], blur: 32, spread: 0, color: Color32::from_black_alpha(120) })
 }
 
 /// a key or the pad's buttons, right aligned.
 fn paint_hint(p: &egui::Painter, hint: Hint, right: f32, y: f32, pad_h: f32, col: Color32) {
     match hint {
         Hint::Text(h) => {
-            // keys in mono, words in barlow.
-            let font = if h.contains(' ') { egui::FontId::proportional(13.0) } else { egui::FontId::monospace(11.0) };
-            p.text(egui::pos2(right, y), egui::Align2::RIGHT_CENTER, h, font, col);
+            let w = cap_width(p, h);
+            paint_cap(p, egui::Rect::from_min_size(egui::pos2(right - w, y - 12.0), egui::vec2(w, 24.0)), h, if col.a() < 200 { 0.8 } else { 1.0 });
         }
         Hint::Pad(spec) => {
             let x = right - padui::spec_width(p, spec, pad_h);
@@ -777,6 +1101,23 @@ pub enum Icon {
     Weather,
     Map,
     Camera,
+    Checklist,
+    Atc,
+    Ground,
+    /// a cross: close or remove.
+    Close,
+}
+
+/// a small square button with a drawn cross: close, remove, clear.
+pub fn close_button(ui: &mut egui::Ui, size: f32, hint: &str) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, hint));
+    let lit = ease(ui.ctx(), resp.id, resp.hovered() || resp.has_focus());
+    let p = ui.painter();
+    p.rect_filled(r, R_WIDGET, mix(RAISED, RAISED_HI, lit));
+    p.rect_stroke(r, R_WIDGET, Stroke::new(1.0, LINE_HI), egui::StrokeKind::Inside);
+    icon(p, Icon::Close, r.center(), size * 0.5, mix(TEXT, Color32::WHITE, lit));
+    if hint.is_empty() { resp } else { resp.on_hover_text(hint) }
 }
 
 /// draws an icon `s` across, centred on `c`.
@@ -786,6 +1127,11 @@ pub fn icon(p: &egui::Painter, which: Icon, c: egui::Pos2, s: f32, col: Color32)
     let u = s * 0.5;
     let arc = |c: egui::Pos2, r: f32, a0: f32, a1: f32| -> Vec<egui::Pos2> { (0..=16).map(|i| { let a = a0 + (a1 - a0) * i as f32 / 16.0; c + vec2(a.cos(), a.sin()) * r }).collect() };
     match which {
+        Icon::Close => {
+            let d = u * 0.55;
+            p.line_segment([c + vec2(-d, -d), c + vec2(d, d)], st);
+            p.line_segment([c + vec2(-d, d), c + vec2(d, -d)], st);
+        }
         // an aircraft from above.
         Icon::Flight => {
             let pts = [(0.0, -1.0), (0.12, -0.75), (0.12, -0.2), (0.95, 0.2), (0.95, 0.35), (0.12, 0.15), (0.1, 0.65), (0.4, 0.85), (0.4, 0.95), (0.0, 0.85)];
@@ -858,6 +1204,41 @@ pub fn icon(p: &egui::Painter, which: Icon, c: egui::Pos2, s: f32, col: Color32)
             p.line_segment([pos2(c.x - u * 0.35, r.top() - u * 0.2), pos2(c.x + u * 0.35, r.top() - u * 0.2)], st);
             p.circle_stroke(r.center(), u * 0.36, st);
         }
+        // a clipboard with ticked lines.
+        Icon::Checklist => {
+            let r = egui::Rect::from_center_size(c + vec2(0.0, u * 0.08), vec2(s * 0.72, s * 0.9));
+            p.rect_stroke(r, 2.0, st, egui::StrokeKind::Middle);
+            p.rect_filled(egui::Rect::from_center_size(pos2(c.x, r.top()), vec2(u * 0.5, u * 0.22)), 1.0, col);
+            for k in 0..3 {
+                let y = r.top() + r.height() * (0.3 + 0.24 * k as f32);
+                let x = r.left() + u * 0.18;
+                p.line(vec![pos2(x, y), pos2(x + u * 0.1, y + u * 0.1), pos2(x + u * 0.26, y - u * 0.1)], st);
+                p.line_segment([pos2(x + u * 0.42, y), pos2(r.right() - u * 0.16, y)], st);
+            }
+        }
+        // a tug: a low cab, wheels and a tow bar.
+        Icon::Ground => {
+            let body = egui::Rect::from_min_max(c + vec2(-u * 0.9, -u * 0.2), c + vec2(u * 0.6, u * 0.45));
+            p.rect_stroke(body, 2.0, st, egui::StrokeKind::Middle);
+            p.rect_stroke(egui::Rect::from_min_max(c + vec2(-u * 0.55, -u * 0.6), c + vec2(u * 0.05, -u * 0.2)), 1.0, st, egui::StrokeKind::Middle);
+            for x in [-0.55, 0.3] {
+                p.circle_stroke(c + vec2(u * x, u * 0.55), u * 0.2, st);
+            }
+            p.line_segment([c + vec2(u * 0.6, u * 0.15), c + vec2(u, u * 0.15)], st);
+        }
+        // a headset.
+        Icon::Atc => {
+            let pi = std::f32::consts::PI;
+            p.add(egui::Shape::line(arc(c + vec2(0.0, u * 0.1), u * 0.72, pi * 1.05, pi * 1.95), st));
+            for sx in [-1.0, 1.0] {
+                let e = egui::Rect::from_center_size(c + vec2(sx * u * 0.72, u * 0.28), vec2(u * 0.34, u * 0.62));
+                p.rect_stroke(e, 3.0, st, egui::StrokeKind::Middle);
+            }
+            let m = arc(c + vec2(u * 0.15, u * 0.35), u * 0.55, 0.1, pi * 0.55);
+            let end = *m.last().unwrap_or(&c);
+            p.add(egui::Shape::line(m, st));
+            p.circle_filled(end, u * 0.12, col);
+        }
     }
 }
 
@@ -868,37 +1249,40 @@ pub fn chevron(p: &egui::Painter, c: egui::Pos2, size: f32, turn: f32, col: Colo
     p.line(pts.to_vec(), Stroke::new(1.8, col));
 }
 
-/// A collapsible section: a full-width header row (its title, a few words
-/// on what is inside while it is shut, a chevron) that opens and closes the
-/// body under it. Shut ones keep a first look at the start screen calm.
+/// a collapsible section, one row of a list: its name, what it is set to
+/// while it is shut, a chevron, and a hairline under it. it opens and closes
+/// the body under it. shut ones keep a first look at the start screen calm.
 pub fn section(ui: &mut egui::Ui, id: &str, title: &str, summary: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
     let id = ui.make_persistent_id(("section", id));
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
     let k = state.openness(ui.ctx());
     let lit = ease(ui.ctx(), resp.id, resp.hovered() || resp.has_focus());
     let p = ui.painter();
-    // the title row, lit when open.
-    p.rect_filled(rect, R_WIDGET, Color32::from_white_alpha((7.0 + 9.0 * lit) as u8));
-    let title_col = mix(TEXT, Color32::WHITE, lit.max(k));
-    p.text(rect.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, title, label(), title_col);
-    if k < 1.0 && !summary.is_empty() {
-        let col = DIM.gamma_multiply(1.0 - k);
-        p.text(rect.right_center() - egui::vec2(32.0, 0.0), egui::Align2::RIGHT_CENTER, summary, egui::FontId::proportional(13.0), col);
+    if lit > 0.0 {
+        p.rect_filled(rect.expand2(egui::vec2(8.0, 0.0)), R_WIDGET, Color32::from_white_alpha((8.0 * lit) as u8));
     }
-    chevron(p, rect.right_center() - egui::vec2(16.0, 0.0), 5.5, k, mix(DIM, Color32::WHITE, lit));
+    // the name, white once open; what it is set to in the label face, fading as it opens.
+    let title_col = mix(TEXT, Color32::WHITE, lit.max(k));
+    p.text(rect.left_center(), egui::Align2::LEFT_CENTER, title, semibold(15.0), title_col);
+    if k < 1.0 && !summary.is_empty() {
+        let tw = p.layout_no_wrap(title.to_string(), semibold(15.0), title_col).size().x;
+        let g = one_line(p, summary, label(), DIM, rect.width() - tw - 48.0);
+        p.galley(rect.right_center() - egui::vec2(20.0 + g.size().x, g.size().y * 0.5), g, DIM.gamma_multiply(1.0 - k));
+    }
+    chevron(p, rect.right_center() - egui::vec2(4.0, 0.0), 5.0, k, mix(DIM, Color32::WHITE, lit));
     if resp.clicked() {
         state.toggle(ui);
     }
     state.show_body_unindented(ui, |ui| {
-        ui.add_space(2.0);
-        egui::Frame::new().inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 4 }).show(ui, |ui| {
+        egui::Frame::new().inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 8 }).show(ui, |ui| {
             ui.set_width(ui.available_width());
             body(ui);
         });
     });
-    ui.add_space(2.0);
+    let y = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), y - ui.spacing().item_spacing.y * 0.5, Stroke::new(1.0, Color32::from_white_alpha(14)));
 }
 
 /// The title bar of a start-screen window: a small capitalised name, then a hairline.
@@ -917,15 +1301,88 @@ pub fn heading(ui: &mut egui::Ui, s: &str) {
 
 /// a key cap: the key's name in a raised cap, big enough to read at a glance.
 pub fn key_cap(ui: &mut egui::Ui, keys: &str) -> egui::Response {
-    let g = ui.painter().layout_no_wrap(keys.to_string(), semibold(13.5), Color32::WHITE);
-    let (r, resp) = ui.allocate_exact_size(egui::vec2((g.size().x + 16.0).max(26.0), 24.0), egui::Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(r, R_WIDGET + 1, Color32::from_rgb(14, 17, 23));
-    let top = r.with_max_y(r.bottom() - 2.5);
-    p.rect_filled(top, R_WIDGET + 1, Color32::from_rgb(58, 68, 84));
-    p.rect_stroke(top, R_WIDGET + 1, Stroke::new(1.0, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
-    p.galley(egui::pos2(top.center().x - g.size().x * 0.5, top.center().y - g.size().y * 0.5), g, Color32::WHITE);
+    let w = cap_width(ui.painter(), keys);
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 24.0), egui::Sense::hover());
+    paint_cap(ui.painter(), r, keys, 1.0);
     resp
+}
+
+/// a short fade in when what is shown changes (a screen, a tab, a page):
+/// the new one comes up out of the dark. `key` 0 changes to without a fade.
+/// `orders`: the layers that rise in (the menus' own, never the hud's).
+pub fn transition(ctx: &egui::Context, key: u64, orders: &[egui::Order]) {
+    let id = egui::Id::unique("screen_veil");
+    let now = ctx.input(|i| i.time);
+    let (was, t0) = ctx.data(|d| d.get_temp::<(u64, f64)>(id)).unwrap_or((key, f64::NEG_INFINITY));
+    let t0 = if was != key && key != 0 { now } else { t0 };
+    ctx.data_mut(|d| d.insert_temp(id, (key, t0)));
+    let k = ((now - t0) / 0.34).clamp(0.0, 1.0) as f32;
+    // the new screen rises the last few pixels into place as it comes up, eased out (quick, then settling).
+    let ease = 1.0 - (1.0 - k).powi(4);
+    let layers: Vec<egui::LayerId> = ctx.memory(|m| m.layer_ids().filter(|l| orders.contains(&l.order)).collect());
+    let moving = egui::Id::unique("screen_rise");
+    if k < 1.0 {
+        let t = egui::emath::TSTransform::from_translation(egui::vec2(0.0, 18.0 * (1.0 - ease)));
+        for l in &layers {
+            ctx.set_transform_layer(*l, t);
+        }
+        ctx.data_mut(|d| d.insert_temp(moving, true));
+        // a light veil over the start, gone in the first third.
+        let a = 0.6 * (1.0 - (k * 3.0).min(1.0)).powi(2);
+        if a > 0.0 {
+            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("veil")));
+            p.rect_filled(ctx.content_rect(), 0.0, Color32::from_rgba_unmultiplied(BG.r(), BG.g(), BG.b(), (255.0 * a) as u8));
+        }
+        ctx.request_repaint();
+    } else if ctx.data(|d| d.get_temp::<bool>(moving)).unwrap_or(false) {
+        // settled: every layer back where it is drawn.
+        for l in &layers {
+            ctx.set_transform_layer(*l, egui::emath::TSTransform::IDENTITY);
+        }
+        ctx.data_mut(|d| d.insert_temp(moving, false));
+    }
+}
+
+/// the letters on a key cap: the body face, whose q has a clear tail.
+fn cap_font() -> egui::FontId {
+    egui::FontId::new(13.5, egui::FontFamily::Name(MEDIUM.into()))
+}
+
+/// how wide a key cap is for these keys.
+pub fn cap_width(p: &egui::Painter, keys: &str) -> f32 {
+    (p.layout_no_wrap(keys.to_string(), cap_font(), Color32::WHITE).size().x + 16.0).max(26.0)
+}
+
+/// a key cap filling `r`, its face raised over a darker foot.
+pub fn paint_cap(p: &egui::Painter, r: egui::Rect, keys: &str, a: f32) {
+    let g = p.layout_no_wrap(keys.to_string(), cap_font(), Color32::WHITE.gamma_multiply(a));
+    p.rect_filled(r, R_WIDGET + 1, Color32::from_rgb(14, 17, 23).gamma_multiply(a));
+    let top = r.with_max_y(r.bottom() - 2.5);
+    p.rect_filled(top, R_WIDGET + 1, Color32::from_rgb(58, 68, 84).gamma_multiply(a));
+    p.rect_stroke(top, R_WIDGET + 1, Stroke::new(1.0, Color32::from_white_alpha((28.0 * a) as u8)), egui::StrokeKind::Inside);
+    p.galley(egui::pos2(top.center().x - g.size().x * 0.5, top.center().y - g.size().y * 0.5), g, Color32::WHITE);
+}
+
+/// the prompt for turning pages: a key cap (q, e) or the pad's bumper, as wide as it draws.
+pub fn page_prompt(ui: &mut egui::Ui, next: bool) {
+    let (key, btn) = if next { ("E", "RB") } else { ("Q", "LB") };
+    if padui::active() {
+        let w = padui::spec_width(ui.painter(), btn, 22.0);
+        let (r, _) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::hover());
+        padui::paint_spec(ui.painter(), r.left(), r.center().y, btn, 22.0, Color32::from_white_alpha(200));
+    } else {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(cap_width(ui.painter(), key), 40.0), egui::Sense::hover());
+        paint_cap(ui.painter(), egui::Rect::from_center_size(r.center(), egui::vec2(r.width(), 24.0)), key, 1.0);
+    }
+}
+
+/// a page turn asked for this frame: q or e (not while typing), or the pad's bumpers and triggers.
+pub fn page_turn(ctx: &egui::Context) -> i32 {
+    let pad = ctx.data_mut(|d| d.remove_temp::<i32>(egui::Id::unique("page_turn"))).unwrap_or(0);
+    if pad != 0 || ctx.text_edit_focused() {
+        return pad;
+    }
+    ctx.input(|i| i.key_pressed(egui::Key::E) as i32 - i.key_pressed(egui::Key::Q) as i32)
 }
 
 /// One `buttons … action` row of the gamepad controls list.
@@ -985,7 +1442,7 @@ pub fn search_box(ui: &mut egui::Ui, id: &str, hint: &str, width: f32) -> Vec<St
         if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             text.clear();
         }
-        if !text.is_empty() && ui.add(egui::Button::new("×").min_size(egui::vec2(28.0, 28.0))).on_hover_text(t!("menu.clear_search")).clicked() {
+        if !text.is_empty() && close_button(ui, 28.0, t!("menu.clear_search")).clicked() {
             text.clear();
         }
     });
@@ -1176,12 +1633,8 @@ pub fn big_button(ui: &mut egui::Ui, text: &str, hint: Hint, primary: bool, chos
     };
     p.rect_filled(rect, R_WIDGET, fill);
     if !primary {
-        // a short accent mark for the page showing.
-        if pick > 0.0 {
-            let h = rect.height() * 0.5 * pick;
-            p.rect_filled(egui::Rect::from_center_size(egui::pos2(rect.left() + 1.5, rect.center().y), egui::vec2(3.0, h)), 1.0, ACCENT);
-        }
-        p.rect_stroke(rect, R_WIDGET, Stroke::new(1.0, mix(LINE, Color32::from_white_alpha(40), lit)), egui::StrokeKind::Inside);
+        // the page showing gets a lit outline all round.
+        p.rect_stroke(rect, R_WIDGET, Stroke::new(1.0, mix(mix(LINE, Color32::from_white_alpha(40), lit), ACCENT.gamma_multiply(0.8), pick)), egui::StrokeKind::Inside);
     }
     let font = if primary { bold(22.0) } else { item_title() };
     let x = rect.left() + 20.0 + 4.0 * lit * (!primary as u8 as f32);

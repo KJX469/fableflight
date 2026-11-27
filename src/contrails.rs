@@ -253,9 +253,10 @@ pub fn atmosphere_at(pos: DVec3, wx: &Weather, doy: f64, eta: f64, ei_h2o: f64) 
     let clim_sfc_c = 28.0 - 44.0 * smoothstep(5.0, 78.0, abs_lat) + (12.0 * smoothstep(15.0, 65.0, abs_lat)) * (warm_season * 2.0 - 1.0);
     let mut dt_sfc = (clim_sfc_c - 15.0).clamp(-32.0, 16.0);
     if let Some(frz) = wx.freezing {
-        // Live METAR / Open-Meteo freezing level (ISA freezing level is ~2308 m).
+        // Live METAR / Open-Meteo freezing level (ISA freezing level is ~2308 m),
+        // less the day's warmth `t_isa` already has (plane::set_air).
         let live_dt = ((frz - 2307.7) * 0.0065).clamp(-48.0, 18.0);
-        dt_sfc = live_dt;
+        dt_sfc = live_dt - plane::air_now().1;
     }
     // Surface anomaly attenuates smoothly toward the tropopause; in winter polar air
     // the whole troposphere is noticeably colder, allowing lower contrails.

@@ -62,8 +62,8 @@ pub struct Target {
     pub blowing: f32,
     /// surface relative humidity (0..1) from temperature and dew point when reported
     pub humidity: Option<f32>,
-    /// temperature less the standard atmosphere's at the station's height,
-    /// K (None: not reported)
+    /// the surface temperature brought down to sea level at the standard
+    /// lapse rate, off the standard 15 c (k; None: not reported)
     pub isa_dev: Option<f64>,
     /// what it came from, for the weather panel: "EBBR" or "Open-Meteo",
     /// and the report itself (the raw METAR)
@@ -115,13 +115,12 @@ impl LiveWx {
                 self.owns_rain = false;
                 wx.rain_set = None;
                 wx.live_cells.clear();
-                wx.isa_dev = 0.0;
                 (wx.radar_cover, wx.deck_goal, wx.deck_tau) = (None, None, 6.0);
                 (self.radar, self.radar_got, self.radar_at) = (None, None, None);
             }
-            // Hand-set weather: the standard pressure (and the temperature
-            // the player set, standard unless `--isa-dev` says otherwise).
+            // Hand-set weather: the standard atmosphere.
             wx.qnh = 1013.25;
+            wx.isa_dev = 0.0;
             wx.freezing = None;
             wx.blowing = 0.0;
             wx.humidity = None;
@@ -200,6 +199,9 @@ impl LiveWx {
             wx.qnh += (q - wx.qnh) * k;
         }
         wx.blowing = t.blowing;
+        if let Some(d) = t.isa_dev {
+            wx.isa_dev += (d - wx.isa_dev) * k;
+        }
         wx.humidity = match (wx.humidity, t.humidity) {
             (Some(a), Some(b)) => Some(a + (b - a) * k as f32),
             (_, b) => b,
@@ -208,9 +210,6 @@ impl LiveWx {
             (Some(a), Some(b)) => Some(a + (b - a) * k),
             (_, b) => b,
         };
-        if let Some(d) = t.isa_dev {
-            wx.isa_dev += (d - wx.isa_dev) * k;
-        }
         if let Some(from) = t.wind_from {
             let d = (from - wx.wind_from + 540.0).rem_euclid(360.0) - 180.0;
             wx.wind_from = (wx.wind_from + d * k).rem_euclid(360.0);
@@ -573,7 +572,7 @@ fn from_metar(m: &serde_json::Value) -> Option<Target> {
         freezing: freezing_for(m["temp"].as_f64().filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::snow::freezing_level(t, elev)), elev, p.snow),
         blowing: p.blowing,
         humidity: rh_from_td(m["temp"].as_f64(), m["dewp"].as_f64()),
-        isa_dev: m["temp"].as_f64().filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::plane::Atmos::from_surface(1013.25, t, elev).isa_dev),
+        isa_dev: isa_dev(m["temp"].as_f64(), elev),
         station,
         raw,
     })
@@ -592,6 +591,11 @@ struct Precip {
     snow: Option<f32>,
     /// snow blown up off the ground: BLSN 1, DRSN (drifting, low) 0.5
     blowing: f32,
+}
+
+/// a surface temperature (c) at `elev` (m) as the sea-level temperature off standard (k).
+fn isa_dev(temp_c: Option<f64>, elev: f64) -> Option<f64> {
+    temp_c.filter(|t| (-80.0..60.0).contains(t)).map(|t| t + crate::snow::LAPSE * elev - 15.0)
 }
 
 /// Surface relative humidity (0..1) from temperature and dew point (°C) via Magnus-Tetens.
@@ -860,7 +864,7 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
         freezing: freezing_for(f("temperature_2m").filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::snow::freezing_level(t, elev)), elev, snow),
         blowing: 0.0,
         humidity: rh_from_td(f("temperature_2m"), f("dew_point_2m")),
-        isa_dev: f("temperature_2m").filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::plane::Atmos::from_surface(1013.25, t, elev).isa_dev),
+        isa_dev: isa_dev(f("temperature_2m"), elev),
         station: "Open-Meteo".into(),
         raw: String::new(),
     })
@@ -919,8 +923,6 @@ mod tests {
         assert_eq!((t.station.as_str(), t.qnh), ("EGLL", Some(1002.0)));
         // 12 °C at 25 m: the freezing level about 1850 m up (snow.rs).
         assert!((t.freezing.unwrap() - (25.0 + 12.0 / 0.0065)).abs() < 1e-6);
-        // 12 °C at 25 m, where the standard atmosphere has 14.84 °C.
-        assert!((t.isa_dev.unwrap() + 2.84).abs() < 0.02, "{:?}", t.isa_dev);
         assert_eq!(t.wind_from, Some(240.0));
         assert!((t.wind - 15.0 / 1.94384).abs() < 1e-6);
         assert!(t.gusts > 0.8);

@@ -326,9 +326,6 @@ pub struct ServerEntry {
 
 struct DirShared {
     servers: Mutex<Vec<ServerEntry>>,
-    error: Mutex<Option<String>>,
-    /// the list is the last one received, no list server answering
-    stale: AtomicBool,
     now: AtomicBool,
     stop: AtomicBool,
 }
@@ -343,7 +340,7 @@ impl Directory {
     /// Reads the list from `urls` (the first that answers), keeping a copy
     /// in `cache` for when none does.
     pub fn start(src: Arc<crate::sources::Sources>, urls: Vec<String>, cache: Option<std::path::PathBuf>) -> Self {
-        let shared = Arc::new(DirShared { servers: Mutex::new(Vec::new()), error: Mutex::new(None), stale: AtomicBool::new(false), now: AtomicBool::new(true), stop: AtomicBool::new(false) });
+        let shared = Arc::new(DirShared { servers: Mutex::new(Vec::new()), now: AtomicBool::new(true), stop: AtomicBool::new(false) });
         let sh = shared.clone();
         std::thread::Builder::new()
             .name("server list".into())
@@ -352,12 +349,10 @@ impl Directory {
                 while !sh.stop.load(Ordering::Relaxed) {
                     if sh.now.swap(false, Ordering::Relaxed) || last.elapsed() > Duration::from_secs(30) {
                         last = Instant::now();
-                        let (list, error) = read_list(&urls, |u| src.fetch.get(u).map_err(|e| e.to_string()), cache.as_deref());
-                        sh.stale.store(list.as_ref().is_some_and(|l| l.1), Ordering::Relaxed);
+                        let (list, _) = read_list(&urls, |u| src.fetch.get(u).map_err(|e| e.to_string()), cache.as_deref());
                         if let Some((list, _)) = list {
                             *sh.servers.lock().unwrap() = list;
                         }
-                        *sh.error.lock().unwrap() = error;
                     }
                     std::thread::sleep(Duration::from_millis(250));
                 }
@@ -365,19 +360,8 @@ impl Directory {
             .ok();
         Directory { shared }
     }
-    /// The list is the last one received (no list server answers now).
-    pub fn stale(&self) -> bool {
-        self.shared.stale.load(Ordering::Relaxed)
-    }
     pub fn servers(&self) -> Vec<ServerEntry> {
         self.shared.servers.lock().unwrap().clone()
-    }
-    pub fn error(&self) -> Option<String> {
-        self.shared.error.lock().unwrap().clone()
-    }
-    /// Reads the list again now.
-    pub fn refresh(&self) {
-        self.shared.now.store(true, Ordering::Relaxed);
     }
     /// The server that answers us fastest.
     pub fn best(&self) -> Option<ServerEntry> {

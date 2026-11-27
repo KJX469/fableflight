@@ -175,6 +175,12 @@ pub struct Graphics {
     pub cars: Level,
     /// birds in the air (birds.rs; Off, or Low to High; Ultra is High)
     pub birds: Level,
+    /// hot-air balloons at the places known for them (balloons.rs; Off, or
+    /// Low to High; Ultra is High)
+    pub balloons: Level,
+    /// wind turbines where OpenStreetMap has them (turbines.rs; Off, or Low
+    /// to High: how far they are drawn; Ultra is High)
+    pub turbines: Level,
     /// ambient occlusion (GTAO)
     pub ao: bool,
     /// water: Low plain (a flat sea bed, simple foam, one reflected cloud
@@ -196,10 +202,17 @@ pub struct Graphics {
     pub dynamic: bool,
     /// the frame rate dynamic quality aims for (0: the display's refresh rate)
     pub dyn_fps: u16,
+    /// lowers the render resolution while the gpu cant hold the frame rate (main.rs dyn_res).
+    pub dynamic_res: bool,
+    /// shows a generated frame between each two drawn ones (framegen.rs).
+    pub framegen: bool,
 }
 
 /// The frame rates dynamic quality can aim for (0: the display's).
 pub const DYN_FPS: [u16; 7] = [0, 30, 45, 60, 90, 120, 144];
+
+/// lowest share of the render resolution dynamic resolution goes to.
+pub const DYN_MIN: f32 = 0.6;
 
 impl Default for Graphics {
     fn default() -> Self {
@@ -214,7 +227,7 @@ pub const SCALE_MAX: f32 = 2.0;
 impl Graphics {
     /// One of the presets (taa and vsync on).
     pub fn preset(p: Preset) -> Self {
-        let mut g = Graphics { scale: 1.0, shadows: Level::High, clouds: Level::High, cloud_shadows: true, storms: Level::High, contrails: true, terrain: Level::High, scenery: Level::High, city: Level::High, trees: Level::High, cars: Level::High, birds: Level::High, ao: true, water: Level::High, msaa: 4, taa: true, upscaler: Upscaler::Bilinear, vsync: true, fps_cap: 0, dynamic: false, dyn_fps: 0 };
+        let mut g = Graphics { scale: 1.0, shadows: Level::High, clouds: Level::High, cloud_shadows: true, storms: Level::High, contrails: true, terrain: Level::High, scenery: Level::High, city: Level::High, trees: Level::High, cars: Level::High, birds: Level::High, balloons: Level::High, turbines: Level::High, ao: true, water: Level::High, msaa: 4, taa: true, upscaler: Upscaler::Bilinear, vsync: true, fps_cap: 0, dynamic: false, dyn_fps: 0, dynamic_res: false, framegen: false };
         g.apply(p);
         g
     }
@@ -241,6 +254,8 @@ impl Graphics {
         let capped = if l == Level::Ultra { Level::High } else { l };
         self.cars = if very_low { Level::Off } else { capped };
         self.birds = if very_low { Level::Off } else { capped };
+        self.balloons = if very_low { Level::Low } else { capped };
+        self.turbines = if very_low { Level::Low } else { capped };
         self.ao = matches!(l, Level::High | Level::Ultra);
         // (Low has always gone without the reflections on screen)
         self.water = match p {
@@ -293,6 +308,9 @@ impl Graphics {
         g.fps_cap = j["fps_cap"].as_u64().map(|v| v as u16).filter(|v| [0, 30, 60, 90, 120, 144, 165, 240].contains(v)).unwrap_or(0);
         g.dynamic = j["dynamic"].as_bool().unwrap_or(false);
         g.dyn_fps = j["dynamic_fps"].as_u64().map(|v| v as u16).filter(|v| DYN_FPS.contains(v)).unwrap_or(0);
+        // off unless turned on in the settings.
+        g.dynamic_res = j["dynamic_res"].as_bool().unwrap_or(false);
+        g.framegen = j["framegen"].as_bool().unwrap_or(false);
         // a saved preset follows the code, so retuned presets reach old saves.
         if let Some(l) = j["preset"].as_str().and_then(Preset::parse) {
             g.apply(l);
@@ -316,6 +334,8 @@ impl Graphics {
         g.trees = lvl("trees", g.trees);
         g.cars = j["cars"].as_str().and_then(Level::parse).map(|l| if l == Level::Ultra { Level::High } else { l }).unwrap_or(g.cars);
         g.birds = j["birds"].as_str().and_then(Level::parse).map(|l| if l == Level::Ultra { Level::High } else { l }).unwrap_or(g.birds);
+        g.turbines = j["turbines"].as_str().and_then(Level::parse).map(|l| if l == Level::Ultra { Level::High } else { l }).unwrap_or(g.turbines);
+        g.balloons = j["balloons"].as_str().and_then(Level::parse).map(|l| if l == Level::Ultra { Level::High } else { l }).unwrap_or(g.balloons);
         g.ao = j["ao"].as_bool().unwrap_or(g.ao);
         g.water = lvl("water", g.water).min_high();
         g.msaa = j["msaa"].as_u64().filter(|n| [1, 2, 4].contains(n)).map(|n| n as u8).unwrap_or(g.msaa);
@@ -340,6 +360,8 @@ impl Graphics {
             "trees": self.trees.name(),
             "cars": self.cars.name(),
             "birds": self.birds.name(),
+            "balloons": self.balloons.name(),
+            "turbines": self.turbines.name(),
             "ao": self.ao,
             "water": self.water.name(),
             "msaa": self.msaa,
@@ -349,6 +371,8 @@ impl Graphics {
             "fps_cap": self.fps_cap,
             "dynamic": self.dynamic,
             "dynamic_fps": self.dyn_fps,
+            "dynamic_res": self.dynamic_res,
+            "framegen": self.framegen,
         })
     }
 

@@ -166,6 +166,8 @@ pub struct FrameClock {
     period: f64,
     /// the latest frame's GPU time (ms)
     pub last: Option<f32>,
+    /// frames timed so far.
+    pub frames: u64,
 }
 
 /// read-back buffer states
@@ -190,7 +192,7 @@ impl FrameClock {
         let ring = (0..RING)
             .map(|_| (d.create_buffer(&wgpu::BufferDescriptor { label: Some("frame clock read"), size: 16, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false }), std::sync::Arc::new(std::sync::atomic::AtomicU8::new(FREE))))
             .collect();
-        Some(Self { set, resolve, ring, cur: usize::MAX, period: q.get_timestamp_period() as f64, last: None })
+        Some(Self { set, resolve, ring, cur: usize::MAX, period: q.get_timestamp_period() as f64, last: None, frames: 0 })
     }
 
     /// reads whatever the GPU has finished (after a non-blocking poll).
@@ -205,6 +207,7 @@ impl FrameClock {
                     // (a stamp pair torn by a reset or a wrapped counter)
                     if ms > 0.0 && ms < 1000.0 {
                         self.last = Some(ms as f32);
+                        self.frames += 1;
                     }
                 }
                 buf.unmap();

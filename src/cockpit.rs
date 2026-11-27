@@ -30,6 +30,9 @@ pub struct Head {
     pub inside: f32,
     /// sitting in the other cockpit (`Spec::eye2`)
     pub rear: bool,
+    /// a head tracker's offset (body frame, m) and roll (rad), on top of the look (headtrack.rs)
+    pub track: DVec3,
+    pub track_roll: f64,
 }
 
 /// The eye: its position and orientation in the body frame, the vertical field of view.
@@ -53,7 +56,7 @@ pub fn look(yaw: f64, pitch: f64) -> DQuat {
 
 impl Head {
     pub fn new(yaw: f64, pitch: f64) -> Head {
-        Head { yaw, pitch, lean: DVec3::ZERO, seat_offset: glam::DVec2::ZERO, roll: 0.0, zoom: 1.0, zoom_s: 1.0, adapt: 0.55, inside: 0.5, rear: false }
+        Head { yaw, pitch, lean: DVec3::ZERO, seat_offset: glam::DVec2::ZERO, roll: 0.0, zoom: 1.0, zoom_s: 1.0, adapt: 0.55, inside: 0.5, rear: false, track: DVec3::ZERO, track_roll: 0.0 }
     }
 
     /// Snap to the asked-for look at once (entering the cockpit, respawning).
@@ -112,7 +115,7 @@ impl Head {
         let q = look(self.yaw, self.pitch);
         // The eyes swing round the neck joint behind them.
         let offset = DVec3::new(self.seat_offset.x, self.seat_offset.y, self.seat_offset.y.min(0.0) * 0.35);
-        let eye = spec.eye2.filter(|_| self.rear).unwrap_or(spec.eye).as_dvec3() + shake + self.lean + offset + NECK - q * NECK;
+        let eye = spec.eye2.filter(|_| self.rear).unwrap_or(spec.eye).as_dvec3() + shake + self.lean + offset + self.track + NECK - q * NECK;
 
         // Tilt part of the way back toward the horizon (only near level).
         let d = rot * (q * DVec3::NEG_Z);
@@ -124,7 +127,7 @@ impl Head {
             tilt = (a * 0.18).clamp(-0.14, 0.14) * smooth(0.95, 0.6, d.dot(up).abs());
         }
         self.roll = follow(self.roll, tilt, 3.0, dt);
-        let rot_b = q * DQuat::from_rotation_z(-self.roll);
+        let rot_b = q * DQuat::from_rotation_z(-self.roll - self.track_roll);
         let fov_now = fov * self.zoom_s as f32;
 
         // How much of the view is the cabin: the eye opens up for it (more by

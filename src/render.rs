@@ -26,6 +26,7 @@ pub(crate) fn msaa() -> u32 {
 const MAX_INST: usize = 16384;
 /// scenery instances drawn in a frame, and materials in all the packs together
 const MAX_SCENERY: usize = 8192;
+const MAX_PEOPLE: usize = 1024;
 const SC_MATS: usize = 128;
 const MAX_FALL: usize = 4096;
 /// trees and undergrowth close enough to the camera for their leaf cards
@@ -598,7 +599,8 @@ pub struct FieldGpu {
 pub struct TileGpu {
     vbuf: wgpu::Buffer,
     bind: wgpu::BindGroup,
-    /// gpu bytes, for the streaming budget (world.rs `keep_budget`)
+    /// gpu bytes, for the memory figures (`--features mem-stats`)
+    #[cfg_attr(not(feature = "mem-stats"), allow(dead_code))]
     pub bytes: usize,
     radius: f32,
     wet: bool,
@@ -658,10 +660,13 @@ pub struct BuildGpu {
     bind: wgpu::BindGroup,
     road: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
     pub trees: Option<wgpu::Buffer>,
-    /// gpu bytes, for the streaming budget (world.rs `keep_budget`)
-    pub bytes: usize,
 }
 impl BuildGpu {
+    /// gpu memory the tile holds.
+    pub fn bytes(&self) -> u64 {
+        self.vbuf.size() + self.ibuf.size() + self.road.as_ref().map_or(0, |r| r.0.size() + r.1.size()) + self.trees.as_ref().map_or(0, |t| t.size())
+    }
+
     /// The cells (bit per cell) with geometry inside a shadow cascade's box,
     /// `vp` its camera-relative view-projection; `o` the tile's offset from the camera.
     fn cells_in(&self, vp: &glam::Mat4, o: glam::Vec3) -> u64 {
@@ -733,10 +738,6 @@ impl BuildGpu {
 pub fn building_payload(b: &crate::buildings::BuildingData) -> [&[u8]; 5] {
     [bytemuck::cast_slice(&b.verts), bytemuck::cast_slice(&b.indices), bytemuck::cast_slice(&b.road_verts), bytemuck::cast_slice(&b.road_idx), bytemuck::cast_slice(&b.trees)]
 }
-/// gpu bytes of a building tile, for the streaming budget.
-pub fn building_bytes(b: &crate::buildings::BuildingData) -> usize {
-    building_payload(b).iter().map(|p| p.len()).sum::<usize>() + b.atlas.iter().map(|m| m.len()).sum::<usize>()
-}
 /// Bytes of a terrain tile's upload, for the per-frame upload budget.
 pub fn tile_bytes(t: &crate::sources::TileData) -> usize {
     std::mem::size_of_val(&t.verts[..]) + t.imagery.iter().chain(&t.mask).chain(&t.lights).map(|m| m.len()).sum::<usize>()
@@ -807,6 +808,9 @@ pub struct MeshGpu {
     bind: Option<std::sync::Arc<wgpu::BindGroup>>,
     /// indices before the instrument faces and displays, which come last.
     n_main: u32,
+    /// the mesh's box at rest (the glass pass copies only the screen it covers).
+    lo: glam::Vec3,
+    hi: glam::Vec3,
 }
 
 /// the aircraft shader specialised for one kind, without the instrument faces.
@@ -1093,6 +1097,8 @@ pub struct Frame<'a> {
     pub insts: Vec<(u32, Inst)>,
     /// (mesh, instance) of the hand-made airport scenery (scenery.rs)
     pub scenery: Vec<(u32, Inst)>,
+    /// (mesh, instance) of the people in the balloon baskets (`set_people`)
+    pub people: Vec<(u32, Inst)>,
     /// (tree mesh, instance) for trees that have been knocked loose, camera-relative
     pub fall: Vec<(u32, TreeInst)>,
     /// trees (for their leaf cards) and undergrowth near the camera, relative to their tiles
@@ -1190,9 +1196,17 @@ struct Targets {
 }
 
 pub struct Renderer {
+    /// amd's frame generation while it runs (framegen.rs); it owns the swapchain then.
+    pub fg: Option<crate::framegen::FrameGen>,
+    /// amd's queues, when the device was opened with them.
+    fg_plan: Option<crate::framegen::Plan>,
+    /// why frame generation is not running, when it was asked for.
+    pub fg_err: Option<String>,
+    /// a streaming upload found the gpu full (`take_out_of_memory`).
+    out_of_memory: std::sync::atomic::AtomicBool,
     gpu_timer: Option<crate::gputime::GpuTimer>,
     /// the whole frame's GPU time, read without waiting (dynamic graphics)
-    frame_clock: Option<crate::gputime::FrameClock>,
+    pub frame_clock: Option<crate::gputime::FrameClock>,
     ground_mats: GroundMats,
     pub device: wgpu::Device,
     /// --fps-log: seconds spent this period in the game's own update, waiting
@@ -1200,11 +1214,15 @@ pub struct Renderer {
     pub stats: [f64; 4],
     /// --headless: draw every frame in full but never show it
     pub headless: bool,
+    /// the compositor is not showing the window (another workspace, minimised).
+    pub occluded: bool,
+    /// a scripted run (--shot, --record): keeps drawing while hidden, vsync off.
+    pub scripted: bool,
     /// a GPU that shares the CPU's memory and power (Apple silicon, laptop
     /// chips): the defaults trade a little for speed there
     pub integrated: bool,
-    /// the GPU's own memory in bytes if known (Vulkan), sizes the streaming budget
-    pub vram: Option<u64>,
+    /// a discrete gpu with a small memory budget, like a 4 gb card.
+    pub low_vram: bool,
     /// the GPU's PCI vendor id (0x8086 Intel, 0x1002 AMD, 0x10de NVIDIA)
     pub vendor: u32,
     /// the volumetric clouds drawn (graphics settings; off skips their march)
@@ -1279,6 +1297,10 @@ pub struct Renderer {
     scenery_buf: wgpu::Buffer,
     scenery_lib: Option<MeshLib>,
     bg_scenery: Option<wgpu::BindGroup>,
+    /// the balloon people: the same pipelines, their own meshes, materials and pictures
+    people_buf: wgpu::Buffer,
+    people_lib: Option<MeshLib>,
+    bg_people: Option<wgpu::BindGroup>,
     l_tile: wgpu::BindGroupLayout,
     l_build: wgpu::BindGroupLayout,
     l_comp_cls: wgpu::BindGroupLayout,
@@ -1479,6 +1501,45 @@ pub(crate) fn tex_res(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEnt
 }
 pub(crate) fn buf_res(binding: u32, b: &wgpu::Buffer, size: u64) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: b, offset: 0, size: wgpu::BufferSize::new(size) }) }
+}
+
+/// budget in bytes under which a card is small, a 4 gb card gets about 3.3 gb.
+pub const LOW_VRAM: u64 = 4608 << 20;
+/// largest sun shadow map on a small card.
+const LOW_VRAM_SHADOW: u32 = 4096;
+
+/// the gpu memory this process uses and the budget the os gives it, in bytes
+/// (VK_EXT_memory_budget, device local heaps). none off vulkan or without it.
+pub fn vram_of(device: &wgpu::Device) -> Option<(u64, u64)> {
+    #[cfg(any(windows, target_os = "linux"))]
+    unsafe {
+        use ash::vk;
+        let hal = device.as_hal::<wgpu::hal::api::Vulkan>()?;
+        let inst = hal.shared_instance().raw_instance();
+        let pd = hal.raw_physical_device();
+        static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let has = *HAS.get_or_init(|| inst.enumerate_device_extension_properties(pd).is_ok_and(|v| v.iter().any(|e| e.extension_name_as_c_str() == Ok(ash::ext::memory_budget::NAME))));
+        if !has {
+            return None;
+        }
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        inst.get_physical_device_memory_properties2(pd, &mut props);
+        let mp = props.memory_properties;
+        let (mut used, mut total) = (0u64, 0u64);
+        for i in 0..mp.memory_heap_count as usize {
+            if mp.memory_heaps[i].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) {
+                used += budget.heap_usage[i];
+                total += budget.heap_budget[i];
+            }
+        }
+        (total > 0).then_some((used, total))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = device;
+        None
+    }
 }
 
 /// The sun's shadow map: one layer per cascade and one for the aircraft, as
@@ -2081,16 +2142,22 @@ impl Renderer {
         // AMD's FSR 4 runtime needs extensions wgpu does not turn on (fsr4.rs):
         // the device is opened through wgpu-hal with them when it may be used,
         // and the usual way otherwise or if that fails.
+        // amd's frame generation needs three queues of its own, asked for here too (framegen.rs).
         let mut fsr4_device = false;
-        let opened = if crate::fsr4::rt::wanted(&info) {
-            let desc = wgpu::DeviceDescriptor { label: None, required_features: required_features | crate::fsr4::rt::features(&adapter), required_limits: required_limits.clone(), memory_hints: MEMORY_HINTS, ..Default::default() };
-            match crate::fsr4::rt::open_device(&adapter, &desc) {
-                Ok(dq) => {
-                    fsr4_device = true;
-                    Some(dq)
+        let want4 = crate::fsr4::rt::wanted(&info);
+        let fg_families = if crate::framegen::wanted(&info) { crate::framegen::families(&adapter, &surface) } else { None };
+        let mut fg_plan = None;
+        let opened = if want4 || fg_families.is_some() {
+            let extra = if want4 { crate::fsr4::rt::features(&adapter) } else { wgpu::Features::empty() };
+            let desc = wgpu::DeviceDescriptor { label: None, required_features: required_features | extra, required_limits: required_limits.clone(), memory_hints: MEMORY_HINTS, ..Default::default() };
+            match crate::fsr4::rt::open_device(&adapter, &desc, want4, fg_families) {
+                Ok((d, q, plan)) => {
+                    fsr4_device = want4;
+                    fg_plan = plan;
+                    Some((d, q))
                 }
                 Err(e) => {
-                    log::warn!("device for FSR 4: {e}; opening it without");
+                    log::warn!("device for AMD's runtime: {e}; opening it without");
                     None
                 }
             }
@@ -2102,6 +2169,12 @@ impl Renderer {
             None => adapter.request_device(&wgpu::DeviceDescriptor { label: None, required_features, required_limits, memory_hints: MEMORY_HINTS, ..Default::default() }).await?,
         };
         let gpu_error: Arc<parking_lot::Mutex<Option<String>>> = Arc::new(parking_lot::Mutex::new(None));
+        // small cards get lighter textures and caches.
+        let budget = vram_of(&device).map(|v| v.1);
+        let low_vram = !integrated && budget.is_some_and(|b| b < LOW_VRAM);
+        if let Some(b) = budget {
+            log::info!("gpu memory budget {} MB{}", b >> 20, if low_vram { ", low: lighter textures and caches" } else { "" });
+        }
         let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let err_slot = gpu_error.clone();
@@ -2861,7 +2934,7 @@ impl Renderer {
                     cache: None,
                 });
                 let p_tree = geom("tree", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 0);
-                let imp = crate::impostor::Impostors::new(d, &l0, &l_tileu, &m_tree, if integrated { crate::impostor::CELL_INTEGRATED } else { crate::impostor::CELL });
+                let imp = crate::impostor::Impostors::new(d, &l0, &l_tileu, &m_tree, if integrated || low_vram { crate::impostor::CELL_INTEGRATED } else { crate::impostor::CELL });
                 let p_tree_near = geom("trees near", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 7);
                 let p_tree_shadow = geom("tree shadow", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 21);
                 let p_tree_shadow_fixed = geom("tree shadow fixed", Some(&l_tileu), &m_tree, &[vb(72, false, &A_TREEV), vb(36, true, &A_TREE)], 22);
@@ -2997,6 +3070,7 @@ impl Renderer {
         let (inst_buf, fall_buf) = (dynbuf("instances", MAX_INST as u64 * 80), dynbuf("loose trees", MAX_FALL as u64 * 36));
         let near_buf = dynbuf("near trees", MAX_NEAR as u64 * 36);
         let scenery_buf = dynbuf("scenery instances", MAX_SCENERY as u64 * 80);
+        let people_buf = dynbuf("people instances", MAX_PEOPLE as u64 * 80);
         let dyn_lights = dynbuf("aircraft lights", MAX_DYN_LIGHTS as u64 * 40);
         let bolt_buf = dynbuf("lightning", crate::storm::MAX_SEGS as u64 * 32);
         let contrail_nodes = d.create_buffer(&wgpu::BufferDescriptor {
@@ -3081,13 +3155,13 @@ impl Renderer {
         Ok(Self {
             ground_mats,
             casc_ub, bg_casc, bg_tileu, l_dres, l_ao, p_gtao, p_ao_blur, p_dres, p_road, p_field, p_lights, dyn_lights, p_rain, p_veil, p_bolt, bolt_buf, p_contrails, bg_contrails, contrail_nodes, contrail_segs, p_tree, p_tree_near, imp, p_tree_shadow, p_tree_shadow_fixed, p_card, near_buf, p_inst, p_inst_shadow, inst_buf, fall_buf, tree_lib: None, inst_lib: None,
-            p_scenery, p_scenery_shadow, l_scenery, scenery_buf, scenery_lib: None, bg_scenery: None,
+            p_scenery, p_scenery_shadow, l_scenery, scenery_buf, scenery_lib: None, bg_scenery: None, people_buf, people_lib: None, bg_people: None,
             gpu_timer: crate::gputime::GpuTimer::new(&device, &queue),
             frame_clock: crate::gputime::FrameClock::new(&device, &queue),
             globals_ub, bg0, bg0_pre, bg0_shadow, lut_sky, shadow, shadow_res: SHADOW_RES, bg0_src, scale: 1.0, ao: true, cloud_step: 1.0, l_tile, l_build, l_comp_cls, l_comp_main, l_comp_edge, l_comp_globe, l_hiz, ap_l, ap_t, cloud_refl, bg_atmlut, bg_comp_sky, p_hiz_build, p_ap_build, p_sky_build, p_cloud_refl, p_cloud_refl_plain, l_cloud, l_cloud_storm, l_cloud_rain, l_cloud_apply, l_cloud_temporal, l_post, l_pdraw, l_glass,
             tile_ub, l_photo, photo_ub, p_photo, p_photo_mask, p_photo_shadow, p_photo_shadow_fast, l_skin, p_skin, skin_slots, p_water_top, p_lamp_top, photo_mask, photo_mask_dirty: true, photo_mask_big: false, shadow_all: shadow_all.clone(), light_cover, light_cover_view, glow_tex, gclouds_tex, snow_tex, snow_track_tex, build_ub, obj_ub, bg_obj, l_obj, paint_ub, font_ub, tile_ibuf, tile_nidx: ix.len() as u32,
             p_sky, p_terrain, p_terrain_far, p_terrain_water, p_terrain_tess, p_terrain_cells, p_terrain_photo, p_terrain_tess_photo, p_terrain_cells_photo, tess_ibuf, tess_idx, tess_buf, tess_cap, cell_ibuf, p_build, p_build_whole, p_build_shadow, obj_gen: None, obj_gen_rx: Some(obj_gen_rx), wait_objs: false, obj_wait: None, obj_src, pl_obj, obj_fast: None, obj_fast_rx: None, p_comp_cls, p_comp_sky, p_comp_opaque, p_comp_glass, p_comp_water, p_comp_edge, p_composite, p_composite_edge, p_cloud, p_cloud_plain, p_cloud_classify, p_cloud_plain_cls, p_cloud_storm_cls, p_cloud_rain, p_cloud_apply, p_cloud_temporal, p_particles, p_taa, p_psim, p_down, p_up, p_final, p_final_taa, p_blit,
-            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, clouds: true, cloud_shadows: true, vendor: info.vendor, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, up, gpu: info.clone(), meshes: Vec::new(), egui, instance, window, gpu_error, device_lost, surface, config, queue, device, stats: [0.0; 4], headless: false, integrated, vram,
+            psim_ub, pbuf, bg_psim, phead: 0, p_vol, bg_vol_a, bg_vol_b, vol_acc, fluid, fluid_t, ocean, shore, p_shore_cover, smoke_until: 0.0, parts_until: 0.0, now: 0.0, black, targets, cloud_flip: 0, cloud_hist_ok: false, clouds: true, cloud_shadows: true, vendor: info.vendor, cshadow, lut_bake, lut_haze: 1.0, taa_flip: 0, taa_hist_ok: false, up, gpu: info.clone(), meshes: Vec::new(), egui, instance, window, gpu_error, device_lost, surface, config, queue, device, stats: [0.0; 4], headless: false, occluded: false, scripted: false, integrated, low_vram, fg: None, fg_plan, fg_err: None, out_of_memory: Default::default(),
         })
     }
 
@@ -3192,7 +3266,11 @@ impl Renderer {
         }
         self.config.width = w;
         self.config.height = h;
-        self.surface.configure(&self.device, &self.config);
+        // amd's swapchain is remade once at the next frame (`render`), not for each of
+        // the many sizes a maximise sends from inside the window procedure.
+        if self.fg.is_none() {
+            self.surface.configure(&self.device, &self.config);
+        }
         self.cshadow.ok = false;
         self.remake_targets();
     }
@@ -3278,20 +3356,11 @@ impl Renderer {
         }
     }
 
-    /// rough gpu bytes the renderer holds outside world streaming, at this render scale.
-    pub fn fixed_bytes(&self, scale: f32) -> u64 {
-        let (w, h) = ((self.config.width as f32 * scale) as u64, (self.config.height as f32 * scale) as u64);
-        let px = w * h;
-        // msaa targets, full size targets, half size cloud and bloom
-        let targets = px * (msaa() as u64 * (8 + 8 + 1 + 4) + 7 * 8 + 4 + 4) + px / 4 * (4 * 8 + 2 * 4 + 16 + 2) + px / 4 * 8 * 4 / 3;
-        let shadow = (CASCADES as u64 + 1) * self.shadow_res as u64 * self.shadow_res as u64 * 4;
-        // the rest measured on an rtx 2050, the tree impostors alone are 426 mb
-        targets + shadow + (950 << 20)
-    }
-
     /// A new sun shadow map of this side (texels).
     pub fn set_shadow_res(&mut self, res: u32) {
         let res = res.clamp(256, self.device.limits().max_texture_dimension_2d);
+        // ultra's map alone is about 600 mb.
+        let res = if self.low_vram { res.min(LOW_VRAM_SHADOW) } else { res };
         if res != self.shadow_res {
             let (all, layers) = make_shadow(&self.device, res);
             self.bg0 = self.bg0_src.make(&self.device, &all);
@@ -3316,8 +3385,82 @@ impl Renderer {
         let mode = if on { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
         if self.config.present_mode != mode {
             self.config.present_mode = mode;
-            self.surface.configure(&self.device, &self.config);
+            self.configure_out();
         }
+    }
+
+    /// remakes whatever shows the frames for the window's size and vsync: amd's
+    /// swapchain while frame generation runs, wgpu's surface otherwise.
+    fn configure_out(&mut self) {
+        let vsync = self.config.present_mode == wgpu::PresentMode::AutoVsync;
+        match self.fg.as_mut().map(|fg| fg.resize(&self.device, (self.config.width, self.config.height), out_format(&self.config), vsync)) {
+            Some(Err(e)) => self.fg_fail(e),
+            Some(Ok(())) => {}
+            None => self.surface.configure(&self.device, &self.config),
+        }
+    }
+
+    /// turns amd's frame generation on or off (graphics settings).
+    pub fn set_framegen(&mut self, on: bool) {
+        if on == self.fg.is_some() || self.headless {
+            if !on {
+                self.fg_err = None;
+            }
+            return;
+        }
+        if !on {
+            self.fg = None;
+            self.fg_err = None;
+            self.surface.configure(&self.device, &self.config);
+            self.up.want_motion = false;
+            self.rebuild_upscale();
+            return;
+        }
+        let Some(plan) = self.fg_plan else {
+            self.fg_err = Some(if crate::framegen::state() == crate::fsr4::State::Installed {
+                if self.gpu.backend != wgpu::Backend::Vulkan { format!("the game is drawing with {:?}; frame generation needs Vulkan", self.gpu.backend) } else { "restart the game to set the GPU up for it".into() }
+            } else {
+                "AMD's runtime is not downloaded".into()
+            });
+            return;
+        };
+        // a fresh surface holds no swapchain of wgpu's, so amd's can be made on it.
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        match self.instance.create_surface(self.window.clone()) {
+            Ok(sf) => self.surface = sf,
+            Err(e) => {
+                self.fg_err = Some(e.to_string());
+                return;
+            }
+        }
+        let vsync = self.config.present_mode == wgpu::PresentMode::AutoVsync;
+        match crate::framegen::FrameGen::new(&self.device, &self.surface, &plan, (self.config.width, self.config.height), out_format(&self.config), vsync) {
+            Ok(fg) => {
+                self.fg = Some(fg);
+                self.fg_err = None;
+                self.up.want_motion = true;
+                self.rebuild_upscale();
+            }
+            Err(e) => {
+                log::warn!("AMD frame generation: {e}");
+                self.fg_err = Some(e);
+                self.surface.configure(&self.device, &self.config);
+            }
+        }
+    }
+
+    /// frame generation failed mid-flight: back to wgpu's own swapchain.
+    fn fg_fail(&mut self, e: String) {
+        log::warn!("AMD frame generation stopped: {e}");
+        self.fg = None;
+        self.fg_err = Some(e);
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        if let Ok(sf) = self.instance.create_surface(self.window.clone()) {
+            self.surface = sf;
+        }
+        self.surface.configure(&self.device, &self.config);
+        self.up.want_motion = false;
+        self.rebuild_upscale();
     }
 
     /// A new cloud map for the start screen's globe (globeclouds.rs: W x H bytes).
@@ -3334,9 +3477,73 @@ impl Renderer {
         );
     }
 
-    pub fn upload_tile(&self, t: &crate::sources::TileData) -> TileGpu {
+    /// runs a streaming upload in error scopes: none when the gpu had no room for it
+    /// (a full 4 GB card on high settings), instead of a panic on the invalid buffer.
+    fn guarded<T>(&self, what: &str, f: impl FnOnce() -> T) -> Option<T> {
+        let oom = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let val = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let t = f();
+        let v = pollster::block_on(val.pop());
+        let o = pollster::block_on(oom.pop());
+        match o.or(v) {
+            Some(e) => {
+                log::warn!("gpu memory full, {what} dropped: {e}");
+                self.out_of_memory.store(true, std::sync::atomic::Ordering::Relaxed);
+                None
+            }
+            None => Some(t),
+        }
+    }
+
+    /// the gpu memory this process uses and the budget the os gives it, in bytes
+    /// (VK_EXT_memory_budget, device local heaps). none off vulkan or without it.
+    pub fn vram(&self) -> Option<(u64, u64)> {
+        vram_of(&self.device)
+    }
+
+    /// gpu memory by resource label, biggest first, for FABLE_VRAM_REPORT=1.
+    pub fn vram_report(&self) -> Option<String> {
+        let rep = self.device.generate_allocator_report()?;
+        let mut by: std::collections::HashMap<String, (u64, u32)> = std::collections::HashMap::new();
+        for a in &rep.allocations {
+            let k: String = if a.name.is_empty() { "(unlabelled)".into() } else { a.name.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect() };
+            let e = by.entry(k).or_default();
+            e.0 += a.size;
+            e.1 += 1;
+        }
+        let mut v: Vec<_> = by.into_iter().collect();
+        v.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        let top: Vec<String> = v.iter().take(25).map(|(k, (s, n))| format!("{k} {} MB x{n}", s >> 20)).collect();
+        Some(format!("allocated {} MB in {} blocks of {} MB reserved: {}", rep.total_allocated_bytes >> 20, rep.blocks.len(), rep.total_reserved_bytes >> 20, top.join(", ")))
+    }
+
+    /// whether an upload failed for want of gpu memory since the last call.
+    pub fn take_out_of_memory(&self) -> bool {
+        self.out_of_memory.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// a buffer holding `data`, written through the queue so a failed allocation cannot panic.
+    fn buffer_with(&self, label: Option<&str>, data: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        let b = self.device.create_buffer(&wgpu::BufferDescriptor { label, size: (data.len().max(64) as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT), usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        if !data.is_empty() {
+            let n = data.len() / 4 * 4;
+            self.queue.write_buffer(&b, 0, &data[..n]);
+            if n < data.len() {
+                let mut tail = [0u8; 4];
+                tail[..data.len() - n].copy_from_slice(&data[n..]);
+                self.queue.write_buffer(&b, n as u64, &tail);
+            }
+        }
+        b
+    }
+
+    pub fn upload_tile(&self, t: &crate::sources::TileData) -> Option<TileGpu> {
+        self.guarded("terrain tile", || self.upload_tile_inner(t))
+    }
+
+    fn upload_tile_inner(&self, t: &crate::sources::TileData) -> TileGpu {
         let d = &self.device;
-        let vbuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&t.verts), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE });
+        let vbuf = self.buffer_with(Some("terrain verts"), bytemuck::cast_slice(&t.verts), wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE);
         let img = upload_mips(d, &self.queue, "imagery", t.img_size, wgpu::TextureFormat::Rgba8UnormSrgb, 4, &t.imagery);
         let mask = upload_mips(d, &self.queue, "mask", crate::sources::MASK as u32, wgpu::TextureFormat::Rgba8Unorm, 4, &t.mask);
         let lights = upload_mips(d, &self.queue, "lights", crate::sources::MASK as u32, wgpu::TextureFormat::R8Unorm, 1, &t.lights);
@@ -3358,10 +3565,14 @@ impl Renderer {
     /// frame with `fill_buffer`, matching `BuildGpu::targets` to
     /// `building_payload`.
     /// A photorealistic 3D tile: its mesh and its texture (with its mips).
-    pub fn upload_photo(&self, m: &crate::tiles3d::MeshData) -> PhotoGpu {
+    pub fn upload_photo(&self, m: &crate::tiles3d::MeshData) -> Option<PhotoGpu> {
+        self.guarded("3d tile", || self.upload_photo_inner(m))
+    }
+
+    fn upload_photo_inner(&self, m: &crate::tiles3d::MeshData) -> PhotoGpu {
         let d = &self.device;
-        let vbuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("photo"), contents: bytemuck::cast_slice(&m.verts), usage: wgpu::BufferUsages::VERTEX });
-        let ibuf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("photo idx"), contents: bytemuck::cast_slice(&m.idx), usage: wgpu::BufferUsages::INDEX });
+        let vbuf = self.buffer_with(Some("photo"), bytemuck::cast_slice(&m.verts), wgpu::BufferUsages::VERTEX);
+        let ibuf = self.buffer_with(Some("photo idx"), bytemuck::cast_slice(&m.idx), wgpu::BufferUsages::INDEX);
         let (w, h) = (m.mips[0].0, m.mips[0].1);
         let t = make_tex(d, "photo", w, h, 1, m.mips.len() as u32, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         for (i, (mw, mh, px)) in m.mips.iter().enumerate() {
@@ -3391,21 +3602,28 @@ impl Renderer {
         self.queue.write_buffer(&s.vbuf, (first * std::mem::size_of::<SkinVertex>()) as u64, bytemuck::cast_slice(verts));
     }
 
-    pub fn upload_buildings(&self, b: &crate::buildings::BuildingData) -> BuildGpu {
-        let d = &self.device;
-        let buf = |data: &[u8], usage| d.create_buffer(&wgpu::BufferDescriptor { label: None, size: (data.len().max(64) as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT), usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let vbuf = buf(bytemuck::cast_slice(&b.verts), wgpu::BufferUsages::VERTEX);
-        let ibuf = buf(bytemuck::cast_slice(&b.indices), wgpu::BufferUsages::INDEX);
-        let atlas = upload_mips(d, &self.queue, "atlas", b.atlas_size, wgpu::TextureFormat::Rgba8UnormSrgb, 4, &b.atlas);
-        let bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.l_build, entries: &[buf_res(0, &self.build_ub, 64), tex_res(1, &atlas)] });
-        let road = (!b.road_idx.is_empty()).then(|| (buf(bytemuck::cast_slice(&b.road_verts), wgpu::BufferUsages::VERTEX), buf(bytemuck::cast_slice(&b.road_idx), wgpu::BufferUsages::INDEX), b.road_idx.len() as u32));
-        let trees = (!b.trees.is_empty()).then(|| buf(bytemuck::cast_slice(&b.trees), wgpu::BufferUsages::VERTEX));
-        BuildGpu { bytes: building_bytes(b), vbuf, ibuf, n_main: b.n_main, n_det: b.n_det, n_far: b.n_far, cell_end: b.cell_end.clone(), cell_bound: b.cell_bound.clone(), bind, road, trees }
+    pub fn upload_buildings(&self, b: &crate::buildings::BuildingData) -> Option<BuildGpu> {
+        self.guarded("building tile", || self.upload_buildings_inner(b))
     }
 
-    pub fn upload_field(&self, m: &crate::airfield::FieldMesh) -> FieldGpu {
+    fn upload_buildings_inner(&self, b: &crate::buildings::BuildingData) -> BuildGpu {
         let d = &self.device;
-        let init = |data: &[u8], usage| d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("airfield"), contents: if data.is_empty() { &[0u8; 64] } else { data }, usage });
+        let buf = |data: &[u8], usage, label| d.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (data.len().max(64) as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT), usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let vbuf = buf(bytemuck::cast_slice(&b.verts), wgpu::BufferUsages::VERTEX, "building verts");
+        let ibuf = buf(bytemuck::cast_slice(&b.indices), wgpu::BufferUsages::INDEX, "building idx");
+        let atlas = upload_mips(d, &self.queue, "atlas", b.atlas_size, wgpu::TextureFormat::Rgba8UnormSrgb, 4, &b.atlas);
+        let bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.l_build, entries: &[buf_res(0, &self.build_ub, 64), tex_res(1, &atlas)] });
+        let road = (!b.road_idx.is_empty()).then(|| (buf(bytemuck::cast_slice(&b.road_verts), wgpu::BufferUsages::VERTEX, "road verts"), buf(bytemuck::cast_slice(&b.road_idx), wgpu::BufferUsages::INDEX, "road idx"), b.road_idx.len() as u32));
+        let trees = (!b.trees.is_empty()).then(|| buf(bytemuck::cast_slice(&b.trees), wgpu::BufferUsages::VERTEX, "tile trees"));
+        BuildGpu { vbuf, ibuf, n_main: b.n_main, n_det: b.n_det, n_far: b.n_far, cell_end: b.cell_end.clone(), cell_bound: b.cell_bound.clone(), bind, road, trees }
+    }
+
+    pub fn upload_field(&self, m: &crate::airfield::FieldMesh) -> Option<FieldGpu> {
+        self.guarded("airfield", || self.upload_field_inner(m))
+    }
+
+    fn upload_field_inner(&self, m: &crate::airfield::FieldMesh) -> FieldGpu {
+        let init = |data: &[u8], usage| self.buffer_with(Some("airfield"), data, usage);
         FieldGpu {
             vbuf: init(bytemuck::cast_slice(&m.verts), wgpu::BufferUsages::VERTEX),
             ibuf: init(bytemuck::cast_slice(&m.idx), wgpu::BufferUsages::INDEX),
@@ -3432,8 +3650,8 @@ impl Renderer {
         }
         let d = &self.device;
         MeshLib {
-            vbuf: d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&v), usage: wgpu::BufferUsages::VERTEX }),
-            ibuf: d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&i), usage: wgpu::BufferUsages::INDEX }),
+            vbuf: d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("mesh lib verts"), contents: bytemuck::cast_slice(&v), usage: wgpu::BufferUsages::VERTEX }),
+            ibuf: d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("mesh lib idx"), contents: bytemuck::cast_slice(&i), usage: wgpu::BufferUsages::INDEX }),
             ranges,
         }
     }
@@ -3455,6 +3673,20 @@ impl Renderer {
     /// library (in pack order, as `Pack::mesh_base` counts them), their
     /// materials and texture layers.
     pub fn set_scenery(&mut self, packs: &[crate::scenery::Pack]) {
+        if let Some((lib, bg)) = self.scenery_set(&packs.iter().collect::<Vec<_>>()) {
+            (self.scenery_lib, self.bg_scenery) = (Some(lib), Some(bg));
+        }
+    }
+
+    /// The people in the balloon baskets (balloons.rs): a pack of their own,
+    /// drawn as the scenery is, with its own (larger) pictures.
+    pub fn set_people(&mut self, pack: &crate::scenery::Pack) {
+        if let Some((lib, bg)) = self.scenery_set(&[pack]) {
+            (self.people_lib, self.bg_people) = (Some(lib), Some(bg));
+        }
+    }
+
+    fn scenery_set(&self, packs: &[&crate::scenery::Pack]) -> Option<(MeshLib, wgpu::BindGroup)> {
         let mut meshes = Vec::new();
         let mut mats: Vec<crate::scenery::SceneryMat> = Vec::new();
         let size = packs.iter().map(|p| p.tex_size).max().unwrap_or(1).max(1);
@@ -3479,7 +3711,7 @@ impl Renderer {
             }
         }
         if meshes.is_empty() {
-            return;
+            return None;
         }
         assert!(mats.len() <= SC_MATS, "scenery: {} materials, the shader holds {SC_MATS}", mats.len());
         if base.is_empty() {
@@ -3491,8 +3723,8 @@ impl Renderer {
         let ub = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("scenery materials"), contents: bytemuck::cast_slice(&mats), usage: wgpu::BufferUsages::UNIFORM });
         let tb = layer_texture(d, &self.queue, "scenery base", size, &base, wgpu::TextureFormat::Rgba8UnormSrgb);
         let tn = layer_texture(d, &self.queue, "scenery normal", size, &nrm, wgpu::TextureFormat::Rgba8Unorm);
-        self.bg_scenery = Some(d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("scenery"), layout: &self.l_scenery, entries: &[buf_res(0, &ub, SC_MATS as u64 * 64), tex_res(1, &tb), tex_res(2, &tn)] }));
-        self.scenery_lib = Some(self.mesh_lib(&meshes));
+        let bg = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("scenery"), layout: &self.l_scenery, entries: &[buf_res(0, &ub, SC_MATS as u64 * 64), tex_res(1, &tb), tex_res(2, &tn)] });
+        Some((self.mesh_lib(&meshes), bg))
     }
 
     /// The paint of the aircraft being flown (none: `None`): only its pictures are on the GPU.
@@ -3594,14 +3826,73 @@ impl Renderer {
     pub fn aircraft_prep(&self) -> Option<AircraftPrep> {
         self.obj_wait.map(|w| w.1)
     }
+    /// Which glass objects are on screen, and the pixels the copy of the scene
+    /// behind them needs (x0, y0, x1, y1). The whole frame when a window wraps
+    /// round the camera (the cockpit) or rain on it bends far views into its drops.
+    fn glass_cover(&self, f: &Frame, n: usize, w: u32, h: u32) -> (Vec<bool>, [u32; 4]) {
+        let vp = glam::Mat4::from_cols_array_2d(&f.g.view_proj);
+        let mut on = vec![false; n];
+        let (mut lo, mut hi) = (glam::Vec2::splat(f32::MAX), glam::Vec2::splat(f32::MIN));
+        let mut whole = f.g.start[1] > 0.0 || f.g.start[2] > 0.002;
+        for (i, o) in f.objs.iter().take(n).enumerate() {
+            let Some(m) = self.meshes.get(o.mesh).filter(|m| o.glass && m.n_idx > 0) else { continue };
+            let mvp = vp * o.model;
+            let (mut a, mut b, mut behind) = (glam::Vec2::splat(f32::MAX), glam::Vec2::splat(f32::MIN), false);
+            for k in 0..8 {
+                let c = glam::Vec3::new(if k & 1 == 0 { m.lo.x } else { m.hi.x }, if k & 2 == 0 { m.lo.y } else { m.hi.y }, if k & 4 == 0 { m.lo.z } else { m.hi.z });
+                let q = mvp * c.extend(1.0);
+                if q.w <= 1e-3 {
+                    behind = true;
+                    break;
+                }
+                let p = glam::Vec2::new(q.x, q.y) / q.w;
+                a = a.min(p);
+                b = b.max(p);
+            }
+            if behind {
+                on[i] = true;
+                whole = true;
+                continue;
+            }
+            if b.x < -1.0 || a.x > 1.0 || b.y < -1.0 || a.y > 1.0 {
+                continue;
+            }
+            on[i] = true;
+            lo = lo.min(a);
+            hi = hi.max(b);
+        }
+        if whole || lo.x > hi.x {
+            return (on, [0, 0, w, h]);
+        }
+        // room for what the glass bends in from beside it.
+        let pad = 0.04 * w.max(h) as f32 + 8.0;
+        let px = |x: f32, top: u32| (x.clamp(0.0, top as f32)) as u32;
+        let x0 = px((lo.x * 0.5 + 0.5) * w as f32 - pad, w);
+        let x1 = px((hi.x * 0.5 + 0.5) * w as f32 + pad + 1.0, w);
+        let y0 = px((0.5 - hi.y * 0.5) * h as f32 - pad, h);
+        let y1 = px((0.5 - lo.y * 0.5) * h as f32 + pad + 1.0, h);
+        if x1 <= x0 || y1 <= y0 {
+            return (vec![false; n], [0, 0, w, h]);
+        }
+        (on, [x0, y0, x1, y1])
+    }
+
     fn mesh_gpu(&self, verts: &[PartVertex], idx: &[u32], bind: Option<std::sync::Arc<wgpu::BindGroup>>) -> MeshGpu {
         // an empty piece, a hinge others hang from, still gets a buffer.
         let pad = [PartVertex::zeroed()];
         let verts = if verts.is_empty() { &pad[..] } else { verts };
         let (idx, n_main) = split_instruments(verts, idx);
-        let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(verts), usage: wgpu::BufferUsages::VERTEX });
-        let ibuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(if idx.is_empty() { &[0u32][..] } else { &idx }), usage: wgpu::BufferUsages::INDEX });
-        MeshGpu { vbuf, ibuf, n_idx: idx.len() as u32, n_main, bind }
+        let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("part verts"), contents: bytemuck::cast_slice(verts), usage: wgpu::BufferUsages::VERTEX });
+        let ibuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("part idx"), contents: bytemuck::cast_slice(if idx.is_empty() { &[0u32][..] } else { &idx }), usage: wgpu::BufferUsages::INDEX });
+        let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+        for v in verts.iter().map(|v| glam::Vec3::from(v.pos)).filter(|p| p.is_finite()) {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        if lo.x > hi.x {
+            (lo, hi) = (glam::Vec3::ZERO, glam::Vec3::ZERO);
+        }
+        MeshGpu { vbuf, ibuf, n_idx: idx.len() as u32, n_main, bind, lo, hi }
     }
 
     /// Append particles to the ring buffer (oldest are overwritten).
@@ -3655,10 +3946,25 @@ impl Renderer {
                 }
             }
         }
+        if self.fg.as_ref().is_some_and(|fg| fg.stale || fg.size() != (self.config.width, self.config.height)) {
+            self.configure_out();
+        }
+        // a hidden window gets no frame callbacks, so a vsynced present would wait forever (wayland).
+        if self.occluded && !self.headless && !self.scripted {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            if let Some((_, delta, _)) = &mut f.egui {
+                for id in delta.free.drain() {
+                    self.egui.free_texture(&id);
+                }
+            }
+            return;
+        }
+        let fg_on = self.fg.is_some();
         let t_acq = std::time::Instant::now();
         // Headless: everything is drawn but nothing is shown, so no frame of the
         // window's is needed (and a hidden or locked screen does not stop it).
-        let frame = if self.headless {
+        // (amd's swapchain hands out its image at the end, in `FrameGen::present`)
+        let frame = if self.headless || fg_on {
             None
         } else {
             match self.surface.get_current_texture() {
@@ -3683,7 +3989,7 @@ impl Renderer {
                 }
             }
         };
-        if frame.is_none() && !self.headless {
+        if frame.is_none() && !self.headless && !fg_on {
             if let Some((_, delta, _)) = &mut f.egui {
                 for id in delta.free.drain() {
                     self.egui.free_texture(&id);
@@ -3940,6 +4246,17 @@ impl Renderer {
             }
             q.write_buffer(&self.scenery_buf, 0, bytemuck::cast_slice(&data));
             scenery_ranges = ranges;
+        }
+        let mut people_ranges = Vec::new();
+        if let Some(lib) = &self.people_lib {
+            let n = f.people.len().min(MAX_PEOPLE);
+            let (order, ranges) = group(lib.ranges.len(), &mut f.people.iter().take(n).map(|i| i.0));
+            let mut data = vec![Inst::zeroed(); n];
+            for (k, (_, inst)) in f.people.iter().take(n).enumerate() {
+                data[order[k] as usize] = *inst;
+            }
+            q.write_buffer(&self.people_buf, 0, bytemuck::cast_slice(&data));
+            people_ranges = ranges;
         }
         let mut fall_ranges = Vec::new();
         if let Some(lib) = &self.tree_lib {
@@ -4331,6 +4648,19 @@ impl Renderer {
                 rp.set_vertex_buffer(1, self.scenery_buf.slice(..));
                 rp.set_index_buffer(lib.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 for (k, r) in scenery_ranges.iter().enumerate() {
+                    if r.1 > r.0 {
+                        let (first, count, base) = lib.ranges[k];
+                        rp.draw_indexed(first..first + count, base, r.0..r.1);
+                    }
+                }
+            }
+            if let (Some(lib), Some(bg)) = (self.people_lib.as_ref().filter(|_| part & 2 != 0 && !people_ranges.is_empty()), self.bg_people.as_ref()) {
+                rp.set_pipeline(if shadow { &self.p_scenery_shadow } else { &self.p_scenery });
+                rp.set_bind_group(1, bg, &[]);
+                rp.set_vertex_buffer(0, lib.vbuf.slice(..));
+                rp.set_vertex_buffer(1, self.people_buf.slice(..));
+                rp.set_index_buffer(lib.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                for (k, r) in people_ranges.iter().enumerate() {
                     if r.1 > r.0 {
                         let (first, count, base) = lib.ranges[k];
                         rp.draw_indexed(first..first + count, base, r.0..r.1);
@@ -4966,18 +5296,24 @@ impl Renderer {
             }
         }
         mark(&mut enc, "rain+lightning");
-        if let (true, Some(generic)) = (f.objs.iter().take(n_objs).any(|o| o.glass), self.obj_gen.as_ref().and_then(|g| g.rest.as_ref())) {
+        // the windows on screen, and the part of the frame they cover.
+        let (w, h) = (t.hdr_tex.width(), t.hdr_tex.height());
+        let (glass_on, glass_box) = self.glass_cover(&f, n_objs, w, h);
+        if let (true, Some(generic)) = (glass_on.iter().any(|&on| on), self.obj_gen.as_ref().and_then(|g| g.rest.as_ref())) {
             // The windows bend what is seen through them, so they read the
             // scene from a copy. The depth stays read-only: it is sampled too.
-            let (w, h) = (t.hdr_tex.width(), t.hdr_tex.height());
-            enc.copy_texture_to_texture(t.hdr_tex.as_image_copy(), t.scene_tex.as_image_copy(), wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
+            let [x0, y0, x1, y1] = glass_box;
+            fn at(tex: &wgpu::Texture, x: u32, y: u32) -> wgpu::TexelCopyTextureInfo<'_> {
+                wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All }
+            }
+            enc.copy_texture_to_texture(at(&t.hdr_tex, x0, y0), at(&t.scene_tex, x0, y0), wgpu::Extent3d { width: x1 - x0, height: y1 - y0, depth_or_array_layers: 1 });
             let ds = wgpu::RenderPassDepthStencilAttachment { view: &t.depth, depth_ops: None, stencil_ops: None };
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&t.hdr, false))], Some(ds)));
             rp.set_bind_group(0, &self.bg0, &[]);
             rp.set_bind_group(2, &t.bg_glass, &[]);
             rp.set_pipeline(&generic.glass);
             for (i, o) in f.objs.iter().take(n_objs).enumerate() {
-                if !o.glass {
+                if !o.glass || !glass_on[i] {
                     continue;
                 }
                 let m = &self.meshes[o.mesh];
@@ -5035,7 +5371,43 @@ impl Renderer {
             self.up.hist_ok = false;
             0
         };
+        // frame generation reads the motion vectors even where nothing upscales.
+        if fg_on && !(mode.temporal() && self.up.t.is_some()) {
+            if let Some(ut) = &self.up.t {
+                full(&mut enc, &ut.motion, true, &self.up.p_motion, &ut.bg_motion);
+            }
+        }
         mark(&mut enc, "aa+upscale");
+        let mut fg_err = None;
+        if let (Some(fg), Some(ut)) = (self.fg.as_mut(), self.up.t.as_ref()) {
+            // amd's prepare pass records into a command buffer of its own, after this one.
+            enc.transition_resources(std::iter::empty(), [&t.depth_tex, &ut.motion_tex].into_iter().map(|texture| wgpu::TextureTransition { texture, selector: None, state: wgpu::TextureUses::RESOURCE }));
+            let done = std::mem::replace(&mut enc, self.device.create_command_encoder(&Default::default()));
+            q.submit([done.finish()]);
+            let (rw, rh) = (t.hdr_tex.width(), t.hdr_tex.height());
+            let inv = glam::Mat4::from_cols_array_2d(&f.g.inv_view_proj);
+            let at = |x: f32, y: f32| {
+                let p = inv * glam::Vec4::new(x, y, 1.0, 1.0);
+                p.truncate() / p.w
+            };
+            let c = at(0.0, 0.0);
+            let fwd = c.normalize_or_zero();
+            let right = (at(1.0, 0.0) - c).normalize_or_zero();
+            let up = (at(0.0, 1.0) - c).normalize_or_zero();
+            let prep = crate::framegen::Prep {
+                render: (rw, rh),
+                jitter: [f.g.taa[0] * rw as f32, f.g.taa[1] * rh as f32],
+                dt: f.g.time[1],
+                reset: f.g.cam_delta[3] < 0.5,
+                near: f.g.misc[0],
+                // (G.misc.w is 2 tan(fov / 2) / height)
+                fov_y: 2.0 * (f.g.misc[3] * rh as f32 * 0.5).atan(),
+                basis: [right.to_array(), up.to_array(), fwd.to_array()],
+            };
+            if let Err(e) = fg.prepare(&self.device, q, &t.depth_tex, &ut.motion_tex, &prep) {
+                fg_err = Some(e);
+            }
+        }
         for i in 0..BLOOM_MIPS as usize {
             full(&mut enc, &t.bloom[i], true, &self.p_down, if i == 0 { &t.bg_down0[src] } else { &t.bg_down[i - 1] });
         }
@@ -5064,7 +5436,13 @@ impl Renderer {
             self.egui.update_buffers(&self.device, &self.queue, &mut enc, &jobs, &sd);
             (jobs, delta, sd)
         });
-        if let Some((jobs, _, sd)) = &egui_jobs {
+        // with frame generation the ui goes on a clear layer of its own, laid over every shown frame.
+        if let Some(fg) = &self.fg {
+            let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(&fg.ui_view, true))], None)).forget_lifetime();
+            if let Some((jobs, _, sd)) = &egui_jobs {
+                self.egui.render(&mut rp, jobs, sd);
+            }
+        } else if let Some((jobs, _, sd)) = &egui_jobs {
             let mut rp = enc.begin_render_pass(&pass_desc(&[Some(color_att(out, false))], None)).forget_lifetime();
             self.egui.render(&mut rp, jobs, sd);
         }
@@ -5095,6 +5473,10 @@ impl Renderer {
         if let Some(c) = self.frame_clock.as_mut() {
             c.end(&mut enc);
         }
+        if let Some(fg) = &self.fg {
+            // where amd's copy and composition expect them.
+            enc.transition_resources(std::iter::empty(), [(&t.ldr_tex, wgpu::TextureUses::COPY_SRC), (&fg.ui, wgpu::TextureUses::RESOURCE)].into_iter().map(|(texture, state)| wgpu::TextureTransition { texture, selector: None, state }));
+        }
         self.queue.submit([enc.finish()]);
         if let Some(c) = self.frame_clock.as_mut() {
             c.after_submit();
@@ -5106,14 +5488,25 @@ impl Renderer {
         crate::gputime::cpu("render.profiler_gpu_wait");
         self.gpu_timer = gt;
         self.fluid.after_submit();
+        let fg_fmt = out_format(&self.config);
         match frame {
             Some(frame) => self.queue.present(frame),
+            None if fg_err.is_none() && self.fg.is_some() => {
+                let fg = self.fg.as_mut().expect("frame generation");
+                fg.register_ui(fg_fmt);
+                if let Err(e) = fg.present(&self.targets.ldr_tex) {
+                    fg_err = Some(e);
+                }
+            }
             // Nothing paces a frame that is not shown: wait for the GPU to finish it.
             None => {
                 let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
             }
         }
         self.stats[3] += t_sub.elapsed().as_secs_f64();
+        if let Some(e) = fg_err {
+            self.fg_fail(e);
+        }
         if let Some((_, mut delta, _)) = egui_jobs {
             for id in delta.free.drain() {
                 self.egui.free_texture(&id);
@@ -5192,6 +5585,8 @@ fn pass_desc<'a>(colors: &'a [Option<wgpu::RenderPassColorAttachment<'a>>], dept
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        // amd's swapchain goes before the device it was made on.
+        self.fg = None;
         self.fluid.shutdown(&self.device);
     }
 }

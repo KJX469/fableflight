@@ -599,7 +599,7 @@ fn mips(w: u32, h: u32, data: Vec<u8>) -> Vec<(u32, u32, Vec<u8>)> {
 }
 
 /// Reads an accessor as floats (`comps` per element), normalising integer ones.
-fn accessor_f32(j: &serde_json::Value, bin: &[u8], i: usize, comps: usize) -> Result<Vec<f32>> {
+pub(crate) fn accessor_f32(j: &serde_json::Value, bin: &[u8], i: usize, comps: usize) -> Result<Vec<f32>> {
     let a = &j["accessors"][i];
     let bv = &j["bufferViews"][a["bufferView"].as_u64().ok_or_else(|| anyhow!("sparse accessor"))? as usize];
     let count = a["count"].as_u64().unwrap_or(0) as usize;
@@ -637,7 +637,7 @@ fn accessor_f32(j: &serde_json::Value, bin: &[u8], i: usize, comps: usize) -> Re
     Ok(out)
 }
 
-fn accessor_idx(j: &serde_json::Value, bin: &[u8], i: usize) -> Result<Vec<u32>> {
+pub(crate) fn accessor_idx(j: &serde_json::Value, bin: &[u8], i: usize) -> Result<Vec<u32>> {
     let a = &j["accessors"][i];
     let bv = &j["bufferViews"][a["bufferView"].as_u64().ok_or_else(|| anyhow!("sparse indices"))? as usize];
     let count = a["count"].as_u64().unwrap_or(0) as usize;
@@ -656,7 +656,7 @@ fn accessor_idx(j: &serde_json::Value, bin: &[u8], i: usize) -> Result<Vec<u32>>
     })
 }
 
-fn node_matrix(n: &serde_json::Value) -> DMat4 {
+pub(crate) fn node_matrix(n: &serde_json::Value) -> DMat4 {
     if let Some(m) = n["matrix"].as_array().filter(|m| m.len() == 16) {
         let f: Vec<f64> = m.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect();
         return DMat4::from_cols_slice(&f);
@@ -1700,7 +1700,8 @@ impl Photo {
             budget = budget.saturating_sub(bytes);
             self.uploads.pop_front();
             let State::Decoded(m) = std::mem::replace(&mut n.state, State::Idle) else { unreachable!() };
-            let gpu = r.upload_photo(&m);
+            // no room on the gpu: back to idle, asked for again later.
+            let Some(gpu) = r.upload_photo(&m) else { continue };
             // How far the mesh sits from our terrain, from the finer tiles.
             if n.error <= E_DRAW {
                 // Only against fine terrain (a coarse tile is off by tens of

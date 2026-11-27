@@ -376,3 +376,27 @@ trait Also: Sized {
 }
 impl Also for Controls {}
 
+
+#[test]
+fn a_float_slides_on_land_and_stops() {
+    // the Cessna on floats: its legs are pontoons, nothing rolls
+    let mut s = crate::aircraft::c172::SPEC.clone();
+    s.floats = true;
+    let spec: &'static Spec = Box::leak(Box::new(s));
+    let w = world(Surface::Turf);
+    let mut p = on_runway(spec, 0.0);
+    // At rest it stays put, even with some power on.
+    assert!(run(&mut p, &w, 4.0, |_| Controls { throttle_set: Some(0.15), ..Default::default() }));
+    assert!(ground_speed(&p) < 0.3, "float creeps at {} m/s", ground_speed(&p));
+    // Coasting onto the grass at 10 m/s, it slides to a stop far sooner than wheels.
+    let stop = |spec: &'static Spec| {
+        let mut p = on_runway(spec, 10.0);
+        let start = p.pos;
+        assert!(run(&mut p, &w, 20.0, |_| idle()), "{} crashed", spec.name);
+        ((p.pos - start).length(), ground_speed(&p))
+    };
+    let (d_float, v_float) = stop(spec);
+    let (d_wheels, _) = stop(&crate::aircraft::c172::SPEC);
+    println!("from 10 m/s on grass: floats {d_float:.1} m, wheels {d_wheels:.1} m");
+    assert!(v_float < 0.3 && d_float < 25.0 && d_float < d_wheels * 0.5);
+}

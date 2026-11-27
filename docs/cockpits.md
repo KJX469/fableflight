@@ -15,3 +15,13 @@ Control locations in the model use metres in the aircraft body frame. Mouse targ
 | SR-71A Blackbird | The forward cockpit supplies the pilot view. The striped chute handle deploys or releases the simulator’s braking parachute. The rear reconnaissance systems officer’s equipment remains decorative. [USAF museum cockpit photograph](https://www.nationalmuseum.af.mil/Upcoming/Photos/igphoto/2000521423/) |
 
 The front-panel and overhead legends, bezels and switches include representative details. Aircraft-specific avionics, independent engine management, tank-by-tank fuel consumption and full crew-station procedures are outside the current simulation.
+
+## Clickable controls added later
+
+| Aircraft | Now clickable | Still not clickable |
+| --- | --- | --- |
+| F/A-18C | Battery switch (right console electrical panel, forward is on), engine crank switch (left console APU panel, held to crank), emergency and parking brake T-handle (lower left panel, inboard of the gear handle) | APU, generators, fuel and avionics switches (decorative) |
+| F-4E, SR-71A, F-22A | Parking brake T-handle beside the gear handle | Battery and engine start switches (use `Insert`, `I` and `O`, or `F4` for an automatic start) |
+| Concorde | Parking brake lever on the pedestal's aft step between the seats | Engine start, fuel and electrical systems, which are the flight engineer's panel (use `F4`) |
+
+Their positions follow the published cockpit layouts as closely as the existing panels allow; the F/A-18 console switches and every new handle still want checking from the seat in the game, and `cargo test` checks that each can be reached and seen from the pilot's eye.

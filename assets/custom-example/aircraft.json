@@ -1,0 +1,23 @@
+{
+  "name": "Cessna 182T Skylane (example)",
+  "key": "c182",
+  "blurb": "An example of an aircraft made from files: the Skylane's weights, wing, engine and speeds on the 172's body. Copy this folder into the custom aircraft folder to fly it, and add a model.glb to give it its own looks.",
+  "author": "FableFlight example",
+  "license": "MIT",
+  "body": "c172",
+  "mass_kg": 1262,
+  "fuel_kg": 237,
+  "payload_kg": [250, 420],
+  "wing_area_m2": 16.2,
+  "span_m": 11.0,
+  "cd0": 0.031,
+  "cl_max": 1.6,
+  "power_kw": 172,
+  "fuel_flow_kg_h": [8, 41, 41],
+  "cruise_kt": 140,
+  "approach_kt": 70,
+  "vne_kt": 175,
+  "flaps_deg": [0, 10, 20, 30],
+  "vfe_kt": [175, 140, 100, 100],
+  "retractable": false
+}

@@ -18,6 +18,11 @@ each `aircraft::Leg` plus its `Tyre`.
 | `tyre.oleo` | gas spring and orifice damping (stiff rebound) instead of a steel spring leg |
 | `tyre.antiskid` | brakes ease off short of a lock, and stay off until the wheels spin up at touchdown |
 
+An aircraft with `Spec::floats` set rides its legs as pontoons: on water they float with a
+planing hump and a keel against sideslip (`gear::keel_k`, from each leg's static load, held to
+the leg's `mu`), and on land they slide on the keel with the surface's sliding friction
+(`gear::pontoon`) instead of rolling.
+
 Static load per leg comes from the legs' positions and spring rates (`gear::static_loads`), so
 there is nothing to tune per aircraft beyond the data above. Downloaded JSBSim aircraft
 (`hangar.rs`) get castering wheels from `max_steer = 360` and tailwheel breakout for steerable
@@ -35,8 +40,8 @@ over about two minutes and it dries over about fifteen.
 
 `src/plane/ground_tests.rs`, on every wheeled aircraft: standing still, brakes against run-up
 power, braking dry/wet/snow (anti-skid never locks), lock-up without anti-skid, aquaplaning,
-grass drag and bumps, touchdown spin-up, takeoff tracking, taxi turns, a tailwheel and a
-castering nose wheel.
+grass drag and bumps, touchdown spin-up, takeoff tracking, taxi turns, a tailwheel, a
+castering nose wheel and a float sliding on grass.
 
 ## Not modelled yet
 

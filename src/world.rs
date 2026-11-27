@@ -103,6 +103,12 @@ struct Upload {
 /// consumed it, a few frames later; on cards without resizable BAR that is a
 /// 246 MiB heap, and overflowing it slows every upload to a crawl.
 const UPLOAD_BUDGET: usize = 24 << 20;
+/// lowest scenery reach under memory pressure.
+const MEM_K_MIN: f32 = 0.55;
+/// least building reach the building budget goes down to.
+const BUILD_K_MIN: f32 = 0.5;
+/// frames before a failed building upload is retried, about 10 s.
+const BUILD_RETRY: u64 = 600;
 /// Largest single write into a building buffer.
 const UPLOAD_CHUNK: usize = 8 << 20;
 
@@ -246,6 +252,8 @@ pub struct World {
     pub flat: Option<f64>,
     /// what the flat test world is made of (gear.rs)
     pub flat_surface: crate::gear::Surface,
+    /// a gate whose fixed jet bridge gives way to the player's own (ground.rs)
+    pub hide_bridge: Option<DVec3>,
     loader: Loader,
     tiles: HashMap<TileId, Slot>,
     builds: HashMap<TileId, BSlot>,
@@ -263,6 +271,19 @@ pub struct World {
     /// each building tile is 50-170 MB of geometry, which an integrated GPU
     /// takes out of the system's memory)
     pub tile_cap: usize,
+    /// a lower terrain cap after the gpu ran out of memory (`make_room`).
+    mem_cap: Option<usize>,
+    /// building tiles that did not fit and the frame to retry them.
+    build_retry: HashMap<TileId, u64>,
+    /// scenery reach while the gpu is short of memory.
+    mem_k: f32,
+    /// frame mem_k last went down.
+    mem_t: u64,
+    /// gpu memory building tiles may hold (small cards), and the reach that keeps them in it.
+    pub build_budget: u64,
+    build_k: f32,
+    /// frame build_k last went down.
+    build_t: u64,
     pub spare_builds: usize,
     /// building tiles made (or waiting to go to the GPU) at once
     pub max_build_jobs: usize,
@@ -286,12 +307,6 @@ pub struct World {
     pub tree_dims: Vec<TreeDim>,
     tick: u32,
     pub stats: (usize, usize, usize), // drawn tiles, loading, building tiles
-    /// gpu bytes allowed for terrain and buildings, unlimited if vram is unknown
-    budget: (usize, usize),
-    /// lod_k factor while terrain in view alone is over budget
-    t_squeeze: f64,
-    /// building load radius while over budget, m
-    b_cap: f64,
     last_update: Option<std::time::Instant>,
     uploads: VecDeque<Upload>,
     fields: HashMap<u32, FSlot>,
@@ -318,7 +333,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tile_cap: 700, spare_builds: 12, max_build_jobs: 12, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), budget: (usize::MAX, usize::MAX), t_squeeze: 1.0, b_cap: f64::INFINITY, last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new(), flat_surface: crate::gear::Surface::Asphalt }
+        Self { photo, flat: None, flat_surface: crate::gear::Surface::Asphalt, hide_bridge: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tile_cap: 700, mem_cap: None, build_retry: HashMap::default(), mem_k: 1.0, mem_t: 0, build_budget: u64::MAX, build_k: 1.0, build_t: 0, spare_builds: 12, max_build_jobs: 12, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
     }
 
     /// Tiles wanted but not yet asked for (at most 28 are on their way at once).
@@ -991,7 +1006,12 @@ impl World {
                     let slot = match res {
                         Ok(td) => {
                             bytes += crate::render::tile_bytes(&td);
-                            Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu: r.upload_tile(&td), grid: td.verts[..GV * GV].iter().map(|v| v.pos).collect(), heights: td.heights, wet: td.water.iter().any(|w| *w), water: td.water, sea: td.sea, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
+                            let Some(gpu) = r.upload_tile(&td) else {
+                                // no room on the gpu: asked for again once some is freed.
+                                self.tiles.remove(&id);
+                                continue;
+                            };
+                            Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu, grid: td.verts[..GV * GV].iter().map(|v| v.pos).collect(), heights: td.heights, wet: td.water.iter().any(|w| *w), water: td.water, sea: td.sea, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
                         }
                         Err(e) => {
                             log::debug!("tile {id:?} failed: {e}");
@@ -1009,14 +1029,15 @@ impl World {
                     self.in_flight -= 1;
                     budget -= 3;
                     match res {
-                        // no room even after dropping farther tiles
-                        Ok(bd) if !self.make_room(crate::render::building_bytes(&bd), (bd.center - cam).length(), cam) => {
-                            self.builds.remove(&id);
-                        }
                         Ok(bd) => {
                             // The slot stays Loading until the geometry is all on the GPU.
                             bytes += bd.atlas.iter().map(|m| m.len()).sum::<usize>();
-                            let gpu = r.upload_buildings(&bd);
+                            let Some(gpu) = r.upload_buildings(&bd) else {
+                                // retry later, it would only fail again.
+                                self.builds.remove(&id);
+                                self.build_retry.insert(id, self.frame + BUILD_RETRY);
+                                continue;
+                            };
                             self.uploads.push_back(Upload { id, data: Box::new(bd), gpu, part: 0, off: 0 });
                         }
                         Err(_) => {
@@ -1030,7 +1051,10 @@ impl World {
                     match res {
                         Ok((geo, mesh)) => {
                             bytes += Renderer::field_bytes(&mesh);
-                            let gpu = r.upload_field(&mesh);
+                            let Some(gpu) = r.upload_field(&mesh) else {
+                                self.fields.remove(&i);
+                                continue;
+                            };
                             let traffic = crate::traffic::Traffic::new(&geo, i.wrapping_mul(2654435761) ^ 0x5bd1e995);
                             log::info!("airfield {} ready: {} runways, {} stands, {} lights", geo.apt().ident, geo.runways.len(), geo.stands.len(), mesh.lights.len());
                             self.fields.insert(i, FSlot::Ready(Box::new(Field { geo, gpu, props: mesh.props, socks: mesh.socks, scenery: mesh.scenery, floods: mesh.floods, traffic, last_used: self.frame })));
@@ -1045,6 +1069,15 @@ impl World {
             }
         }
         self.pump_uploads(r, bytes.min(UPLOAD_BUDGET / 2));
+        // shed scenery before the gpu fills: a full card fails allocations everywhere,
+        // the ui's too, not only ours.
+        let full = self.frame % 30 == 0 && r.vram().is_some_and(|(used, budget)| used * 10 > budget * 9);
+        if r.take_out_of_memory() || full {
+            self.make_room();
+        }
+        if self.frame % 30 == 0 {
+            self.fit_builds();
+        }
 
         let (clat, clon, calt) = geo::pos_to_lla(cam);
         let gh = self.ground(clat, clon).map(|g| g.h).unwrap_or(0.0);
@@ -1065,8 +1098,10 @@ impl World {
         if self.buildings_on && agl < 7000.0 && clat.abs() < 1.45 {
             let c = TileId::at(clat, clon, DATA_ZOOM);
             let w = c.width_m();
-            let reach = (4500.0 + agl * 0.6).min(7500.0) * self.reach_k;
+            let reach = (4500.0 + agl * 0.6).min(7500.0) * self.reach_k * (self.mem_k * self.build_k) as f64;
             let n = (reach / w).ceil() as i64;
+            // at the budget only the tiles right below come in.
+            let build_full = self.build_budget != u64::MAX && self.build_bytes_ahead() >= self.build_budget;
             let size = 1i64 << DATA_ZOOM;
             for dy in -n..=n {
                 for dx in -n..=n {
@@ -1077,8 +1112,7 @@ impl World {
                     let id = TileId::new(DATA_ZOOM, x as u32, y as u32);
                     let (lat, lon) = id.lat_lon(0.5, 0.5);
                     let d = (geo::lla_to_pos(lat, lon, gh) - cam).length();
-                    // b_cap only applies while over budget
-                    if d > reach + w || d >= self.b_cap {
+                    if d > reach + w {
                         continue;
                     }
                     match self.builds.get_mut(&id) {
@@ -1098,6 +1132,8 @@ impl World {
                             }
                         }
                         Some(BSlot::Loading) => {}
+                        None if self.build_retry.get(&id).is_some_and(|f| *f > self.frame) => {}
+                        None if build_full && d > w * 1.5 => {}
                         None => self.wanted.push((0.8 + (d / w) as f32 * 0.6, id.with_tag())),
                     }
                 }
@@ -1199,22 +1235,26 @@ impl World {
             k += 1;
             !sent[k - 1]
         });
-        if self.frame % 30 == 0 {
-            self.keep_budget(cam);
-        }
 
         // Evict what has not been needed for a while.
         if self.frame % 120 == 0 {
             let f = self.frame;
-            if self.tiles.len() > self.tile_cap {
+            self.build_retry.retain(|_, t| *t > f);
+            // room again after a squeeze: let the cap creep back up.
+            if f % 600 == 0 && (self.mem_k < 1.0 || self.mem_cap.is_some_and(|c| c < self.tile_cap)) && r.vram().is_none_or(|(used, budget)| used * 4 < budget * 3) {
+                self.mem_cap = self.mem_cap.map(|c| c + 10);
+                self.mem_k = (self.mem_k + 0.05).min(1.0);
+            }
+            let cap = self.cap();
+            if self.tiles.len() > cap {
                 self.tiles.retain(|id, s| id.z <= 3 || !matches!(s, Slot::Ready(t) if f - t.last_used > 600));
             }
             // Still over: the least recently used of those not drawn in the
             // last couple of seconds go too.
-            if self.tiles.len() > self.tile_cap {
+            if self.tiles.len() > cap {
                 let mut old: Vec<(u64, TileId)> = self.tiles.iter().filter_map(|(id, s)| match s { Slot::Ready(t) if id.z > 3 && f - t.last_used > 120 => Some((t.last_used, *id)), _ => None }).collect();
                 old.sort_unstable_by_key(|o| o.0);
-                for (_, id) in old.iter().take(self.tiles.len() - self.tile_cap) {
+                for (_, id) in old.iter().take(self.tiles.len() - cap) {
                     self.tiles.remove(id);
                 }
             }
@@ -1238,103 +1278,76 @@ impl World {
         self.stats = (self.draw.len(), self.in_flight, self.draw_b.len());
     }
 
-    /// size the streaming budgets from vram and the renderer's fixed use.
-    pub fn set_vram(&mut self, vram: Option<u64>, fixed: u64) {
-        let was = self.budget;
-        self.budget = match vram {
-            // headroom for the driver, aircraft, uploads and effects
-            Some(v) => {
-                let free = ((v as f64 * 0.8) as u64).saturating_sub(fixed + (400 << 20)).max(320 << 20) as usize;
-                (free * 3 / 10, free * 7 / 10)
-            }
-            None => (usize::MAX, usize::MAX),
-        };
-        if vram.is_some() && self.budget != was {
-            log::info!("streaming budget: terrain {} MB, buildings {} MB", self.budget.0 >> 20, self.budget.1 >> 20);
-        }
+    /// the terrain tile cap: the setting's, or less once the gpu ran out of memory.
+    fn cap(&self) -> usize {
+        self.mem_cap.map_or(self.tile_cap, |c| c.min(self.tile_cap))
     }
 
-    /// building bytes on the gpu or uploading.
-    fn building_bytes(&self) -> usize {
-        self.gpu_usage().1 .1 + self.uploads.iter().map(|u| u.gpu.bytes).sum::<usize>()
-    }
-
-    /// make room for a building tile by dropping farther ones, false if it doesnt fit.
-    fn make_room(&mut self, need: usize, dist: f64, cam: DVec3) -> bool {
-        let max = self.budget.1;
-        if max == usize::MAX {
-            return true;
-        }
-        let mut used = self.building_bytes();
-        if used + need <= max {
-            return true;
-        }
-        let mut far: Vec<(f64, TileId, usize)> = self.builds.iter().filter_map(|(id, s)| match s {
-            BSlot::Ready(b) => {
-                let d = (b.center - cam).length();
-                (d > dist).then(|| (d, *id, b.gpu.as_ref().map_or(0, |g| g.bytes)))
-            }
-            _ => None,
-        }).collect();
-        far.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-        let freeable: usize = far.iter().map(|f| f.2).sum();
-        if used + need > max + freeable {
-            self.b_cap = self.b_cap.min(dist);
-            return false;
-        }
-        for (d, id, bytes) in far {
-            if used + need <= max {
-                break;
-            }
-            self.builds.remove(&id);
-            used -= bytes;
-            self.b_cap = self.b_cap.min(d);
-        }
-        true
-    }
-
-    /// keep tiles in budget. terrain lru first, buildings farthest first.
-    fn keep_budget(&mut self, cam: DVec3) {
+    /// the gpu is full: hold the terrain to fewer tiles than now and drop the least
+    /// recently drawn at once, with the spare building tiles behind the camera.
+    fn make_room(&mut self) {
         let f = self.frame;
-        let (t_max, b_max) = self.budget;
-        let mut b_used = self.building_bytes();
-        if t_max != usize::MAX {
-            let mut used = self.gpu_usage().0 .1;
-            if used > t_max {
-                let mut idle: Vec<(u64, TileId, usize)> = self.tiles.iter().filter_map(|(id, s)| match s {
-                    Slot::Ready(t) if id.z > 3 && t.last_used + 2 < f => Some((t.last_used, *id, t.gpu.bytes)),
-                    _ => None,
-                }).collect();
-                idle.sort_unstable_by_key(|t| t.0);
-                for (_, id, bytes) in idle {
-                    if used <= t_max * 9 / 10 {
-                        break;
-                    }
-                    self.tiles.remove(&id);
-                    used -= bytes;
-                }
-            }
-            self.t_squeeze = if used > t_max { (self.t_squeeze * 1.08).min(3.0) } else if used < t_max * 3 / 4 { (self.t_squeeze / 1.02).max(1.0) } else { self.t_squeeze };
+        let ready = self.tiles.values().filter(|s| matches!(s, Slot::Ready(_))).count();
+        let cap = (ready * 85 / 100).max(64);
+        self.mem_cap = Some(self.mem_cap.map_or(cap, |c| c.min(cap)));
+        let mut old: Vec<(u64, TileId)> = self.tiles.iter().filter_map(|(id, s)| match s { Slot::Ready(t) if id.z > 3 && t.last_used + 2 < f => Some((t.last_used, *id)), _ => None }).collect();
+        old.sort_unstable_by_key(|o| o.0);
+        let n = ready.saturating_sub(cap).min(old.len());
+        for (_, id) in &old[..n] {
+            self.tiles.remove(id);
         }
-        if b_max != usize::MAX {
-            if b_used > b_max {
-                let mut far: Vec<(f64, TileId, usize)> = self.builds.iter().filter_map(|(id, s)| match s {
-                    BSlot::Ready(b) => Some(((b.center - cam).length(), *id, b.gpu.as_ref().map_or(0, |g| g.bytes))),
-                    _ => None,
-                }).collect();
-                far.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-                for (d, id, bytes) in far {
-                    if b_used <= b_max * 9 / 10 {
-                        break;
-                    }
-                    self.builds.remove(&id);
-                    b_used -= bytes;
-                    self.b_cap = self.b_cap.min(d);
-                }
-            } else if b_used < b_max * 3 / 4 && self.b_cap.is_finite() {
-                // room again, reach a bit further
-                self.b_cap = if self.b_cap > 20_000.0 { f64::INFINITY } else { self.b_cap + 150.0 };
+        self.builds.retain(|_, s| !matches!(s, BSlot::Ready(b) if b.last_used + 2 < f));
+        // shrink the reach, at most every 2 s so evictions show first.
+        if f >= self.mem_t + 120 && self.mem_k > MEM_K_MIN {
+            self.mem_k = (self.mem_k - 0.06).max(MEM_K_MIN);
+            self.mem_t = f;
+        }
+        log::warn!("gpu memory full: terrain held to {} tiles, {n} dropped, scenery reach {:.0}%", self.cap(), self.mem_k * 100.0);
+    }
+
+    /// gpu memory of the building tiles, drawn and still uploading.
+    fn build_bytes(&self) -> u64 {
+        let ready: u64 = self.builds.values().filter_map(|s| match s { BSlot::Ready(b) => b.gpu.as_ref().map(|g| g.bytes()), _ => None }).sum();
+        ready + self.uploads.iter().map(|u| u.gpu.bytes()).sum::<u64>()
+    }
+
+    /// building memory once the tiles still being made are in, at the average tile's size.
+    fn build_bytes_ahead(&self) -> u64 {
+        let (mut n, mut loading) = (0u64, 0u64);
+        for s in self.builds.values() {
+            match s {
+                BSlot::Ready(b) if b.gpu.is_some() => n += 1,
+                BSlot::Loading => loading += 1,
+                _ => {}
             }
+        }
+        let bytes = self.build_bytes();
+        // a city tile when none is in yet.
+        let each = if n > 0 { bytes / n } else { 25 << 20 };
+        bytes + loading * each
+    }
+
+    /// holds building tiles to the budget: over it the reach shrinks and the tiles out of
+    /// reach go at once, well under it the reach creeps back. tiles cost about reach squared.
+    fn fit_builds(&mut self) {
+        if self.build_budget == u64::MAX {
+            return;
+        }
+        let f = self.frame;
+        let bytes = self.build_bytes();
+        let (k, budget) = (self.build_k, self.build_budget as f64);
+        if bytes as f64 > budget {
+            // the tiles out of reach go first, spares included.
+            self.builds.retain(|_, s| !matches!(s, BSlot::Ready(b) if b.last_used + 2 < f));
+        }
+        // at most every 4 s, so the tiles let go show in the count first.
+        if bytes as f64 > budget && k > BUILD_K_MIN && f >= self.build_t + 240 {
+            let k2 = k * (budget * 0.9 / bytes as f64).sqrt() as f32;
+            self.build_k = k2.clamp(k - 0.15, k - 0.03).max(BUILD_K_MIN);
+            self.build_t = f;
+            log::info!("buildings over their {} MB: {} MB, reach {:.0}%", self.build_budget >> 20, bytes >> 20, self.build_k * 100.0);
+        } else if bytes as f64 <= budget && k < 1.0 && f % 600 == 0 && (bytes as f64 * ((k + 0.05) / k).powi(2) as f64) < budget * 0.9 {
+            self.build_k = (k + 0.05).min(1.0);
         }
     }
 
@@ -1407,9 +1420,10 @@ impl World {
     }
 
     /// (count, bytes) of terrain and building tiles on the gpu.
+    #[cfg(feature = "mem-stats")]
     pub fn gpu_usage(&self) -> ((usize, usize), (usize, usize)) {
         let t = self.tiles.values().filter_map(|s| if let Slot::Ready(t) = s { Some(t.gpu.bytes) } else { None });
-        let b = self.builds.values().filter_map(|s| if let BSlot::Ready(b) = s { b.gpu.as_ref().map(|g| g.bytes) } else { None });
+        let b = self.builds.values().filter_map(|s| if let BSlot::Ready(b) = s { b.gpu.as_ref().map(|g| g.bytes() as usize) } else { None });
         let sum = |i: &mut dyn Iterator<Item = usize>| i.fold((0, 0), |(n, s), x| (n + 1, s + x));
         (sum(&mut { t }), sum(&mut { b }))
     }
@@ -1565,6 +1579,10 @@ impl World {
             }
             let base = g.center - cam;
             for p in &f.props {
+                // the player's own jet bridge stands in for the fixed one at its stand (ground.rs).
+                if self.hide_bridge.is_some_and(|h| matches!(p.mesh, crate::airmodels::M_BRIDGE | crate::airmodels::M_BRIDGE_HEAD) && (g.center + p.pos.as_dvec3() - h).length() < 80.0) {
+                    continue;
+                }
                 let o = base + p.pos.as_dvec3();
                 if o.length() > 6000.0 || !fr.map(|f| f.sphere(o, 40.0)).unwrap_or(true) {
                     continue;
@@ -1661,7 +1679,7 @@ impl World {
             }
         };
         let width = id.width_m();
-        if id.z < self.max_zoom && width / dist > self.lod_k * self.t_squeeze {
+        if id.z < self.max_zoom && width / dist > self.lod_k / self.mem_k as f64 {
             let kids = id.children();
             let mut all = true;
             for k in kids {

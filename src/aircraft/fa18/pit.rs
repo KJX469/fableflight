@@ -903,6 +903,21 @@ fn consoles(m: &mut Mesh, b: &mut Builder) {
     let pivot = wf.at_h(0.0, -0.025, 0.008);
     let piece = b.add("canopy switch", G_ENGINE, canopy, Anim::hinge(Drive::new(Input::Canopy, 0.74)), pivot, wf.ax, None);
     b.pieces[piece].hotspot = Some(Hotspot::click(wf.n() * 0.0145 + wf.ay * 0.0055, 0.012, "canopy"));
+    // the battery switch on the right console's electrical panel (forward is on),
+    // and the engine crank switch on the left console's apu panel (forward cranks).
+    let deck = Face::new(Vec3::new(0.0, CON_Y, 0.0), Vec3::X, -Vec3::Z);
+    for (u, v, name, drive, hot) in [
+        (0.268f32, 5.29f32, "battery switch", Drive::new(Input::Master, -0.74).offset(0.74), Hotspot::click(Vec3::ZERO, 0.012, "master")),
+        (-0.268, 4.39, "engine crank switch", Drive::new(Input::Ignition, -0.49).offset(0.74), Hotspot::hold(Vec3::ZERO, 0.012, "starter")),
+    ] {
+        let sf = deck.sub(u, v, 0.0052);
+        let mut sw = Mesh::default();
+        m.rbox(&BLK, sf.at_h(0.0, 0.0, -0.001), Vec3::new(0.012, 0.012, 0.002), 0.002, sf.rot());
+        toggle(&mut sw, &sf, 0.0, 0.0, true);
+        let pivot = sf.at_h(0.0, 0.0, 0.0);
+        let piece = b.add(name, G_ENGINE, sw, Anim::hinge(drive), pivot, sf.ax, None);
+        b.pieces[piece].hotspot = Some(Hotspot { at: (sf.n() * 0.0145 + sf.ay * 0.0055).to_array(), ..hot });
+    }
     // On the left wall forward: the yellow and black striped handle by the hood.
     let lz = -5.13;
     let lx = -(wall_x(lz, 0.6) - 0.012);
@@ -1079,6 +1094,13 @@ pub(crate) fn controls(b: &mut Builder, pedal_adjustment: f32) {
     gh.lathe(&RED_LENS, wheel_c - w.ax * 0.013, w.ax, &[[0.0, 0.0], [0.009, 0.0], [0.009, 0.026], [0.0, 0.026]], 14, false);
     let piece = b.add("gear handle", G_ENGINE, gh, Anim::slide(Drive::new(Input::GearHandle, -0.028), w.ay), w.o, Vec3::X, None);
     b.pieces[piece].hotspot = Some(Hotspot::click(wheel_c - w.o, 0.021, "gear"));
+    // the emergency and parking brake handle beside it, lower and inboard: a t handle pulled out to set.
+    let pb = wing.sub(0.024, -0.024, 0.006);
+    let mut ph = Mesh::default();
+    ph.tube(&STEEL, &[pb.at_h(0.0, 0.0, -0.004), pb.at_h(0.0, 0.0, 0.022)], &|_| 0.004, 10, false);
+    ph.tube(&mt(mat::PLASTIC, 0.08, 0.08, 0.085), &[pb.at_h(-0.022, 0.0, 0.026), pb.at_h(0.022, 0.0, 0.026)], &|_| 0.0055, 10, true);
+    let piece = b.add("parking brake handle", G_ENGINE, ph, Anim::slide(Drive::new(Input::ParkingBrake, 0.03), pb.n()), pb.o, Vec3::X, None);
+    b.pieces[piece].hotspot = Some(Hotspot::click(pb.n() * 0.026, 0.016, "parking_brake"));
 
     // Rudder pedals, hinged at the top of their arms under the panel.
     for s in [-1.0f32, 1.0] {

@@ -18,7 +18,7 @@ Or run the published image directly:
 ```sh
 docker run -d --name fableflight-relay --restart unless-stopped \
   -p 7480:7480/udp \
-  ghcr.io/danux-be/fableflight-relay
+  ghcr.io/rolandjg/fableflight-relay
 ```
 
 Allow inbound **UDP 7480** in your server firewall and hosting provider's firewall. Players can select your relay in **Settings → Multiplayer**, or enter its hostname manually. The game can also use `--mp host[,name]` for testing.
@@ -38,6 +38,9 @@ The relay is configured through environment variables. Add them to your Compose 
 | `FFMP_PEER_SECRET` | Shared secret (at least 16 characters) for relay-to-relay traffic. |
 | `FFMP_HUB` | Comma-separated main relay addresses; `none` disables the built-in hubs. |
 | `FFMP_PEERS` | Additional relay addresses to connect to directly. |
+| `FFMP_MAX_PER_IP` | Players at most from one address (default `32`). |
+| `FFMP_BANS` | A file of banned addresses, networks and names (see Moderation). |
+| `FFMP_STATUS_POSITIONS` | `1` to show the pilots' positions on the status page (off by default). |
 
 For example, give your relay a recognizable identity:
 
@@ -46,16 +49,63 @@ docker run -d --name fableflight-relay --restart unless-stopped \
   -p 7480:7480/udp \
   -e FFMP_NAME="My Relay" \
   -e FFMP_PUBLIC="relay.example.com" \
-  ghcr.io/danux-be/fableflight-relay
+  ghcr.io/rolandjg/fableflight-relay
 ```
 
 Replace `relay.example.com` with a hostname that resolves to your server. If you change the listening UDP port, update the Docker port mapping, firewall rule and advertised address accordingly.
 
 ## Status page
 
-The relay exposes `/` and `/status.json` on its HTTP status port (`7481` by default). The page reports connected pilots and start-screen watchers, without publishing aircraft positions. To access it outside the server, expose that port only as needed; for a public status page, put it behind an HTTPS reverse proxy.
+The relay exposes `/` and `/status.json` on its HTTP status port (`7481` by default). The page reports connected pilots and start-screen watchers. It shows no aircraft positions unless `FFMP_STATUS_POSITIONS` is on. To access it outside the server, expose that port only as needed; for a public status page, put it behind an HTTPS reverse proxy.
 
 The directory endpoint `/servers.json` is also used for relay discovery.
+
+With `FFMP_STATUS_POSITIONS=1`, the page also shows where each pilot is, on an OpenStreetMap world map and in the list (position and heading). Positions are rounded to about a kilometre, as on the game's world map. This is off by default: without it, the page shows no positions.
+
+`/healthz` answers `ok` while the relay runs, for health checks. `/metrics` gives this relay's counts in Prometheus' text format: players, start-screen watchers, players on the other relays, relays up and down, packets, and what was turned away (banned, full, too many from one address, over the packet rate). It holds no names or positions.
+
+## Moderation
+
+To keep someone off your relay, list them in a text file and point `FFMP_BANS` at it. One entry per line: an address, a network in CIDR notation, or `name:` followed by a pilot name (any case). `#` starts a comment.
+
+```text
+203.0.113.7
+198.51.100.0/24
+2001:db8::/32
+name: Some Griefer
+```
+
+The relay reads the file again within a second of it changing, without a restart. Whoever it now bans is dropped at once and gets no more answers. Lines it cannot read are reported in its log and skipped. With Docker, mount the file read-only and give its path inside the container:
+
+```yaml
+    environment:
+      FFMP_BANS: "/bans.txt"
+    volumes:
+      - ./bans.txt:/bans.txt:ro
+```
+
+A ban applies to this relay only; players on other relays of the network are still shown. Since the name is the player's own choice, an address ban holds better than a name ban.
+
+## Automatic updates
+
+A new relay image is published whenever the relay or its protocol changes on `main` (tagged `latest`, the commit and the relay's version, for example `0.5.0`). So that every relay of the network picks it up without its operator being around, run `relay/autoupdate.sh` from cron next to your `docker-compose.yml`:
+
+```sh
+cp relay/autoupdate.sh /path/to/your/relay/
+crontab -e
+# then add:
+7-59/15 * * * * /path/to/your/relay/autoupdate.sh
+```
+
+Every 15 minutes it pulls the image your `docker-compose.yml` names. When a newer one has been published, it recreates the container and checks that the relay is still running 20 seconds later and that its status page answers. If it isn't, it goes back to the previous image (kept as `<image>:rollback`) and skips the failed one until another is published. When there is nothing new, nothing changes. Players see a gap of a few seconds at most, only when an update is applied. What it did goes to `autoupdate.log` beside the script.
+
+`init: true` in the provided `docker-compose.yml` lets the relay stop at once when it is restarted (without it, Docker waits 10 seconds and then kills it), so an update takes a second or two. Players' games say Hello again by themselves after 5 seconds without news from the relay.
+
+It needs `docker` with the compose plugin, `curl` and `flock`, run by root or by a user in the `docker` group. Optional environment variables: `FFMP_DIR` (the folder with `docker-compose.yml`, by default the script's), `FFMP_SERVICE` (default `relay`), `FFMP_STATUS_URL` (default `http://127.0.0.1:7481/status.json`, or `none` when the status page is off) and `FFMP_UPDATE_LOG`.
+
+To stay on one version instead, name it in `docker-compose.yml` (`ghcr.io/rolandjg/fableflight-relay:0.5.0`) and don't run the script.
+
+**Protocol changes.** Relays and games only talk to the same protocol version (`VERSION` in `src/mp_proto.rs`). With every relay updating itself, a change reaches the whole network within about 15 minutes of its image being published. A change that bumps `VERSION` should still decode the previous version for one release, so that relays (and players) a little behind are not cut off in the meantime.
 
 ## Public and private networks
 
