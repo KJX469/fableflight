@@ -44,7 +44,7 @@ pub const WORLD_PER_PACKET: usize = 24;
 /// The aircraft by `PlayerState::aircraft` (`aircraft::Spec::id`), for the
 /// relay's status page; ids past the end are shown as unknown. (The game's
 /// tests check this list against its aircraft.)
-pub const AIRCRAFT: &[&str] = &["Cessna 172RG", "Boeing 747-400", "F/A-18C Hornet", "F-4E Phantom II", "F-22A Raptor", "SpaceX Starship", "Concorde", "SR-71A Blackbird", "Robin DR 400/180", "Gulfstream G650", "Beechcraft A36 Bonanza"];
+pub const AIRCRAFT: &[&str] = &["Cessna 172RG", "Boeing 747-400", "F/A-18C Hornet", "F-4E Phantom II", "F-22A Raptor", "SpaceX Starship", "Concorde", "SR-71A Blackbird", "Robin DR 400/180", "Gulfstream G650", "Beechcraft A36 Bonanza", "Lockheed C-130H Hercules"];
 /// the planet's radius (m), as the game uses it (geo.rs)
 #[allow(dead_code)] // (the relay's status page uses it)
 pub const PLANET_R: f64 = 6_371_008.8;
