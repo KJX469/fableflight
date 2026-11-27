@@ -314,6 +314,50 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
     }
 }
 
+/// The surface-element rig (aero.rs). Sources and estimates:
+///
+/// - the wing from this model's own ogee (`wing_sect`), set at 2.86° to the
+///   fuselage (the JSBSim Concorde's wing incidence, as its zero-lift angle); thin, conically
+///   cambered sections whose sharp leading edge lets go early, the lift then
+///   coming from the vortices it sheds (Polhamus's K_v, about 3 for a slender
+///   delta of this aspect ratio);
+/// - the fin 33.9 m² (365 ft²) and the travel, elevons ±22.5° in pitch and
+///   rudder ±29°, as in the JSBSim Concorde (aircraft/Concorde/Concorde.xml,
+///   whose notes call them the real ones), which also has its yaw damper;
+/// - the aerodynamic centre that moves aft from 55% of the root chord
+///   subsonic to 62% at Mach 2 (same file) is what the fuel transfer chases:
+///   the CG kept between 52% and 59% (`Spec::cg`), at about 59% by Mach 2;
+///   the schedule here is an estimate;
+/// - its three-axis autostabilisation, as dampers, and the roll and yaw
+///   gearing that falls with the airspeed (gains estimated);
+/// - fuselage coefficients from Raymer, Aircraft Design, eq. 16.25 and 16.26
+///   (61.7 × 2.9 m).
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.05, cl_max: 0.9, cd0: 0.004, cm0: 0.015 },
+    wing_strips: 16,
+    // (The span efficiency its `Spec`'s polar has, k_ind 0.19 on this aspect ratio.)
+    oswald: 0.9,
+    elevons: true,
+    // The inner elevons (flap span: no flaps) and the middle and outer ones.
+    flap: crate::aero::Ctrl { span: [1.5, 6.75], chord: 0.1, travel: [0.0, 0.0] },
+    aileron_chord_m: 1.6,
+    aileron_travel: [0.0873, 0.0873],
+    elevator: crate::aero::Ctrl { span: [0.0, 0.0], chord: 0.0, travel: [0.3927, 0.3927] },
+    trim: [0.0873, 0.1745],
+    fin: crate::aero::Planform { root: DVec3::new(0.0, 1.45, 16.6), tip: DVec3::new(0.0, 6.6, 21.35), chord: [10.3, 2.87], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.0, 5.15], chord: 0.30, travel: [0.5061, 0.5061] },
+    fuse: crate::aero::Fuse { cm_a: 0.12, cn_b: -0.06, cl_b: 0.0, cy_b: -0.25, cl_a: 0.0 },
+    eta_tail: 0.95,
+    vortex: 3.0,
+    vortex_burst: 0.56,
+    fcs: crate::aero::Fcs { damp: [2.0, 0.6, 3.0], damp_auth: 0.3, gear_q: 8000.0, yaw_beta: 1.0, ..crate::aero::Fcs::NONE },
+    // The main legs hang from 57 % of the reference chord (Concorde crew, PPRuNe
+    // "C of G" thread), at 2.6 m behind the model's origin: the origin is at 47.6 %.
+    datum: 0.476,
+    cg_mach: &[(0.0, 0.535), (0.9, 0.555), (1.3, 0.575), (2.0, 0.59)],
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
     id: 6,
     name: "Concorde",
@@ -504,6 +548,7 @@ pub static SPEC: Spec = Spec {
         stall_drop: 0.2,
         stall_yaw: 0.4,
     },
+    rig: Some(&RIG),
     cruise: 180.0,
     approach: (82.0, 3),
     cam_dist: 76.0,

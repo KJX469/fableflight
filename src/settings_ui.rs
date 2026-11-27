@@ -507,6 +507,9 @@ impl Game {
             row(ui, t!("settings.topple_buildings"), t!("settings.a_building_you_crash_into"), |ui| {
                 menu::switch(ui, &mut self.topple_buildings);
             });
+            row(ui, t!("settings.auto_trim"), t!("settings.winds_the_trim_for_you"), |ui| {
+                menu::switch(ui, &mut self.auto_trim);
+            });
         });
         card(ui, t!("settings.air_traffic"), |ui| {
             row(ui, t!("settings.live_air_traffic"), t!("settings.real_aircraft_around_you_from"), |ui| {

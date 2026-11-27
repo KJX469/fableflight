@@ -327,6 +327,42 @@ pub static MISSILES: [MissileStation; 2] = [
     MissileStation { piece: "right sidewinder", side: 1, name: "R WINGTIP" },
 ];
 
+/// The surface-element rig (aero.rs). Sources and estimates:
+///
+/// - wing 400 ft² from this model's sections (V. Tech, Waclawicz, "F/A-18
+///   Hornet Development", 2000: 37.16 m², AR 4, LE sweep 26.7°, 5-3.5%
+///   thick); the leading-edge extensions' lift and nose-up moment as
+///   fuselage coefficients (estimates);
+/// - tail areas as published for the F/A-18A/C (NASA F/A-18 HARV reports):
+///   stabilators 88 ft² (8.2 m²), twin fins 104 ft² (9.7 m²) canted 20°
+///   outboard, the planforms placed on this model's tail; stabilator 24°
+///   trailing edge up / 10.5° down, used differentially for roll too;
+///   rudders ±30°, ailerons ±25°, flaps 45°;
+/// - its fly-by-wire: load factor (to `Spec::fbw_g`) and roll rate
+///   commanded, sideslip held, an angle-of-attack limit (`Spec::alpha_trim`).
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.009, cl_max: 1.45, cd0: 0.0055, cm0: -0.01 },
+    wing_strips: 12,
+    oswald: 0.75,
+    flap: crate::aero::Ctrl { span: [1.0, 3.5], chord: 0.30, travel: [0.0, 0.7854] },
+    flap_dcl_max: 0.9,
+    aileron_chord: 0.25,
+    aileron_travel: [0.4363, 0.4363],
+    // With the flaps at full the ailerons droop to 45° with them.
+    aileron_droop: 0.7854,
+    slat_dcl_max: 0.36,
+    htail: crate::aero::Planform { root: DVec3::new(0.9, -0.2, 5.06), tip: DVec3::new(3.25, -0.2, 6.9), chord: [2.5, 0.98], incidence: [0.0, 0.0] },
+    elevator: crate::aero::Ctrl { span: [0.0, 2.4], chord: 1.0, travel: [0.4189, 0.1833] },
+    trim: [0.0524, 0.1396],
+    trim_stab: true,
+    taileron: 0.1396,
+    fin: crate::aero::Planform { root: DVec3::new(0.95, 0.25, 4.6), tip: DVec3::new(1.89, 2.83, 6.1), chord: [2.5, 1.0], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.3, 2.4], chord: 0.35, travel: [0.5236, 0.5236] },
+    fuse: crate::aero::Fuse { cm_a: 0.3, cn_b: -0.10, cl_b: 0.0, cy_b: -0.4, cl_a: 0.25 },
+    fcs: crate::aero::Fcs { g_law: true, alpha_max: 0.38, roll_rate: 3.84, beta_cmd: 0.14, ..crate::aero::Fcs::NONE },
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
     id: 2,
     name: "F/A-18C Hornet",
@@ -492,6 +528,7 @@ pub static SPEC: Spec = Spec {
         stall_drop: 0.6,
         stall_yaw: 1.0,
     },
+    rig: Some(&RIG),
     cruise: 180.0,
     approach: (70.0, 2),
     cam_dist: 26.0,

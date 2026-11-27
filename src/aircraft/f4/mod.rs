@@ -267,6 +267,44 @@ const fn main_leg(x: f64, name: &'static str, kick: f64) -> Leg {
     }
 }
 
+/// The surface-element rig (aero.rs). Sources and estimates:
+///
+/// - the wing from this model's own sections (the outer panels' 12° of
+///   dihedral among them), the slats' extra lift from its `stall_slat`;
+/// - the stabilator (23° of anhedral), fin and rudder from this model's tail
+///   geometry (about 8.6 m² (some 90 ft²) of stabilator and 5.6 m² of
+///   fin: estimates from the model, not drawings);
+/// - roll by ailerons that only go down (30°) and spoilers that only go up
+///   (45°) on the side going down, as the F-4's do; stabilator 21° trailing
+///   edge up / 9° down, rudder ±30° (estimates for the type);
+/// - its stability augmentation (pitch, roll and yaw dampers), estimated gains;
+/// - fuselage coefficients from Raymer, Aircraft Design, eq. 16.25 and 16.26.
+pub static RIG: crate::aero::Rig = crate::aero::Rig {
+    // Thin sections, NACA 0006.4-64 at the root to 0003-64 at the tip (Lednicer,
+    // "The Incomplete Guide to Airfoil Usage"): about 1.0 at most without the slats.
+    wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.007, cl_max: 1.05, cd0: 0.0055, cm0: -0.02 },
+    wing_strips: 12,
+    oswald: 0.72,
+    flap: crate::aero::Ctrl { span: [1.0, 2.82], chord: 0.20, travel: [0.0, 1.047] },
+    flap_dcl_max: 1.0,
+    aileron_chord: 0.20,
+    aileron_travel: [0.0, 0.5236],
+    spoiler: crate::aero::Ctrl { span: [1.9, 3.6], chord: 0.15, travel: [0.0, 0.7854] },
+    roll_spoiler: 0.7,
+    slat_dcl_max: 0.3,
+    htail: crate::aero::Planform { root: DVec3::new(0.6, 0.39, 6.6), tip: DVec3::new(2.70, -0.50, 8.3), chord: [3.2, 0.9], incidence: [0.0, 0.0] },
+    elevator: crate::aero::Ctrl { span: [0.0, 2.0], chord: 1.0, travel: [0.3665, 0.1571] },
+    trim: [0.0524, 0.1396],
+    trim_stab: true,
+    fin: crate::aero::Planform { root: DVec3::new(0.0, 0.88, 5.5), tip: DVec3::new(0.0, 2.95, 8.4), chord: [4.2, 1.2], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.2, 1.8], chord: 0.25, travel: [0.5236, 0.5236] },
+    // (Pitch: an estimate, set for a static margin of about 4 % at Mach 0.8 on the
+    // mid CG, stable without augmentation as the type is.)
+    fuse: crate::aero::Fuse { cm_a: 0.0, cn_b: -0.12, cl_b: 0.0, cy_b: -0.4, cl_a: 0.1 },
+    fcs: crate::aero::Fcs { damp: [2.0, 0.2, 2.0], damp_auth: 0.3, damp_q: 20_000.0, ..crate::aero::Fcs::NONE },
+    ..crate::aero::Rig::BASE
+};
+
 pub static SPEC: Spec = Spec {
     id: 3,
     name: "F-4E Phantom II",
@@ -442,6 +480,7 @@ pub static SPEC: Spec = Spec {
         stall_drop: 1.2,
         stall_yaw: 1.8,
     },
+    rig: Some(&RIG),
     cruise: 220.0,
     approach: (77.0, 2),
     cam_dist: 28.0,
@@ -493,9 +532,10 @@ mod tests {
         // where a piece's aftmost vertex goes for a stick position, and how far any vertex goes sideways
         let moved = |name: &str, stick: DVec3| {
             let mut p = crate::plane::Plane::spawn(&SPEC, 0.6, -2.1, 1000.0, 0.0, 120.0);
-            p.stick = DVec3::ZERO;
+            (p.stick, p.surf) = (DVec3::ZERO, DVec3::ZERO);
             let rest = p.pose(&m.pieces);
-            p.stick = stick;
+            // (the surfaces show what the flight control system makes of the stick: here, the stick)
+            (p.stick, p.surf) = (stick, stick);
             let pose = p.pose(&m.pieces);
             let k = at(name);
             let (mut te, mut side) = (Vec3::splat(-1e9), 0.0f32);
