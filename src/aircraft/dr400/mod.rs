@@ -116,19 +116,29 @@ pub static RIG: crate::aero::Rig = crate::aero::Rig {
     wing_foil: crate::aero::Foil2d { cl_a: 6.0, a0: -0.021, cl_max: 1.55, cd0: 0.0065, cm0: -0.01 },
     wing_strips: 12,
     oswald: 0.78,
-    flap: crate::aero::Ctrl { span: [FLAP[0] as f64, FLAP[1] as f64], chord: 0.25, travel: [0.0, 1.047] },
-    flap_dcl_max: 1.4,
+    // The flaps: 0.27 m deep along their span (`FLAP_C`), about 18 % of the
+    // chord there.
+    flap: crate::aero::Ctrl { span: [FLAP[0] as f64, FLAP[1] as f64], chord: 0.18, travel: [0.0, 1.047] },
+    flap_dcl_max: 1.0,
     aileron_chord: 0.24,
     aileron_travel: [0.3142, 0.2094],
-    htail: crate::aero::Planform { root: DVec3::new(0.0, 0.06, 3.84 + DZ64), tip: DVec3::new(1.60, 0.06, 3.87 + DZ64), chord: [1.03, 0.77], incidence: [0.0, 0.0] },
+    // The tailplane as `tail()` draws it (leading edge 2.90-2.96 m, 1.60 m a
+    // side), its chords scaled to the manual's 2.88 m².
+    htail: crate::aero::Planform { root: DVec3::new(0.0, 0.0, 3.135 + DZ64), tip: DVec3::new(1.60, 0.0, 3.175 + DZ64), chord: [0.94, 0.86], incidence: [0.0, 0.0] },
     // The stabilator (estimated travel: 13° trailing edge up, 4° down); its
     // trim, the anti-servo tab, holds it where the stick force is nil.
     elevator: crate::aero::Ctrl { span: [0.0, 1.60], chord: 1.0, travel: [0.2269, 0.0698] },
     trim: [0.0524, 0.1047],
     trim_stab: true,
-    fin: crate::aero::Planform { root: DVec3::new(0.0, 0.06, 3.45 + DZ64), tip: DVec3::new(0.0, 1.03, 3.90 + DZ64), chord: [1.19, 0.53], incidence: [0.0, 0.0] },
-    rudder: crate::aero::Ctrl { span: [0.0, 0.97], chord: 0.40, travel: [0.4363, 0.4363] },
+    // The fin and the rudder that runs on below the tail cone to 0.45 m
+    // under the thrust line, as one surface: about 1.0 m², the rudder half
+    // of it (the manual's 0.63 m² rudder).
+    fin: crate::aero::Planform { root: DVec3::new(0.0, -0.45, 3.45 + DZ64), tip: DVec3::new(0.0, 1.00, 3.841 + DZ64), chord: [0.90, 0.46], incidence: [0.0, 0.0] },
+    rudder: crate::aero::Ctrl { span: [0.0, 1.45], chord: 0.50, travel: [0.4363, 0.4363] },
     fuse: crate::aero::Fuse { cm_a: 0.17, cn_b: -0.03, cl_b: 0.0, cy_b: -0.25, cl_a: 0.0 },
+    // The tailplane sits 3.7 m behind the wing's quarter chord, where a
+    // horseshoe vortex gives 87 % of the far wake's downwash.
+    downwash: 0.87,
     prop_hub: DVec3::new(0.0, -0.05, -2.46),
     swirl: 0.25,
     ..crate::aero::Rig::BASE

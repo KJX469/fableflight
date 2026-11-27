@@ -807,6 +807,11 @@ impl Plane {
         let flap_cl = self.spec.flap_cl * self.flaps;
         let a_old = self.trim;
         self.trim = self.alpha_level(v, rho, flap_cl);
+        // The power first: its slipstream over the tail moves the trim.
+        self.throttle = self.throttle_for(v, h, self.flaps, self.gear, descent);
+        self.charge = self.throttle;
+        self.settle_engine(v, h);
+        self.engine_state(v, rho);
         self.trim_strips(v, (rho, sound_speed(h)));
         // Pitch the nose to the new angle of attack and the flight path down the glide.
         let up = self.pos.normalize();
@@ -3979,7 +3984,8 @@ mod tests {
             let v = p.airspeed().length();
             let thr = (0.7 + (77.0 - v) * 0.08).clamp(0.0, 1.0);
             let roll_err = -p.right().dot(p.pos.normalize());
-            let c = Controls { pitch: hold(&p).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: thr, ..Default::default() };
+            // (dry power: a throttle held at the stop no longer lights the reheat)
+            let c = Controls { pitch: hold(&p).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: thr, reheat_set: Some(0.0), ..Default::default() };
             p.throttle = thr;
             assert!(p.step(dt, &c, &w).is_none());
         }
