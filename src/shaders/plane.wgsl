@@ -196,6 +196,8 @@ fn quad(a: vec2f, b: vec2f, c: vec2f, d: vec2f) -> array<vec2f, 5> { return arra
 fn window(p: vec3f) -> f32 {
   if (kind() == 1u) { return window747(p); }
   if (kind() == 10u) { return window_bonanza(p); }
+  // C-130: the flight deck's windows cut in the nose skin (c130::dims::window).
+  if (kind() == 11u) { return window_c130(p); }
   // (The Robin's canopy is a glass piece of its own, all of it clear.)
   if (kind() == 8u) { return -1.0; }
   // A fighter's canopy is blown glass: all of it is window.
@@ -219,6 +221,8 @@ fn window(p: vec3f) -> f32 {
 fn well(p: vec3f) -> f32 {
   if (kind() == 1u) { return well747(p); }
   if (kind() == 10u) { return well_bonanza(p); }
+  // C-130: the nose well and the main wells in the sponsons (c130::dims::well).
+  if (kind() == 11u) { return well_c130(p); }
   if (kind() == 8u) { return 1.0; }
   // (The G650's wells are cut into its exported skin.)
   if (kind() == 9u) { return 1.0; }
@@ -241,6 +245,9 @@ fn inlet_dr400(L: vec3f) -> f32 {
 fn cut_here(L: vec3f, pt: u32) -> bool {
   // Nothing else is cut out of the Robin's skin: it simply stops under the canopy.
   if (kind() == 8u) { return pt == P_COWL && inlet_dr400(L) < 0.0; }
+  // C-130: as the default below: the skin (fuselage and sponsons, pat FUSE) and
+  // the lining are cut by window_c130 and the skin by well_c130; its nacelles
+  // use pat NACELLE, which is not cut.
   // The 747's wing gear passes through the lower wing skin as well.
   let wing_well = kind() == 1u && pt == P_WING && well(L) < 0.0;
   return wing_well || ((pt == P_FUSE || pt == P_COWL || pt == P_LINING) && (window(L) < 0.0 || (pt != P_LINING && well(L) < 0.0)));
@@ -340,6 +347,8 @@ fn livery(L: vec3f, aa: f32, pt: u32) -> vec3f {
   if (kind() == 1u) { return livery747(L, aa, pt); }
   if (kind() == 8u) { return livery_dr400(L, aa, pt); }
   if (kind() == 10u) { return livery_bonanza(L, aa, pt); }
+  // C-130: its own scheme (livery_c130).
+  if (kind() == 11u) { return livery_c130(L, aa, pt); }
   // The Cessna: white, and the scheme picked for it (PT.a: main colour, w 1
   // if painted; PT.b: the pinstripe).
   var c = WHITE_PAINT;
@@ -480,6 +489,8 @@ fn weather(L: vec3f, N: vec3f, base: vec3f) -> vec4f {
   if (kind() == 1u) { return weather747(L, N, c, belly, n); }
   if (kind() == 8u) { return weather_dr400(L, N, c, belly); }
   if (kind() == 10u) { return weather_bonanza(L, N, c, belly); }
+  // C-130: exhaust soot under the wings, oil, hydraulic grime (weather_c130; not the Cessna's).
+  if (kind() == 11u) { return weather_c130(L, N, c, belly, n); }
   // Soot from the exhaust stack streaking back along the belly.
   let d = L.z + 2.1;
   if (d > 0.0 && L.y < -0.2) {
@@ -704,6 +715,8 @@ fn relief(pt: u32, uv: vec2f, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
   if (kind() == 8u && pt <= 6u) { return relief_dr400(pt, uv, L, px); }
   // The Bonanza: flush-riveted aluminium (its cabin keeps the shared patterns below).
   if (kind() == 10u && pt <= 6u) { return relief_bonanza(pt, uv, L, Nl, px); }
+  // C-130: its own panel lines and rivets (relief_c130; not the Cessna's).
+  if (kind() == 11u && (pt <= 6u || pt == P_NACELLE)) { return relief_c130(pt, L, Nl, px); }
   var h = 0.0;
   var dirt = 0.0;
   var rv = 0.0;
@@ -926,6 +939,45 @@ fn card_code(k: i32) -> vec2u {
   return num_code(ki * 3u);
 }
 
+// The C-130's gauge markings, copies of the flight model's figures (the test
+// `gauges_follow_the_flight_model` in aircraft/c130/deck.rs checks them):
+// C130G_VNE_KT is c130::flight::VNE_KT (the airspeed's red line); C130G_IDLE
+// the engine's ground idle (`Fan::idle`, the fraction of 100% RPM it idles
+// at); C130G_TRIM the elevator tab indicator's span of the pitch trim (an
+// angle of attack, rad): zero tab where the reference mass is trimmed at the
+// cruise speed at sea level, the auto-trim's lower clamp and `alpha_trim`.
+const C130G_VNE_KT = 320.0;
+const C130G_IDLE = 0.72;
+const C130G_TRIM = vec3f(0.0197, -0.05, 0.22);
+// The C-130H's four T56s, as the one simulated engine (`Engine::Fan`, its
+// propellers at 72% at ground idle) shows them (aircraft/c130/deck.rs,
+// "Instruments"): torque (in-lb), percent RPM, running (0/1, from the fuel
+// flow), and the power setting 0..1 above idle. RPM is the simulated speed
+// itself: 72% at ground idle (the real low-speed ground idle is 69-75.5%)
+// rising with the power lever to 100% (the real engine runs at 100% in
+// flight and changes blade angle instead: not simulated); torque carries the
+// power, to 19,600 in-lb at take-off.
+fn c130_eng() -> vec4f {
+  let n1 = O.params[2].x;
+  let run = step(1.0, O.params[2].z);
+  let x = sat((n1 - C130G_IDLE) / (1.0 - C130G_IDLE));
+  let rpm = 100.0 * n1;
+  let tq = select(-900.0 * sat(n1 / (0.5 * C130G_IDLE)), 700.0 + 18900.0 * x, run > 0.5);
+  return vec4f(tq, rpm, run, x);
+}
+// The C-130's radar altimeter dial, as on the HC-130H's (photograph "USCG
+// Lockheed HC-130H 1704 cockpit 3"): 0 at the top, linear to 500 ft at the
+// bottom, then logarithmic: 1,000 ft at about 8 o'clock, 2,500 ft at about
+// 10 o'clock (77 deg per e-fold, fitted to the photograph's 10/15/20/25).
+fn c130_ra_ang(ft: f32) -> f32 {
+  if (ft <= 500.0) { return rad(180.0) * ft / 500.0; }
+  return rad(180.0) + rad(77.0) * log(ft / 500.0);
+}
+fn c130_ra_ft(a: f32) -> f32 {
+  if (a <= rad(180.0)) { return 500.0 * a / rad(180.0); }
+  return 500.0 * exp((a - rad(180.0)) / rad(77.0));
+}
+
 // The face of an instrument: rgb albedo, a = how much of it is luminous paint.
 fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
   if (id == 31u || id == 32u) {
@@ -965,6 +1017,8 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
   // One more piece of lettering: point in its frame, centre, code, glyphs, height.
   var tp = uv; var tc = vec2f(9.0); var tcode = 0u; var tlen = 0u; var th = 0.1;
   var hub = true;
+  // (The C-130's dials print their name and units: strings from b747::deck::STRINGS, 0 none.)
+  var title = 0u; var tpos = vec2f(0.0, -0.32); var units = 0u; var upos = vec2f(0.0, 0.34); var tsz = 0.13;
   let green = vec3f(0.05, 0.4, 0.08);
   switch id {
     case 0u: { // airspeed
@@ -1000,6 +1054,17 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
         redline = -1e9;
         nd[0] = vec4f(dial(P0.x, vmin, vmax, a0, a1), 0.86, 0.035, 0.18);
       }
+      if (kind() == 11u) {
+        // The C-130's: 40 to 360 kt, the red line at the flight model's maximum
+        // speed (C130G_VNE_KT, c130::flight::VNE_KT). No coloured arcs: the H's
+        // military airspeed indicator has none (so no flap arc either).
+        a0 = rad(10.0); vmin = 40.0; vmax = 360.0; tn = 32.0; tper = 5.0;
+        ln = 7.0; lfirst = 50.0; lstep = 50.0; ldiv = 1.0; lh = 0.14;
+        arcs[0] = vec4f(0.0); arcs[1] = vec4f(0.0); arcs[2] = vec4f(0.0);
+        redline = C130G_VNE_KT;
+        nd[0] = vec4f(dial(P0.x, vmin, vmax, a0, a1), 0.86, 0.035, 0.18);
+        title = S_KNOTS; tpos = vec2f(0.0, 0.3); tsz = 0.11;
+      }
     }
     case 2u: { // altimeter: hundreds, thousands, ten thousands, pressure window
       a0 = 0.0; a1 = rad(360.0); vmax = 10.0; tn = 50.0; tper = 5.0;
@@ -1019,7 +1084,7 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
       a0 = rad(-260.0); a1 = rad(80.0); vmin = -2000.0; vmax = 2000.0; tn = 40.0; tper = 5.0;
       ln = 9.0; lfirst = -2000.0; lstep = 500.0; ldiv = 100.0;
       nd[0] = vec4f(dial(P0.z, vmin, vmax, a0, a1), 0.86, 0.035, 0.18); nn = 1;
-      if (fighter() || kind() == 6u) {
+      if (fighter() || kind() == 6u || kind() == 11u) {
         vmin = -6000.0; vmax = 6000.0; lfirst = -6000.0; lstep = 2000.0; ln = 7.0; ldiv = 1000.0; tn = 24.0; tper = 4.0;
         nd[0] = vec4f(dial(P0.z, vmin, vmax, a0, a1), 0.86, 0.035, 0.18);
       }
@@ -1290,6 +1355,157 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
       ink = max(ink, str_at(uv, vec2f(0.0,-0.65), S_OFF, 0.17, px, 0.0));
       hub = false;
     }
+    // ---- The C-130H's instruments (aircraft/c130/deck.rs `gauge_id`), all
+    // from the one simulated engine (`c130_eng`) and the jet readings
+    // main.rs `instruments` sends (row 3.x carries the pitch trim for it).
+    case 40u: { // torquemeter, in-lb x 1000 (T56-A-15: 19,600 the take-off limit)
+      a0 = rad(-150.0); a1 = rad(150.0); vmin = -5.0; vmax = 25.0; tn = 30.0; tper = 5.0;
+      ln = 7.0; lfirst = -5.0; lstep = 5.0; lr = 0.6; lh = 0.16;
+      arcs[0] = vec4f(0.0, 19.6, 0.88, 0.95); arc_col[0] = green;
+      redline = 19.6;
+      nd[0] = vec4f(dial(c130_eng().x / 1000.0, vmin, vmax, a0, a1), 0.86, 0.04, 0.18); nn = 1;
+      title = S_TORQUE;
+    }
+    case 41u: { // tachometer, percent RPM (100% = 13,820 rpm): the simulated speed, 72% at ground idle (c130_eng)
+      a0 = rad(-150.0); a1 = rad(150.0); vmax = 110.0; tn = 22.0; tper = 2.0;
+      ln = 6.0; lfirst = 0.0; lstep = 20.0; ldiv = 10.0; lr = 0.6; lh = 0.16;
+      arcs[0] = vec4f(98.0, 102.0, 0.86, 0.95); arc_col[0] = green;
+      redline = 103.5;
+      nd[0] = vec4f(dial(c130_eng().y, vmin, vmax, a0, a1), 0.86, 0.04, 0.18); nn = 1;
+      title = S_RPM;
+    }
+    case 42u: { // turbine inlet temperature, deg C x 100 (1,083 the take-off limit)
+      a0 = rad(-150.0); a1 = rad(150.0); vmax = 1200.0; tn = 24.0; tper = 2.0;
+      ln = 7.0; lfirst = 0.0; lstep = 200.0; ldiv = 100.0; lr = 0.6; lh = 0.16;
+      arcs[0] = vec4f(400.0, 1010.0, 0.88, 0.95); arc_col[0] = green;
+      redline = 1083.0;
+      nd[0] = vec4f(dial(P2.y, vmin, vmax, a0, a1), 0.86, 0.04, 0.18); nn = 1;
+      title = S_TIT;
+    }
+    case 43u: { // fuel flow, lb/h x 1000
+      a0 = rad(-150.0); a1 = rad(150.0); vmax = 4.0; tn = 20.0; tper = 5.0;
+      ln = 5.0; lfirst = 0.0; lstep = 1.0; lr = 0.6; lh = 0.17;
+      nd[0] = vec4f(dial(P2.z * 2.20462 / 1000.0, vmin, vmax, a0, a1), 0.86, 0.04, 0.18); nn = 1;
+      title = S_FUEL_FLOW;
+    }
+    case 44u, 45u, 46u, 47u, 48u: { // the oil: temperature, pressure, gearbox pressure, quantity; the oil cooler flap
+      a0 = rad(-135.0); a1 = rad(135.0); tn = 20.0; tper = 5.0; lr = 0.6; lh = 0.17;
+      let e = c130_eng();
+      let turn = sat(P2.x / C130G_IDLE);
+      var v = 0.0;
+      if (id == 44u) { vmin = -50.0; vmax = 150.0; tn = 20.0; tper = 5.0; ln = 5.0; lfirst = -50.0; lstep = 50.0; arcs[0] = vec4f(60.0, 85.0, 0.88, 0.95); redline = 100.0; v = mix(P3.w, 75.0, e.z); title = S_OIL; units = S_TEMP; upos = vec2f(0.0, -0.5); }
+      if (id == 45u) { vmax = 100.0; ln = 6.0; lstep = 20.0; arcs[0] = vec4f(50.0, 60.0, 0.88, 0.95); redline = 75.0; v = 55.0 * turn * turn; title = S_OIL_PRESS; }
+      if (id == 46u) { vmax = 300.0; tn = 30.0; ln = 4.0; lstep = 100.0; ldiv = 100.0; arcs[0] = vec4f(150.0, 250.0, 0.88, 0.95); v = 210.0 * turn * turn; title = S_GEARBOX_OIL; }
+      if (id == 47u) { vmax = 12.0; tn = 12.0; tper = 2.0; ln = 7.0; lstep = 2.0; arcs[0] = vec4f(0.0, 4.0, 0.88, 0.95); arc_col[0] = vec3f(0.6, 0.02, 0.01); v = 9.6; title = S_OIL_QTY; }
+      if (id == 48u) { vmax = 100.0; ln = 6.0; lstep = 20.0; ldiv = 10.0; v = e.z * (15.0 + 55.0 * e.w); title = S_COOLER_FLAP; }
+      if (id != 47u) { arc_col[0] = green; }
+      nd[0] = vec4f(dial(v, vmin, vmax, a0, a1), 0.86, 0.04, 0.18); nn = 1;
+    }
+    case 49u: { // radar altimeter, ft x 100, on its non-linear dial (c130_ra_ang); the needle stops at 2,500 ft
+      nd[0] = vec4f(c130_ra_ang(clamp(P3.z, 0.0, 2500.0)), 0.86, 0.035, 0.18); nn = 1;
+      // Graduations every 20 ft to 500, every 100 ft on to 2,500; long every 100 and every 500.
+      let ta = unwrap(ang_of(q), -0.05);
+      let hv = c130_ra_ft(ta);
+      var tk = clamp(round(hv / 100.0) * 100.0, 500.0, 2500.0);
+      var major = abs(tk - round(tk / 500.0) * 500.0) < 0.5;
+      if (hv <= 500.0) { tk = clamp(round(hv / 20.0) * 20.0, 0.0, 500.0); major = abs(tk - round(tk / 100.0) * 100.0) < 0.5; }
+      let tlen_ = select(0.085, 0.17, major);
+      let tw = select(0.011, 0.022, major);
+      let dd = abs(wrapa(ta - c130_ra_ang(tk))) * r;
+      ink = max(ink, smoothstep(0.95 - tlen_ - px, 0.95 - tlen_ + px, r) * smoothstep(0.95 + px, 0.95 - px, r) * (1.0 - smoothstep(tw - px, tw + px, dd)));
+      // The numbers: 1 to 5 down the right, 10, 15, 20, 25 up the left.
+      var lv = clamp(round(hv / 500.0), 2.0, 5.0) * 500.0;
+      if (hv <= 750.0) { lv = clamp(round(hv / 100.0), 1.0, 5.0) * 100.0; }
+      let la = c130_ra_ang(lv);
+      let nc = num_code(u32(round(lv / 100.0)));
+      tp = q; tc = vec2f(sin(la), cos(la)) * 0.62; tcode = nc.x; tlen = nc.y; th = 0.14;
+      title = S_RADIO_ALT; units = S_FT_X_100;
+    }
+    case 50u, 51u, 52u, 53u, 54u: { // hydraulic pressures, psi x 1000: utility, booster, auxiliary, brakes, rudder boost
+      a0 = rad(-135.0); a1 = rad(135.0); vmax = 4.0; tn = 20.0; tper = 5.0;
+      ln = 5.0; lfirst = 0.0; lstep = 1.0; lr = 0.6; lh = 0.18;
+      arcs[0] = vec4f(2.8, 3.2, 0.88, 0.95); arc_col[0] = green;
+      // The engine-driven pumps follow the engines; the auxiliary pump (electric) is
+      // not simulated and the brake accumulator holds its charge.
+      var v = 3.0 * smoothstep(0.2, 0.6, P2.x / C130G_IDLE);
+      if (id == 52u) { v = 0.0; }
+      if (id == 53u) { v = 2.9; }
+      nd[0] = vec4f(dial(v, vmin, vmax, a0, a1), 0.86, 0.045, 0.18); nn = 1;
+      var names = array<u32, 5>(S_UTILITY, S_BOOSTER, S_AUXILIARY, S_BRAKES, S_RUDDER_BOOST);
+      title = names[id - 50u]; units = S_PSI_X_1000;
+    }
+    case 55u: { // flap position, percent of full travel (36 deg, c130::dims::FLAP_MAX_DEG)
+      a0 = rad(-135.0); a1 = rad(135.0); vmax = 100.0; tn = 20.0; tper = 2.0;
+      ln = 6.0; lfirst = 0.0; lstep = 20.0; lr = 0.6; lh = 0.16;
+      nd[0] = vec4f(dial(P4.w / 36.0 * 100.0, vmin, vmax, a0, a1), 0.86, 0.045, 0.18); nn = 1;
+      title = S_FLAPS; units = S_PERCENT;
+    }
+    case 56u, 57u: { // trim tab positions: elevator (from the pitch trim), rudder (no rudder trim simulated: 0)
+      a0 = rad(-120.0); a1 = rad(120.0); vmin = -25.0; vmax = 25.0; tn = 10.0; tper = 5.0;
+      ln = 3.0; lfirst = -25.0; lstep = 25.0; lr = 0.58; lh = 0.18;
+      // The pitch trim (an angle of attack) across the dial's span: zero tab
+      // where the aircraft is trimmed for cruise (C130G_TRIM.x), the stops
+      // (25) at the trim's own limits either way. (The real tab's travel in
+      // degrees was not found: the end marks are the trim's limits.)
+      let t = P3.x - C130G_TRIM.x;
+      let v = select(0.0, 25.0 * select(t / (C130G_TRIM.x - C130G_TRIM.y), t / (C130G_TRIM.z - C130G_TRIM.x), t > 0.0), id == 56u);
+      nd[0] = vec4f(dial(v, vmin, vmax, a0, a1), 0.84, 0.05, 0.15); nn = 1;
+      title = select(S_RUDDER_TAB, S_ELEV_TAB, id == 56u); tpos = vec2f(0.0, -0.45); units = select(S_L_R, S_NOSE_UP, id == 56u); upos = vec2f(0.0, 0.35);
+    }
+    case 58u, 59u: { // fuel quantity, lb x 1000: a tank's share (the fuel is pooled, not tank by tank) and the total
+      a0 = rad(-135.0); a1 = rad(135.0); lr = 0.6; lh = 0.16;
+      let lb = P2.w * 2.20462 / 1000.0;
+      var v = lb / 8.0;
+      vmax = 10.0; tn = 20.0; tper = 2.0; ln = 6.0; lstep = 2.0;
+      if (id == 59u) { v = lb; vmax = 70.0; tn = 14.0; ln = 8.0; lstep = 10.0; }
+      nd[0] = vec4f(dial(v, vmin, vmax, a0, a1), 0.86, 0.04, 0.18); nn = 1;
+      title = S_FUEL_QTY; units = S_LBS_X_1000;
+    }
+    case 60u: { // a landing gear position indicator: the wheel down and locked, UP, striped in transit
+      let g = P4.z;
+      bg = vec3f(0.015);
+      if (g > 0.99) {
+        ink = (1.0 - smoothstep(0.0, px, abs(r - 0.55) - 0.07)) + (1.0 - smoothstep(0.0, px, r - 0.10));
+      } else if (g < 0.01) {
+        ink = str_at(uv, vec2f(0.0), S_UP, 0.75, px, 0.0);
+      } else {
+        ink = step(0.5, fract((uv.x + uv.y) * 2.2));
+      }
+      hub = false;
+    }
+    case 61u: { // horizontal situation indicator: the heading card, the course arrow and its deviation bar (NAV 1)
+      let hdg = rad(P0.w);
+      a0 = 0.0; a1 = rad(360.0); tn = 72.0; tper = 2.0;
+      q = rot2(uv, -hdg);
+      if (r < 0.72) { tn = 0.0; }
+      let k = round((ang_of(uv) + hdg) / rad(30.0));
+      let a = k * rad(30.0) - hdg;
+      tp = rot2(uv - vec2f(sin(a), cos(a)) * 0.6, a);
+      tc = vec2f(0.0);
+      let cc = card_code(i32(k));
+      tcode = cc.x; tlen = cc.y; th = 0.14;
+      if (r < 0.5) { tlen = 0u; }
+      let nv = G.nav;
+      let live = (u32(nv.w + 0.5) & 1u) != 0u;
+      let ca = rot2(uv, rad(nv.z) - hdg);
+      let shaft = step(abs(ca.x), 0.018) * step(0.18, abs(ca.y)) * step(abs(ca.y), 0.55);
+      let head = step(abs(ca.x), (0.62 - ca.y) * 0.45) * step(0.5, ca.y) * step(ca.y, 0.62);
+      let dev = select(0.0, clamp(nv.x, -1.0, 1.0) * 0.3, live);
+      let bar = step(abs(ca.x - dev), 0.018) * step(abs(ca.y), 0.17);
+      let dots = (1.0 - smoothstep(0.02, 0.02 + px, length(vec2f(abs(ca.x) - round(abs(ca.x) / 0.15) * 0.15, ca.y)))) * step(0.1, abs(ca.x)) * step(abs(ca.x), 0.32);
+      ink = max(ink, dots);
+      let lub = step(abs(uv.x), (0.98 - uv.y) * 0.4) * step(0.84, uv.y);
+      let plane = max((1.0 - smoothstep(0.0, px, abs(uv.x) - 0.02)) * step(abs(uv.y + 0.05), 0.2), (1.0 - smoothstep(0.0, px, abs(uv.y - 0.03) - 0.02)) * step(abs(uv.x), 0.16));
+      let arrow = max(max(shaft, head), bar);
+      col = vec3f(0.85, 0.15, 0.85) * arrow + vec3f(0.75, 0.35, 0.02) * lub + vec3f(0.75) * plane;
+      cov = max(max(arrow, lub), plane);
+      hub = false;
+    }
+    case 62u: { // a dial whose reading is not simulated (cabin pressure, the accelerometer...): needle at rest
+      a0 = rad(-135.0); a1 = rad(135.0); vmax = 10.0; tn = 20.0; tper = 5.0;
+      ln = 6.0; lfirst = 0.0; lstep = 2.0; lr = 0.6; lh = 0.17;
+      nd[0] = vec4f(dial(0.0, vmin, vmax, a0, a1), 0.86, 0.04, 0.18); nn = 1;
+    }
     default: {}
   }
   // The dial, drawn once whatever the instrument.
@@ -1325,6 +1541,8 @@ fn gauge(id: u32, uv: vec2f, px: f32) -> vec4f {
     }
   }
   if (tlen > 0u) { ink = max(ink, label_code(tp, tc, tcode, tlen, th, px)); }
+  if (title > 0u) { ink = max(ink, str_at(uv, tpos, title, tsz, px, 0.0)); }
+  if (units > 0u) { ink = max(ink, str_at(uv, upos, units, tsz * 0.72, px, 0.0)); }
   if (hub) {
     let hb = 1.0 - smoothstep(0.075 - px, 0.075 + px, r);
     ndl = ndl * (1.0 - hb);
@@ -1755,6 +1973,8 @@ fn surface(in: VOut) -> Shaded {
     case 0u, 1u, 15u: {
       if (id == 1u) { albedo = livery(L, px * 1.2, pt); }
       rough = select(0.13 + 0.08 * ns.g, 0.5 + 0.15 * ns.g, id == 15u);
+      // (The C-130's paint: flat military finishes, or a civil gloss; sheen_c130.)
+      if (id == 1u && kind() == 11u) { rough = sheen_c130(L, pt, px * 1.2) + 0.08 * ns.g; }
       if (id == 1u && bare_c172()) {
         // Bare aluminium, as `case 2u`; the black registration stays paint.
         metal = smoothstep(0.08, 0.3, luma(albedo));
@@ -2086,6 +2306,13 @@ fn surface(in: VOut) -> Shaded {
         }
         break;
       }
+      if (kind() == 11u) {
+        // C-130: a T56's tailpipe, heat-tinted stainless steel streaked with soot.
+        rough = 0.45;
+        albedo = mix(vec3f(0.34, 0.31, 0.28), vec3f(0.09, 0.085, 0.08), sat(fine.r * 0.6 + 0.25)) * (0.75 + 0.4 * ns.g);
+        albedo = mix(albedo, vec3f(0.30, 0.18, 0.10), smoothstep(0.55, 0.8, ns.b) * 0.4);
+        break;
+      }
       if (kind() == 1u) {
         // A turbofan's nozzle and plug: heat-blued steel, darker toward the outlet.
         rough = 0.4;
@@ -2246,6 +2473,8 @@ fn surface(in: VOut) -> Shaded {
   if (kind() == 3u) { inside = step(abs(L.x), F4_TUB.x) * step(F4_TUB.z, L.z) * step(L.z, F4_TUB.w) * step(F4_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 4u) { inside = step(abs(L.x), F22_TUB.x) * step(F22_TUB.z, L.z) * step(L.z, F22_TUB.w) * step(F22_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 6u) { inside = step(abs(L.x), CONCORDE_TUB.x) * step(CONCORDE_TUB.z, L.z) * step(L.z, CONCORDE_TUB.w) * step(CONCORDE_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
+  // C-130: the flight deck envelope (c130::dims DECK_*: floor, forward limit, aft bulkhead).
+  if (kind() == 11u) { inside = step(abs(L.x), C130_DECK.x) * step(C130_DECK.z, L.z) * step(L.z, C130_DECK.w) * step(C130_DECK.y, L.y) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE); }
   if (kind() == 9u) { inside = step(abs(L.x), G650_TUB.x) * step(G650_TUB.z, L.z) * step(L.z, G650_TUB.w) * step(G650_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 8u) { inside = step(abs(L.x), 0.59) * step(-0.69, L.z) * step(L.z, 1.12) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL); }
   if (kind() == 10u) { inside = step(abs(L.x), 0.58) * step(-1.11, L.z) * step(L.z, 2.69) * step(-0.5, L.y) * step(L.y, 0.78) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL && pt != P_WING); }
@@ -2553,6 +2782,7 @@ fn tex_glass(in: VOut) -> vec4f {
   let l = light_at(in.P);
   let sh = shadow_at(in.P, N);
   let Ls = G.sun_dir.xyz;
+  if (id == M_PROPDISC && kind() == 11u) { return propdisc_c130(in, l.sun * max(dot(N, Ls), 0.0) * sh / PI + l.amb * 0.8, px); }
   if (id == M_PROPDISC) {
     // The blur of the spinning blades: their share of each ring, a slow
     // shutter beat, painted tips showing as a ring.
@@ -2591,6 +2821,8 @@ fn tex_glass(in: VOut) -> vec4f {
   if (kind() == 3u) { in_cabin = from_inside && abs(eye_l.x) < F4_CABIN[0] && eye_l.y > F4_CABIN[1] && eye_l.y < F4_CABIN[2] && eye_l.z > F4_CABIN[3] && eye_l.z < F4_CABIN[4]; }
   if (kind() == 4u) { in_cabin = from_inside && abs(eye_l.x) < F22_CABIN[0] && eye_l.y > F22_CABIN[1] && eye_l.y < F22_CABIN[2] && eye_l.z > F22_CABIN[3] && eye_l.z < F22_CABIN[4]; }
   if (kind() == 6u) { in_cabin = from_inside && abs(eye_l.x) < CONCORDE_CABIN[0] && eye_l.y > CONCORDE_CABIN[1] && eye_l.y < CONCORDE_CABIN[2] && eye_l.z > CONCORDE_CABIN[3] && eye_l.z < CONCORDE_CABIN[4]; }
+  // C-130: the eye inside the flight deck envelope.
+  if (kind() == 11u) { in_cabin = from_inside && abs(eye_l.x) < C130_DECK.x && eye_l.y > C130_DECK.y && eye_l.y < C130_DECK_TOP && eye_l.z > C130_DECK.z && eye_l.z < C130_DECK.w; }
   if (kind() == 9u) { in_cabin = from_inside && abs(eye_l.x) < G650_CABIN[0] && eye_l.y > G650_CABIN[1] && eye_l.y < G650_CABIN[2] && eye_l.z > G650_CABIN[3] && eye_l.z < G650_CABIN[4]; }
   if (kind() == 8u) { in_cabin = from_inside && abs(eye_l.x) < 0.59 && eye_l.y > -0.52 && eye_l.y < 0.62 && eye_l.z > -0.69 && eye_l.z < 1.12; }
   if (kind() == 10u) { in_cabin = from_inside && abs(eye_l.x) < 0.58 && eye_l.y > -0.46 && eye_l.y < 0.78 && eye_l.z > -1.1 && eye_l.z < 2.7; }
@@ -2737,11 +2969,11 @@ fn tex_glass(in: VOut) -> vec4f {
     // (The Raptor's coated one: amber.)
     if (kind() == 4u) { tint = vec3f(0.96, 0.91, 0.78); }
     // (Concorde's is laminated and heated like the 747's.)
-    if (kind() == 6u || kind() == 9u) { tint = vec3f(0.93, 0.965, 0.955); }
+    if (kind() == 6u || kind() == 9u || kind() == 11u) { tint = vec3f(0.93, 0.965, 0.955); }
     let edge = 1.0 - smoothstep(0.0, 0.08, -d);
     let curve = select(0.0, smoothstep(0.12, 0.45, abs(in.Nl.x)), wind);
     // (The 747's laminated glass is far flatter than formed acrylic: a faint waviness only.)
-    let bend = select(glass_bend(g2, edge, curve), glass_bend(g2 * 0.6, 0.0, 0.0) * 0.18, kind() == 1u || kind() == 6u || kind() == 9u);
+    let bend = select(glass_bend(g2, edge, curve), glass_bend(g2 * 0.6, 0.0, 0.0) * 0.18, kind() == 1u || kind() == 6u || kind() == 9u || kind() == 11u);
     let dw = (O.model * vec4f(tb * bend.x + bb * bend.y, 0.0)).xyz;
     var seen = textureLoad(t_scene, vec2i(in.clip.xy), 0).rgb;
     let cp = G.view_proj * vec4f(V + dw, 0.0);
@@ -2783,6 +3015,7 @@ fn tex_glass(in: VOut) -> vec4f {
       // over curved glass bends the streams rather than shearing them apart.
       var lr = L - vec3f(0.0, 0.4, -1.3);
       if (kind() == 1u) { lr = L - vec3f(0.0, 4.0, -26.5); }
+      if (kind() == 11u) { lr = L - vec3f(0.0, 0.55, -9.3); } // C-130
       if (kind() == 2u) { lr = L - vec3f(0.0, 1.0, -4.6); }
       if (side_w < 1.0) { wa = rain_water(vec2f(dot(lr, tw), dot(lr, bw)), select(vec2f(0.0, 1.0), normalize(fw), length(fw) > 0.05), gt, edge_r, px); }
       if (side_w > 0.0) { ws = rain_water(vec2f(dot(lr, ts), dot(lr, bs)), select(vec2f(1.0, 0.0), normalize(fs), length(fs) > 0.05), gt, edge_r, px); }
@@ -2893,6 +3126,649 @@ fn well747(p: vec3f) -> f32 {
   d = min(d, sd_box2(q, vec4f(3.0, 5.75, 1.6, 2.24)));
   d = min(d, seg_d(q, vec2f(0.85, 5.75), vec2f(-0.30, 2.75)) - 0.36);
   return d + 0.005;
+}
+// ---------------------------------------------------------------- C-130 (kind 10)
+// C-130: its frame (c130::dims ZN, YG: the drawing's nose and ground), the
+// flight deck windows (dims::WINDOWS: view 0 front (|x|, h) gated by d,
+// 1 side (d, h) gated by |x|, 2 top (d, |x|) gated by h; WIN_R) and the
+// flight deck envelope (dims DECK_*: |x|, floor y, forward z, aft z; ceiling
+// y). Keep in step with c130/dims.rs (its test `shader_matches` checks).
+const C130_ZN = 12.1;
+const C130_YG = 2.7;
+const C130_WIN_R = 0.035;
+const C130_WINP = array<vec4f, 18>(
+  vec4f(0.07, 3.4, 0.68, 3.4), vec4f(0.66, 4.0, 0.07, 4.04),
+  vec4f(0.76, 3.4, 1.16, 3.4), vec4f(1.13, 3.8, 0.76, 3.96),
+  vec4f(0.66, 3.07, 0.98, 3.07), vec4f(0.98, 3.31, 0.7, 3.31),
+  vec4f(2.88, 4.02, 3.24, 4.02), vec4f(3.24, 4.25, 2.92, 4.25),
+  vec4f(3.32, 4.02, 3.68, 4.02), vec4f(3.68, 4.25, 3.32, 4.25),
+  vec4f(2.72, 3.47, 3.12, 3.47), vec4f(3.12, 3.88, 2.76, 3.88),
+  vec4f(3.2, 3.47, 3.68, 3.47), vec4f(3.68, 3.88, 3.2, 3.88),
+  vec4f(2.14, 2.5, 2.42, 2.48), vec4f(2.42, 3.06, 2.14, 3.08),
+  vec4f(2.5, 2.48, 2.8, 2.46), vec4f(2.8, 3.04, 2.5, 3.06)
+);
+const C130_WINK = array<vec4f, 9>(
+  vec4f(0.0, 1.55, 2.7, 0.0),
+  vec4f(0.0, 1.55, 2.7, 0.0),
+  vec4f(0.0, 1.55, 2.7, 0.0),
+  vec4f(1.0, 0.7, 0.0, 0.0),
+  vec4f(1.0, 0.7, 0.0, 0.0),
+  vec4f(1.0, 1.0, 0.0, 0.0),
+  vec4f(1.0, 1.0, 0.0, 0.0),
+  vec4f(1.0, 0.5, 0.0, 0.0),
+  vec4f(1.0, 0.5, 0.0, 0.0)
+);
+const C130_DECK = vec4f(1.95, -0.2, -10.36, -5.15);
+const C130_DECK_TOP = 1.9;
+// C-130: the flight deck windows; matches c130::dims::window.
+fn window_c130(p: vec3f) -> f32 {
+  let d = p.z + C130_ZN;
+  let h = p.y + C130_YG;
+  let ax = abs(p.x);
+  if (d < 1.5 || d > 4.0 || h < 1.3) { return 1.0; }
+  var best = 1.0;
+  for (var i = 0; i < 9; i++) {
+    let k = C130_WINK[i];
+    var q = vec2f(d, ax);
+    var on = h > k.y;
+    if (k.x < 0.5) { q = vec2f(ax, h); on = d >= k.y && d <= k.z; }
+    else if (k.x < 1.5) { q = vec2f(d, h); on = ax > k.y; }
+    if (on) {
+      let a = C130_WINP[2 * i];
+      let b = C130_WINP[2 * i + 1];
+      best = min(best, sd_poly(q, quad(a.xy, a.zw, b.xy, b.zw), 4) - C130_WIN_R);
+    }
+  }
+  return best;
+}
+// C-130: the gear wells' openings (nose; main, in the sponsons); matches c130::dims::well.
+fn well_c130(p: vec3f) -> f32 {
+  var d = 1.0;
+  if (p.y < -1.4) { d = min(d, sd_box2(vec2f(p.z, p.x), vec4f(-10.12, -8.02, -0.45, 0.45))); }
+  if (p.y < -1.6) { d = min(d, sd_box2(vec2f(p.z, abs(p.x)), vec4f(-0.415, 2.735, 1.66, 2.52))); }
+  return d + 0.005;
+}
+// ---------------------------------------------------------------- C-130 paint, surface detail, weather
+// The schemes (c130::paint::LIVERIES, style in PT.a.w; see there for what
+// is real and what is made up): 0 the USAF's overall AMC grey with
+// low-visibility markings, 1 European One camouflage, 2 Orivante Cargo
+// (fictional), 3 a high-visibility rescue scheme (fictional). Everything
+// here is keyed on the body-frame position L, not the mesh's uvs, through
+// these copies of c130::dims (each named after the Rust constant; checked by
+// c130::paint's test `shader_mirrors_dims`). d: distance back from the
+// nose, h: height above the ground (as in dims.rs).
+const C130P_D = vec4f(1.75, 6.95, 19.45, 29.79);        // dims D_RADOME, D_DECK, D_RAMP, D_TAIL
+const C130P_RADOME = vec3f(2.45, 1.4, 3.05);             // dims RADOME_JOINT
+const C130P_FUSE_H = vec3f(4.68, 2.42, 0.55);            // dims FUSE_TOP_H, FUSE_MID_H, FUSE_BOT_H
+const C130P_FUSE_HALF_W = 2.16;                          // dims FUSE_HALF_W
+const C130P_WING = vec4f(10.8808, 4.8768, 2.54, 20.205); // dims LE0_D, CR, CT, SPAN
+const C130P_TAPER_X = 5.588;
+const C130P_WING_ROOT = vec3f(2.16, 4.46, 0.043661);    // dims WING_ROOT_X, WING_ROOT_H, DIHEDRAL
+const C130P_FLAPS = vec4f(2.25, 13.55, 0.7, 0.75);      // dims FLAP_IB[0], FLAP_OB[1], XF_FLAP, XF_AIL
+const C130P_AILERON = vec2f(13.65, 19.7);               // dims AILERON
+const C130P_ENG0 = vec3f(4.98, 3.8, 8.47);              // dims ENG[0]: span station, height, propeller plane d
+const C130P_ENG1 = vec3f(10.3, 4.03, 8.65);             // dims ENG[1]
+const C130P_NAC = vec2f(0.66, 0.95);                    // dims NAC_R, SPINNER_L
+const C130P_EXHAUST = vec4f(0.5, 0.42, 12.15, 12.3);    // dims EXHAUST_OFF (out, up), EXHAUST_D (inboard, outboard)
+const C130P_EXT_TANK = vec4f(7.64, 3.15, 9.4, 7.6);      // dims EXT_TANK: span station, height, nose d, length
+const C130P_STAB = vec4f(24.65688, 27.3253, 29.3, 29.05);    // dims STAB_LE (root, tip), STAB_TE (root, tip)
+const C130P_STAB_SH = vec2f(8.025, 4.0);                // dims STAB_SPAN, STAB_H
+const C130P_FIN = vec4f(22.2, 26.7704, 28.55, 28.65);      // dims FIN_LE (root, tip), FIN_TE (root, tip)
+const C130P_FIN_H = vec3f(4.1, 7.56, 0.66);             // dims FIN_ROOT_H, FIN_H, RUDDER_HINGE
+const C130P_CREW_DOOR = vec4f(5.3, 6.2, 0.95, 2.7);     // dims CREW_DOOR (d0, d1, h0, h1), left side
+const C130P_PARA_DOOR = vec4f(17.75, 18.75, 1.1, 3.05); // dims PARA_DOOR, both sides
+const C130P_RAMP = vec4f(19.45, 22.5, 26.0, 1.6);       // dims D_RAMP, RAMP_TIP_D, AFT_DOOR_END_D, RAMP_HALF_W
+const C130P_SPON = vec4f(9.9, 17.2, 2.66, 2.7);         // dims SPON_D, SPON_XO, SPON_TOP_H
+const C130P_GEAR = vec4f(2.17, 0.24, 0.508, 0.33);      // dims TRACK / 2, NOSE_WHEEL_X, MAIN_TYRE_W, NOSE_TYRE_W
+// The skin's circumferential butt joints (d) [est, from photographs and the
+// 20 in frame pitch], except the radome's (D_RADOME: the first, which
+// follows the joint's curve, c130_joint), FS 245 (D_DECK) and the ramp
+// hinge, FS 737 (D_RAMP); the overhead escape hatches (d) [est]; the
+// fuselage's lap joints (angle round the section from the crown) [est].
+const C130P_BUTTS = array<f32, 11>(1.75, 4.2, 6.95, 10.0, 13.05, 16.1, 19.45, 21.6, 24.0, 26.4, 28.5);
+const C130P_HATCH = vec3f(5.6, 9.3, 17.9);
+const C130P_LAPS = vec4f(0.42, 1.15, 1.95, 2.62);
+// The paints when no scheme was sent (another type's uniform): AMC grey.
+const C130_AMC = vec3f(0.138, 0.15, 0.159);
+const C130_GUNSHIP = vec3f(0.076, 0.089, 0.093);
+const C130_INK = vec3f(0.014);
+
+// Chord, leading edge (d) and the chord line's height (h) at span station x
+// and chord fraction f (dims chord, le_d, wing_sect: 2°30' of dihedral
+// outboard of the root, 3° of incidence washing out to the tip).
+fn c130_outer(x: f32) -> f32 { return sat((abs(x) - C130P_TAPER_X) / (C130P_WING.w - C130P_TAPER_X)); }
+fn c130_chord(x: f32) -> f32 { return C130P_WING.y - (C130P_WING.y - C130P_WING.z) * c130_outer(x); }
+fn c130_le(x: f32) -> f32 { return C130P_WING.x + 0.25 * (C130P_WING.y - c130_chord(x)); }
+fn c130_wing_h(x: f32, f: f32) -> f32 {
+  let ax = abs(x);
+  let ym = C130P_WING_ROOT.y + C130P_WING_ROOT.z * max(ax - C130P_TAPER_X, 0.0);
+  let inc = radians(3.0 * (1.0 - c130_outer(ax)));
+  return ym + sin(inc) * c130_chord(ax) * (0.5 - f);
+}
+// Height of the fuselage section's widest point along it (dims FUSE's mid
+// column: the nose's, the constant section's, the tail cone sweeping up).
+fn c130_mid_h(d: f32) -> f32 { return 2.21 + 0.21 * smoothstep(0.0, 6.5, d) + max(d - C130P_D.z, 0.0) * 0.134; }
+// Which part a point is on: 0 the fuselage (with the sponsons, radome, ramp
+// and doors), 1 a wing (flaps, ailerons, pylons), 2 a nacelle or external
+// tank, 3 the fin and rudder, 4 the tailplane and elevators.
+fn c130_part(L: vec3f, pt: u32) -> u32 {
+  let d = L.z + C130_ZN;
+  let h = L.y + C130_YG;
+  let ax = abs(L.x);
+  // (A cowling pattern out on the wing is a nacelle's too.)
+  if (pt == P_NACELLE || (pt == P_COWL && ax > C130P_FUSE_HALF_W + 0.5)) { return 2u; }
+  if (pt == P_WING) { return 1u; }
+  if (pt == P_TAIL || pt == P_CTRL) {
+    if (d > C130P_FIN.x - 0.5 && h > C130P_FIN_H.x - 0.3) { return select(4u, 3u, ax < 0.6 && h > C130P_FIN_H.x + 0.02); }
+    if (pt == P_CTRL && d < C130P_RAMP.x - 0.5) { return 1u; }
+    if (pt == P_TAIL) { return 4u; }
+    return 0u;
+  }
+  // (Unpatterned paint: the tanks' pylons under the wing; the radome.)
+  if (ax > C130P_FUSE_HALF_W + 0.8 && h > 2.8) { return 1u; }
+  return 0u;
+}
+// The upper surface of a wing (above its chord line).
+fn c130_upper(L: vec3f) -> bool {
+  let ax = abs(L.x);
+  let f = (L.z + C130_ZN - c130_le(ax)) / c130_chord(ax);
+  return L.y + C130_YG > c130_wing_h(ax, f);
+}
+// A five-pointed star of point radius r, point up (iq's sdStar5).
+fn c130_star(p0: vec2f, r: f32) -> f32 {
+  let k1 = vec2f(0.809016994, -0.587785252);
+  let k2 = vec2f(-k1.x, k1.y);
+  var p = vec2f(abs(p0.x), p0.y);
+  p -= 2.0 * max(dot(k1, p), 0.0) * k1;
+  p -= 2.0 * max(dot(k2, p), 0.0) * k2;
+  p.x = abs(p.x);
+  p.y -= r;
+  let ba = 0.382 * vec2f(-k1.y, k1.x) - vec2f(0.0, 1.0);
+  let t = clamp(dot(p, ba) / dot(ba, ba), 0.0, r);
+  return length(p - ba * t) * sign(p.y * ba.x - p.x * ba.y);
+}
+// The USAF star and bar, its disc of radius R centred on q = 0, the star's
+// point to +q.y; the bars a disc's radius either side, half as tall, their
+// tops level with the star's upper arms. (x: disc and bars, y: the star.)
+fn c130_insignia(q: vec2f, R: f32) -> vec2f {
+  let bars = sd_box2(q, vec4f(-2.0 * R, 2.0 * R, -0.191 * R, 0.309 * R));
+  return vec2f(min(length(q) - R, bars), c130_star(q, R));
+}
+// Where the schemes put it: on the aft fuselage behind the paratroop doors,
+// and on the upper left and lower right wing outboard of the engines (seen
+// from above / below, the star's point forward). Signed distances, or 1e3.
+fn c130_insignia_at(L: vec3f, part: u32) -> vec2f {
+  let d = L.z + C130_ZN;
+  let h = L.y + C130_YG;
+  let ax = abs(L.x);
+  if (part == 0u && ax > 1.0 && abs(d - 20.7) < 1.3 && abs(h - 2.9) < 0.7) { return c130_insignia(vec2f(d - 20.7, h - 2.9), 0.5); }
+  if (part == 1u && abs(ax - 15.6) < 1.7) {
+    let dc = c130_le(15.6) + 0.45 * c130_chord(15.6);
+    if (c130_upper(L) == (L.x < 0.0)) { return c130_insignia(vec2f(ax - 15.6, dc - d), 0.7); }
+  }
+  return vec2f(1e3);
+}
+// The radome (forward of its joint), the flat black anti-glare panel on the
+// nose ahead of the windshield, and a line on the fuselage's sides in the
+// inboard propellers' plane: coverage.
+// How far aft of the radome's joint (d) a point at height h is (dims
+// radome_joint_d: upright, then curving forward over the top).
+fn c130_joint(d: f32, h: f32) -> f32 {
+  let u = sat((h - C130P_RADOME.x) / (C130P_RADOME.z - C130P_RADOME.x));
+  return d - (C130P_D.x - (C130P_D.x - C130P_RADOME.y) * u * u);
+}
+fn c130_radome(d: f32, h: f32, aa: f32) -> f32 { return smoothstep(aa, -aa, c130_joint(d, h)); }
+// (From the radome's joint up to the windshield's top frame, out to its
+// corner panes: dims WINDOWS[0..2], about 4.04 m high and 1.2 m out.)
+fn c130_antiglare(d: f32, h: f32, ax: f32, aa: f32) -> f32 {
+  let e = max(max(3.0 - h, max(h - 4.1, ax - 1.25 + max(h - 3.75, 0.0) * 0.8)), max(-c130_joint(d, h), d - 2.7));
+  return smoothstep(aa, -aa, e);
+}
+fn c130_prop_line(d: f32, h: f32, ax: f32, aa: f32) -> f32 {
+  return smoothstep(aa, -aa, abs(d - C130P_ENG0.z) - 0.05) * step(1.0, ax) * step(1.25, h) * step(h, 3.95);
+}
+// Black walkway lines on top of the wing between the fuselage and the outboard engine [est].
+fn c130_walkway(L: vec3f, aa: f32) -> f32 {
+  let ax = abs(L.x);
+  if (ax < C130P_WING_ROOT.x + 0.15 || ax > 9.6 || !c130_upper(L)) { return 0.0; }
+  let c = c130_chord(ax);
+  let x = L.z + C130_ZN - c130_le(ax);
+  return sat(aline(x - 0.17 * c, 0.02, aa) + aline(x - 0.58 * c, 0.02, aa));
+}
+// The scheme's title, on the fixed fin (a serial) or on the forward
+// fuselage's sides (a name), reading nose-first on the left; only the flown
+// type's (the uniform is shared). The name is centred 6.62 m back from the
+// nose, 3.42 m up: behind the flight deck's side windows (to d 4.75), above
+// the crew door (to h 2.70, C130P_CREW_DOOR) and the cheat line, ahead of the
+// line in the inboard propellers' plane (C130P_ENG0.z, 8.47 m); hgt up to
+// 0.5 m keeps a six-letter name, 0.34 m a fourteen-letter one, inside that.
+fn c130_fin_title(L: vec3f, aa: f32) -> f32 {
+  if (!livery_ours()) { return 0.0; }
+  return title_ink(vec2f((25.3 - (L.z + C130_ZN)) * sign(L.x), L.y + C130_YG), vec2f(0.0, 6.3), 0.30, 0.2, aa);
+}
+fn c130_side_title(L: vec3f, aa: f32, hgt: f32) -> f32 {
+  if (!livery_ours() || abs(L.x) < 1.5) { return 0.0; }
+  return title_ink(vec2f((6.62 - (L.z + C130_ZN)) * sign(L.x), L.y + C130_YG), vec2f(0.0, 3.42), hgt, 0.3, aa);
+}
+
+fn livery_c130(L: vec3f, aa: f32, pt: u32) -> vec3f {
+  let style = livery_style();
+  let part = c130_part(L, pt);
+  if (style == 1u) { return c130_euro1(L, aa, pt, part); }
+  if (style == 2u) { return c130_cargo(L, aa, pt, part); }
+  if (style == 3u) { return c130_rescue(L, aa, pt, part); }
+  // AMC grey (also every C-130 not the flown type, which has no scheme sent).
+  let sent = livery_ours() && dot(PT.a.rgb, vec3f(1.0)) > 0.0;
+  let grey = select(C130_AMC, PT.a.rgb, sent);
+  let dark = select(C130_GUNSHIP, PT.b.rgb, sent);
+  let ink = select(C130_INK, PT.c.rgb, sent);
+  let d = L.z + C130_ZN;
+  let h = L.y + C130_YG;
+  let ax = abs(L.x);
+  var c = grey;
+  let ins = c130_insignia_at(L, part);
+  c = mix(c, dark, afill(ins.x, aa) * (1.0 - afill(ins.y, aa)));
+  if (part == 0u) {
+    c = mix(c, dark, c130_radome(d, h, aa));
+    c = mix(c, ink, max(c130_antiglare(d, h, ax, aa), c130_prop_line(d, h, ax, aa)));
+  }
+  if (part == 1u) { c = mix(c, ink, c130_walkway(L, aa)); }
+  if (part == 3u && pt == P_TAIL) { c = mix(c, ink, c130_fin_title(L, aa)); }
+  return c;
+}
+
+// European One: two greens and a grey in broad bands wrapping round the
+// airframe, top and bottom alike (generated, not the real pattern drawings),
+// black markings.
+fn c130_euro1(L: vec3f, aa: f32, pt: u32, part: u32) -> vec3f {
+  let sent = livery_ours();
+  let g1 = select(vec3f(0.049, 0.073, 0.062), PT.a.rgb, sent);
+  let g2 = select(vec3f(0.074, 0.078, 0.048), PT.b.rgb, sent);
+  let gy = select(vec3f(0.061, 0.062, 0.071), PT.c.rgb, sent);
+  let ink = select(C130_INK, PT.d.rgb, sent);
+  let d = L.z + C130_ZN;
+  let h = L.y + C130_YG;
+  let ax = abs(L.x);
+  let w = 1.2 * (nz(L * 0.21).r - 0.5);
+  let f = sin(0.55 * L.z + 0.75 * L.y + 0.32 * L.x + w) + sin(0.4 * L.z - 0.65 * L.y - 0.47 * L.x + 1.9) + 0.6 * sin(0.25 * L.x - 0.85 * L.z + 0.55 * L.y + 4.1);
+  // (Sprayed: the edges a few centimetres soft.)
+  let e = 0.05 + aa;
+  var c = mix(g1, g2, smoothstep(-0.5 - e, -0.5 + e, f));
+  c = mix(c, gy, smoothstep(0.55 - e, 0.55 + e, f));
+  let ins = c130_insignia_at(L, part);
+  c = mix(c, ink, sat(aline(ins.x, 0.025, aa) + aline(ins.y, 0.025, aa) * afill(ins.x, aa)));
+  if (part == 0u) { c = mix(c, ink, max(max(c130_radome(d, h, aa), c130_antiglare(d, h, ax, aa)), c130_prop_line(d, h, ax, aa))); }
+  if (part == 1u) { c = mix(c, ink, c130_walkway(L, aa)); }
+  if (part == 3u && pt == P_TAIL) { c = mix(c, ink, c130_fin_title(L, aa)); }
+  return c;
+}
+
+// Orivante Cargo (fictional): white over light grey, a teal cheat line with a
+// coral pinstripe over it sweeping up the tail cone, the teal fin with coral
+// arcs, teal nacelles, grey wings and tailplane, the name on the forward
+// fuselage; a red line in the propellers' plane.
+fn c130_cargo(L: vec3f, aa: f32, pt: u32, part: u32) -> vec3f {
+  let sent = livery_ours();
+  let teal = select(vec3f(0.004, 0.10, 0.11), PT.a.rgb, sent);
+  let coral = select(vec3f(0.80, 0.24, 0.10), PT.b.rgb, sent);
+  let grey = select(vec3f(0.352, 0.366, 0.376), PT.c.rgb, sent);
+  let white = select(WHITE_PAINT, PT.d.rgb, sent);
+  let d = L.z + C130_ZN;
+  let h = L.y + C130_YG;
+  let ax = abs(L.x);
+  if (part == 3u) {
+    let r = length(vec2f(d - 18.0, h - 2.0));
+    let arc = sat(smoothstep(aa, -aa, abs(r - 9.6) - 0.28) + smoothstep(aa, -aa, abs(r - 10.35) - 0.09));
+    return mix(teal, coral, arc);
+  }
+  if (part == 1u || part == 4u) { return grey; }
+  if (part == 2u) { return teal; }
+  let rise = c130_mid_h(d) - C130P_FUSE_H.y;
+  var c = mix(white, grey, smoothstep(1.85 + rise + aa, 1.85 + rise - aa, h));
+  let taper = smoothstep(C130P_D.x, 3.2, d) * (1.0 - smoothstep(27.5, 29.3, d));
+  let y0 = 2.85 + rise;
+  c = mix(c, teal, smoothstep(aa, -aa, abs(h - y0) - 0.12 * taper));
+  c = mix(c, coral, smoothstep(aa, -aa, abs(h - y0 - 0.2 * taper) - 0.028 * taper));
+  c = mix(c, grey, c130_radome(d, h, aa));
+  c = mix(c, C130_INK, c130_antiglare(d, h, ax, aa));
+  c = mix(c, vec3f(0.42, 0.025, 0.02), c130_prop_line(d, h, ax, aa));
+  return mix(c, teal, c130_side_title(L, aa, 0.34));
+}
+
+// Rescue (fictional): light grey; fluorescent red-orange on the top of the
+// fin, the wing and tailplane tips and a band round the tail cone; a black
+// radome and anti-glare panel; "RESCUE" on the forward fuselage.
+fn c130_rescue(L: vec3f, aa: f32, pt: u32, part: u32) -> vec3f {
+  let sent = livery_ours();
+  let grey = select(vec3f(0.352, 0.366, 0.376), PT.a.rgb, sent);
+  let orange = select(vec3f(0.871, 0.091, 0.017), PT.b.rgb, sent);
+  let ink = select(C130_INK, PT.c.rgb, sent);
+  let d = L.z + C130_ZN;
+  let h = L.y + C130_YG;
+  let ax = abs(L.x);
+  if (part == 3u) { return mix(grey, orange, smoothstep(6.9 - aa, 6.9 + aa, h)); }
+  if (part == 4u) { return mix(grey, orange, smoothstep(5.9 - aa, 5.9 + aa, ax)); }
+  if (part == 1u) { return mix(mix(grey, orange, smoothstep(17.3 - aa, 17.3 + aa, ax)), ink, c130_walkway(L, aa)); }
+  if (part == 2u) { return grey; }
+  var c = mix(grey, orange, smoothstep(aa, -aa, abs(d - 21.2) - 0.75));
+  c = mix(c, ink, max(max(c130_radome(d, h, aa), c130_antiglare(d, h, ax, aa)), c130_prop_line(d, h, ax, aa)));
+  return mix(c, ink, c130_side_title(L, aa, 0.5));
+}
+
+// How glossy the paint is (roughness): the military schemes flat, the
+// civil ones a polyurethane gloss; the anti-glare panel flattest.
+fn sheen_c130(L: vec3f, pt: u32, aa: f32) -> f32 {
+  let style = livery_style();
+  var r = select(select(select(0.62, 0.7, style == 1u), 0.22, style == 2u), 0.32, style == 3u);
+  if (c130_part(L, pt) == 0u) {
+    let d = L.z + C130_ZN;
+    r = mix(r, 0.85, c130_antiglare(d, L.y + C130_YG, abs(L.x), aa));
+  }
+  return r;
+}
+
+// The C-130's weathering: soot from each T56's tailpipe (out of the
+// nacelle's outboard side under the wing's lower skin, c130::dims EXHAUST_*)
+// trailing back under the wing and the flaps (never on their upper
+// surfaces), oil streaks under the nacelles, hydraulic grime and brake dust
+// swept back from the main gear, grime along the ramp's hinge and the belly.
+fn weather_c130(L: vec3f, N: vec3f, base: vec3f, belly: f32, n: vec4f) -> vec4f {
+  var c = base;
+  var rough = 0.08 * belly * n.b;
+  let d = L.z + C130_ZN;
+  let h = L.y + C130_YG;
+  let ax = abs(L.x);
+  let fine = nz(vec3f(L.x * 8.0, L.y * 8.0, L.z * 0.3)).g;
+  let streak = nz(vec3f(L.x * 2.5, L.y * 2.5, L.z * 0.12)).r;
+  for (var e = 0; e < 2; e++) {
+    let eng = select(C130P_ENG0, C130P_ENG1, e == 1);
+    let ex = eng.x + C130P_EXHAUST.x;
+    let t = d - select(C130P_EXHAUST.z, C130P_EXHAUST.w, e == 1);
+    if (t > -0.3 && t < 9.0 && abs(ax - ex) < 1.6 && h > eng.y + C130P_EXHAUST.y - 1.0 && !c130_upper(L)) {
+      let tt = max(t, 0.0);
+      let spread = 0.10 + 0.08 * tt;
+      let k = exp(-pow((ax - ex - 0.04 * tt) / spread, 2.0)) * exp(-tt / 3.2) * smoothstep(-0.3, 0.05, t) * (0.5 + 0.7 * fine) * (0.7 + 0.5 * streak);
+      c = mix(c, vec3f(0.028, 0.026, 0.024), sat(k * 0.85));
+      rough += k * 0.15;
+    }
+    // Oil from the engine's breathers and drains, streaked back under the nacelle.
+    let to = d - eng.z - 2.2;
+    if (to > 0.0 && to < 7.0 && abs(ax - eng.x) < 0.7 && h < eng.y) {
+      let k = exp(-pow((ax - eng.x) / (0.12 + 0.03 * to), 2.0)) * exp(-to / 3.0) * smoothstep(0.3, 0.8, streak) * (0.5 + 0.7 * fine);
+      c = mix(c, c * vec3f(0.55, 0.48, 0.38), sat(k * 0.8));
+    }
+  }
+  // Hydraulic fluid and brake dust from the main gear, back along the sponsons and the belly.
+  if (h < 2.2 && d > C130P_SPON.x + 2.0 && d < C130P_RAMP.y) {
+    let k = smoothstep(C130P_SPON.x + 2.0, 14.0, d) * (1.0 - smoothstep(18.0, C130P_RAMP.y, d)) * sat((2.2 - h) * 0.8) * smoothstep(0.4, 0.8, streak) * (0.5 + 0.6 * fine);
+    c = mix(c, c * vec3f(0.62, 0.56, 0.48), sat(k * 0.55));
+  }
+  // The ramp's hinge and the belly's drains: a darker band of grime.
+  if (h < C130P_FUSE_H.z + 0.6 && abs(d - C130P_D.z) < 1.2) { c *= 1.0 - 0.12 * smoothstep(1.2, 0.0, abs(d - C130P_D.z)) * (0.5 + 0.5 * fine); }
+  // Rain has run down the fuselage's sides from the window frames and the wing root.
+  if (ax > 1.5 && h > 1.0 && h < 4.0) {
+    let run = nz(vec3f(L.z * 3.0, L.y * 0.12, L.x * 0.1)).r;
+    c *= 1.0 - 0.04 * smoothstep(0.55, 0.85, run);
+  }
+  return vec4f(c, rough);
+}
+
+// The C-130's propeller blur (M_PROPDISC; the shared disc is a light
+// two-blade propeller's): four broad 54H60 paddles, grey with their black
+// root cuffs and black tips (engines.rs `propeller`: the same chord, pitch
+// and colour bands), each ring as dense as the blades' share of it seen
+// edge-on through their pitch, a slow four-fold shutter beat. r in metres
+// from the hub (the disc's uv is 1 at the tip, dims PROP_R). The opacity
+// scale is set by eye from renders: it shows about half the sky through
+// mid-blade, a little more at the tips (a nominal 0.85 mid-blade, 0.6 at
+// the tips, about halved on screen by the glass pass's blending).
+fn propdisc_c130(in: VOut, lit: vec3f, px: f32) -> vec4f {
+  let R = 2.0574;
+  let r = length(in.uv) * R;
+  if (r < 0.36 || r > R) { discard; }
+  let flare = smoothstep(0.42, 0.85, r);
+  var c = 0.17 + 0.23 * flare + 0.02 * smoothstep(0.9, 1.5, r) * (1.0 - smoothstep(1.6, 2.0, r));
+  let q = clamp((r - (R - 0.16)) / 0.16, 0.0, 1.0);
+  c *= 0.35 + 0.65 * pow(max(1.0 - q * q * q * q, 0.0), 0.25);
+  let beta = atan(0.95 / max(r, 0.3)) + 0.08;
+  var cover = 4.0 * c * cos(beta) / (6.2831853 * r);
+  // One blade snapped: only its stump still sweeps the inner part.
+  if (torn()) { cover *= select(0.75, 1.0, r < 0.9); }
+  let beat = 0.88 + 0.12 * cos(4.0 * (atan2(in.uv.y, in.uv.x) - G.time.x * 1.3));
+  let aa = max(px * 1.5, 0.004);
+  let black = max(smoothstep(0.82 + aa, 0.82 - aa, r), smoothstep(R - 0.09 - aa, R - 0.09 + aa, r));
+  // (The grey blades blur darker than their paint: edge-on through their
+  // pitch, much of what is seen is their shaded side.)
+  let col = mix(vec3f(0.13, 0.13, 0.125), vec3f(0.02), black);
+  let alpha = min(cover * 6.0 * beat * O.tint.x * (1.0 - smoothstep(R - 0.02, R, r)), 0.92);
+  return vec4f(col * lit * alpha, alpha);
+}
+
+// The C-130's panel seams, rivet rows and fasteners (height, seam dirt,
+// rivets), keyed on L and the dims copies above: the fuselage's frames
+// every 20 in with a rivet row on each, its skin butt and lap joints with
+// double rows, the stringers' single rows, the doors, ramp, escape hatches,
+// avionics bays and the sponsons' panels; the wing's leading edge panels
+// (housing the bleed-air anti-icing), spars, the joints between its
+// integrally stiffened skin planks, ribs, the centre-to-outer-wing joint at
+// WS 220 [1] and the fuel tank access doors underneath; the tail's spars and
+// ribs; the control surfaces' ribs; the nacelles' cowl joints, the cowl
+// doors' hinge and latch lines with their fasteners; the external tanks'
+// joints; the tyres' grooves. Positions not in dims are [est] from photographs.
+fn relief_c130(pt: u32, L: vec3f, Nl: vec3f, px: f32) -> vec3f {
+  var h = 0.0;
+  var dirt = 0.0;
+  var rv = 0.0;
+  let gw = max(0.0012, px * 0.9);
+  let ga = 0.0007 * min(1.0, 0.0018 / gw);
+  let rr = 0.0035;
+  let rf = 1.0 - smoothstep(rr * 0.5, rr * 1.6, px);
+  let d = L.z + C130_ZN;
+  let y = L.y + C130_YG;
+  let ax = abs(L.x);
+  if (pt == P_TREAD) {
+    // Four circumferential grooves in each tyre [est].
+    var cx = sign(L.x) * C130P_GEAR.x;
+    var g = C130P_GEAR.z * vec2f(0.12, 0.3);
+    if (ax < 1.0) { cx = sign(L.x) * C130P_GEAR.y; g = C130P_GEAR.w * vec2f(0.12, 0.3); }
+    if (abs(Nl.x) < 0.6) {
+      let o = abs(L.x - cx);
+      let gd = min(abs(o - g.x), abs(o - g.y));
+      h -= 0.003 * line(gd, max(0.005, px));
+      dirt += line(gd, max(0.006, px));
+    }
+    return vec3f(h, sat(dirt) * min(1.0, 0.003 / gw), 0.0);
+  }
+  if (pt == 0u || (pt > 5u && pt != P_NACELLE)) { return vec3f(0.0); }
+  let part = c130_part(L, pt);
+  if (part == 0u) {
+    let th = atan2(ax, y - c130_mid_h(d));
+    let spon = ax > C130P_FUSE_HALF_W - 0.03 && d > C130P_SPON.x && d < C130P_SPON.y && y < C130P_SPON.w + 0.05;
+    // (round the section: about metres of skin from the crown; up the sponsons' sides)
+    let around = select(th * 2.05, y + ax, spon);
+    if (c130_joint(d, y) > 0.1 && d < C130P_D.w - 0.4) {
+      let fr = (fract((d - C130P_D.y) / 0.508 + 0.5) - 0.5) * 0.508;
+      rv = max(rv, rivets(around, abs(fr), 0.034, rr) * rf * 0.7);
+    }
+    for (var i = 0; i < 11; i++) {
+      var dz = d - C130P_BUTTS[i];
+      if (i == 0) { dz = c130_joint(d, y); }
+      if (abs(dz) < 0.06) {
+        h -= ga * line(dz, gw);
+        dirt += line(dz, gw * 2.5);
+        rv = max(rv, rivets(around, abs(abs(dz) - 0.014), 0.03, rr) * rf);
+      }
+    }
+    if (spon) {
+      // The sponson's panels: joints every 1.46 m and along its middle [est].
+      let pz = (fract((d - C130P_SPON.x) / 1.46 + 0.5) - 0.5) * 1.46;
+      let hz = y - 1.75;
+      h -= ga * (line(pz, gw) + line(hz, gw));
+      dirt += line(pz, gw * 2.0) + line(hz, gw * 2.0);
+      rv = max(rv, max(rivets(y, abs(abs(pz) - 0.013), 0.032, rr), rivets(d, abs(abs(hz) - 0.013), 0.032, rr)) * rf);
+    } else if (d > 2.6 && d < 26.5) {
+      for (var i = 0; i < 4; i++) {
+        let dl = (th - C130P_LAPS[i]) * 2.05;
+        h -= ga * line(dl, gw);
+        dirt += line(dl, gw * 2.0);
+        rv = max(rv, rivets(d, abs(abs(dl) - 0.013), 0.032, rr) * rf);
+      }
+      // A single row on each stringer between them.
+      let k = (fract(th / 0.105 + 0.5) - 0.5) * 0.105 * 2.05;
+      rv = max(rv, rivets(d, abs(k), 0.045, rr * 0.9) * rf * 0.7);
+    }
+    if (ax > 1.0) {
+      // The crew entrance door (left) and the paratroop doors, a row of fasteners round each frame.
+      var dd = sd_rbox(vec2f(d - 0.5 * (C130P_PARA_DOOR.x + C130P_PARA_DOOR.y), y - 0.5 * (C130P_PARA_DOOR.z + C130P_PARA_DOOR.w)), 0.5 * vec2f(C130P_PARA_DOOR.y - C130P_PARA_DOOR.x, C130P_PARA_DOOR.w - C130P_PARA_DOOR.z), 0.08);
+      if (L.x < 0.0) { dd = min(dd, sd_rbox(vec2f(d - 0.5 * (C130P_CREW_DOOR.x + C130P_CREW_DOOR.y), y - 0.5 * (C130P_CREW_DOOR.z + C130P_CREW_DOOR.w)), 0.5 * vec2f(C130P_CREW_DOOR.y - C130P_CREW_DOOR.x, C130P_CREW_DOOR.w - C130P_CREW_DOOR.z), 0.08)); }
+      h -= ga * 2.0 * line(dd, gw * 1.3);
+      dirt += line(dd, gw * 3.0);
+      rv = max(rv, rivets(d + y, abs(dd - 0.035), 0.04, rr) * rf * 0.8);
+      // The avionics bays' access panels on the lower nose [est].
+      if (d > 2.6 && d < 5.0 && y < 2.0) {
+        let q = vec2f(select(d - 4.3, d - 3.2, d < 3.75), y - 1.35);
+        let ad = sd_rbox(q, vec2f(0.36, 0.24), 0.05);
+        h -= ga * 1.4 * line(ad, gw);
+        dirt += line(ad, gw * 2.5);
+        rv = max(rv, rivets(q.x + q.y, abs(ad + 0.02), 0.05, rr * 1.2) * rf);
+      }
+    }
+    // The ramp and the aft cargo door under the tail: their edges.
+    if (y < c130_mid_h(d) && d > C130P_RAMP.x - 0.1 && d < C130P_RAMP.z + 0.1) {
+      let across = min(abs(d - C130P_RAMP.x), min(abs(d - C130P_RAMP.y), abs(d - C130P_RAMP.z)));
+      let od = min(abs(ax - C130P_RAMP.w), select(1e3, across, ax < C130P_RAMP.w));
+      h -= ga * 2.0 * line(od, gw * 1.3);
+      dirt += line(od, gw * 3.0);
+    }
+    // The overhead escape hatches: the flight deck's and two in the cargo compartment's roof.
+    if (y > 3.6 && ax < 0.8) {
+      for (var i = 0; i < 3; i++) {
+        let hd = sd_rbox(vec2f(d - C130P_HATCH[i], L.x), vec2f(0.33, 0.33), 0.06);
+        h -= ga * 1.6 * line(hd, gw);
+        dirt += line(hd, gw * 2.5);
+        rv = max(rv, rivets(d + L.x, abs(hd - 0.03), 0.04, rr) * rf * 0.8);
+      }
+    }
+  } else if (pt == P_CTRL) {
+    // Flaps, ailerons, elevators, rudder: a row on each rib [est 14 in apart].
+    let span = select(ax, y - C130P_FIN_H.x, part == 3u);
+    let rb = (fract(span / 0.36 + 0.5) - 0.5) * 0.36;
+    rv = max(rv, rivets(d, abs(rb), 0.035, rr) * rf * 0.8);
+    dirt += 0.25 * line(rb, gw * 2.0);
+  } else if (part == 1u) {
+    let c = c130_chord(ax);
+    let x = d - c130_le(ax);
+    let f = x / c;
+    // The leading edge's removable panels (the bleed-air anti-icing ducts run inside them).
+    let lea = x - 0.12 * c;
+    h -= ga * line(lea, gw);
+    dirt += line(lea, gw * 2.0);
+    rv = max(rv, rivets(ax, abs(lea + 0.014), 0.03, rr) * rf);
+    if (f < 0.12) {
+      let j = (fract((ax - C130P_WING_ROOT.x) / 1.83 + 0.5) - 0.5) * 1.83;
+      h -= ga * line(j, gw);
+      dirt += line(j, gw * 2.0);
+    }
+    // Front and rear spars: double rows.
+    for (var i = 0; i < 2; i++) {
+      let ds = x - select(0.15, 0.62, i == 1) * c;
+      rv = max(rv, rivets(ax, abs(abs(ds) - 0.016), 0.032, rr) * rf);
+    }
+    // The integrally stiffened skin planks between the spars: their joints (no stringer rows).
+    if (f > 0.15 && f < 0.62) {
+      for (var i = 0; i < 3; i++) {
+        let dp = x - (0.27 + 0.12 * f32(i)) * c;
+        h -= ga * 0.8 * line(dp, gw);
+        dirt += 0.7 * line(dp, gw * 2.0);
+        rv = max(rv, rivets(ax, abs(dp - 0.012), 0.032, rr * 0.9) * rf);
+      }
+    }
+    // Ribs every 24 in.
+    if (ax > C130P_WING_ROOT.x + 0.1 && ax < C130P_WING.w - 0.3 && f > 0.12) {
+      let rb = (fract((ax - C130P_WING_ROOT.x) / 0.61 + 0.5) - 0.5) * 0.61;
+      rv = max(rv, rivets(x, abs(rb), 0.038, rr) * rf * 0.8);
+    }
+    // The centre wing's joint to the outer wing at WS 220: a raised strap
+    // with a double row of bolts each side of the splice.
+    let jw = abs(ax - 5.588);
+    if (jw < 0.12) {
+      h += 0.0008 * (1.0 - smoothstep(0.065, 0.075, jw));
+      h -= ga * 1.4 * line(jw - 0.075, gw);
+      dirt += line(jw - 0.075, gw * 2.0);
+      rv = max(rv, rivets(x, min(abs(jw - 0.022), abs(jw - 0.05)), 0.045, rr * 1.3) * rf);
+    }
+    // The tip cap.
+    let tj = ax - (C130P_AILERON.y + 0.05);
+    h -= ga * line(tj, gw);
+    dirt += line(tj, gw * 2.0);
+    // Fuel tank access doors along the lower skin, a ring of screws round each.
+    if (!c130_upper(L) && ax > 3.0 && ax < 18.0) {
+      let q = vec2f((fract((ax - 3.0) / 1.22 + 0.5) - 0.5) * 1.22, x - 0.40 * c);
+      let ad = sd_rbox(q, vec2f(0.24, 0.15), 0.07);
+      h -= ga * 1.3 * line(ad, gw);
+      dirt += line(ad, gw * 2.5);
+      rv = max(rv, rivets(q.x + q.y, abs(ad + 0.022), 0.04, rr) * rf);
+    }
+  } else if (part == 2u) {
+    if (abs(ax - C130P_EXT_TANK.x) < min(abs(ax - C130P_ENG0.x), abs(ax - C130P_ENG1.x))) {
+      // An external tank: its nose cone, middle and tail cone joints [est].
+      let tz = d - C130P_EXT_TANK.z;
+      let a = atan2(ax - C130P_EXT_TANK.x, y - C130P_EXT_TANK.y) * 0.6;
+      for (var i = 0; i < 3; i++) {
+        let dz = tz - C130P_EXT_TANK.w * select(select(0.18, 0.5, i == 1), 0.82, i == 2);
+        h -= ga * line(dz, gw);
+        dirt += line(dz, gw * 2.0);
+        rv = max(rv, rivets(a, abs(abs(dz) - 0.013), 0.03, rr) * rf);
+      }
+    } else {
+      // A nacelle: the intake lip, the cowl doors' front and back, the
+      // nacelle's joint over the wing; the cowl doors split along the top
+      // (hinges) and underneath (latches, larger fasteners) [est].
+      let eng = select(C130P_ENG0, C130P_ENG1, abs(ax - C130P_ENG1.x) < abs(ax - C130P_ENG0.x));
+      let e = vec3f(ax - eng.x, y - eng.y, d - eng.z);
+      let r = length(e.xy);
+      let a = atan2(e.x, e.y);
+      for (var i = 0; i < 4; i++) {
+        let dz = e.z - C130P_NAC.y - select(select(select(0.15, 1.2, i == 1), 2.6, i == 2), 3.7, i == 3);
+        h -= ga * 1.4 * line(dz, gw);
+        dirt += line(dz, gw * 2.5);
+        rv = max(rv, rivets(a * r, abs(abs(dz) - 0.014), 0.03, rr) * rf);
+      }
+      let on = step(C130P_NAC.y + 1.2, e.z) * step(e.z, C130P_NAC.y + 2.6);
+      let ls = min(abs(a), 3.14159 - abs(a)) * max(r, 0.1);
+      h -= ga * line(ls, gw) * on;
+      dirt += line(ls, gw * 2.0) * on;
+      rv = max(rv, rivets(e.z, abs(ls - 0.035), 0.09, rr * 1.5) * rf * on * step(1.6, abs(a)));
+    }
+  } else {
+    // The fin and the tailplane: leading edge panels, spars, ribs every 20 in [est].
+    var s = ax;
+    var u = sat(ax / C130P_STAB_SH.x);
+    var le = mix(C130P_STAB.x, C130P_STAB.y, u);
+    var te = mix(C130P_STAB.z, C130P_STAB.w, u);
+    if (part == 3u) {
+      s = y - C130P_FIN_H.x;
+      u = sat(s / C130P_FIN_H.y);
+      le = mix(C130P_FIN.x, C130P_FIN.y, u);
+      te = mix(C130P_FIN.z, C130P_FIN.w, u);
+    }
+    let c = te - le;
+    let x = d - le;
+    let lea = x - 0.10 * c;
+    h -= ga * line(lea, gw);
+    dirt += line(lea, gw * 2.0);
+    rv = max(rv, rivets(s, abs(lea + 0.014), 0.03, rr) * rf);
+    for (var i = 0; i < 2; i++) {
+      let ds = x - select(0.14, 0.62, i == 1) * c;
+      rv = max(rv, rivets(s, abs(abs(ds) - 0.015), 0.032, rr) * rf);
+    }
+    if (x > 0.10 * c) {
+      let rb = (fract(s / 0.508 + 0.5) - 0.5) * 0.508;
+      rv = max(rv, rivets(x, abs(rb), 0.036, rr) * rf * 0.8);
+    }
+  }
+  h += rv * 0.0008;
+  return vec3f(h, sat(dirt) * min(1.0, 0.003 / gw), rv);
 }
 // Door outlines on the fuselage sides in (d, y): the five main deck doors
 // each side, the upper deck exit, and the cargo doors on the right.

@@ -6463,4 +6463,278 @@ mod tests {
             assert!(p.is_finite_state());
         }
     }
+
+    // ---------------------------------------------------------------- the Lockheed C-130H
+    // Targets, their sources and which of them are estimates: aircraft/c130/flight.rs.
+
+    const C130: &Spec = &crate::aircraft::c130::SPEC;
+    /// C-130H weights (kg): maximum normal take-off, 155,000 lb; normal
+    /// landing and maximum-effort landing, 130,000 lb.
+    const C130_MTOW: f64 = 70_307.0;
+    const C130_MLW: f64 = 58_967.0;
+
+    /// The fuel that makes a C-130H (with its usual crew and load) weigh `kg`.
+    fn c130_fuel_for(kg: f64) -> f64 {
+        let fuel = kg - C130.mass + 0.5 * C130.fuel_kg;
+        assert!(fuel >= 0.0 && fuel <= C130.fuel_kg, "{kg} kg needs {fuel} kg of fuel");
+        fuel
+    }
+
+    /// Its 1 g power-off stall (m/s, sea level) at `kg` with the flaps at `flaps` (fraction of full travel).
+    fn c130_vs(kg: f64, flaps: f64) -> f64 {
+        let s = C130;
+        let cl = s.cl0 + s.flap_cl * flaps + s.cl_a * (s.stall_alpha - s.stall_flap * flaps);
+        (2.0 * kg * 9.81 / (RHO0 * s.wing_area * cl)).sqrt()
+    }
+
+    /// In the air at `alt` and true airspeed `v`, weighing `kg`, clean and trimmed level.
+    fn c130_at(kg: f64, alt: f64, v: f64) -> Plane {
+        let mut p = Plane::spawn(C130, 0.6, -2.1, alt, 0.0, v);
+        p.fuel = c130_fuel_for(kg);
+        p.configure(0, false, 0.0);
+        p
+    }
+
+    /// Wings level and the indicated airspeed held at `kt` with the elevator (a climb at full power).
+    fn c130_climb_at(kt: f64) -> impl FnMut(&Plane) -> f64 {
+        move |p| (p.ias() * KT - kt) * 0.03 - p.omega.x * 1.0
+    }
+
+    #[test]
+    fn performance_is_a_c130h() {
+        let w = empty_world();
+        let s = C130;
+        let fe = match &s.engine {
+            Engine::Fan(f) => f,
+            _ => unreachable!(),
+        };
+
+        // Power-off stalls (estimates: the Dash-1's charts are not public).
+        // 155,000 lb clean about 124 kt; 130,000 lb clean about 114 kt (a
+        // thunderstorm penetration at 65 kt above the power-off stall is held
+        // to 180 kt), 100% flaps about 93 kt, so a normal threshold speed
+        // (1.35 Vs) of about 125 kt, above the 106.5 kt floor.
+        let (clean, half, clean_mlw, full_mlw) =
+            (c130_vs(C130_MTOW, 0.0) * KT, c130_vs(C130_MTOW, 0.5) * KT, c130_vs(C130_MLW, 0.0) * KT, c130_vs(C130_MLW, 1.0) * KT);
+        println!("C-130H stall: {clean:.0} kt clean and {half:.0} kt 50% flaps at 155,000 lb; {clean_mlw:.0} kt clean and {full_mlw:.0} kt 100% at 130,000 lb (threshold {:.0} kt)", 1.35 * full_mlw);
+        assert!(clean > 116.0 && clean < 130.0 && half > 104.0 && half < 118.0, "{clean} {half}");
+        assert!(clean_mlw > 107.0 && clean_mlw < 120.0 && full_mlw > 87.0 && full_mlw < 99.0, "{clean_mlw} {full_mlw}");
+        assert!(1.35 * full_mlw > 106.5);
+
+        // Static thrust: 2.6-3.2 lbf per shaft horsepower at the take-off
+        // torque (19,600 in-lb, about 4,300 shp each) [est, momentum theory],
+        // about a third of the take-off weight. In the air the thrust is the
+        // propellers' power over the speed: the power it implies at 175 and
+        // 290 kt (sea level, all four) must be 4 x 4,300 shp at a propeller
+        // efficiency of 0.7-0.95 (with the little jet thrust in it).
+        let t0 = Plane::fan_thrust(fe, 1.0, 0.0, 0.0);
+        let shp = 4.0 * 4_300.0 * 745.7;
+        let eta = |v: f64| Plane::fan_thrust(fe, 1.0, v, 0.0) * v / shp;
+        println!("static thrust {:.0} kN ({:.0} lbf each) = {:.2} of MTOW; efficiency implied at 60, 90, 150 m/s: {:.2} {:.2} {:.2}", t0 / 1000.0, t0 / 4.0 / 4.448, t0 / (C130_MTOW * 9.81), eta(60.0), eta(90.0), eta(150.0));
+        assert!(t0 / (C130_MTOW * 9.81) > 0.29 && t0 / (C130_MTOW * 9.81) < 0.36, "{t0}");
+        assert!(eta(60.0) > 0.6 && eta(60.0) < 0.85 && eta(90.0) > 0.75 && eta(90.0) < 0.95 && eta(150.0) > 0.8 && eta(150.0) < 1.0);
+
+        // Flat out at 20,000 ft at the reference mass: 320 KTAS published;
+        // the shared density lapse is steeper than a flat-rated T56's, so it
+        // falls a little short there (see flight.rs).
+        let h = 6_096.0;
+        let mut p = c130_at(s.mass, h, 150.0);
+        let (v20, _) = fly(&mut p, &w, 300.0, 1.0, hold_alt(h));
+        println!("flat out at 20,000 ft: {:.0} KTAS ({:.0} KIAS), notes {:?}", v20 * KT, p.ias() * KT, p.notes);
+        assert!(v20 * KT > 295.0 && v20 * KT < 330.0 && p.notes.is_empty(), "{}", v20 * KT);
+        // Flat out low down (1,000 ft): about 300-315 KTAS [est from the power].
+        let h = 300.0;
+        let mut p = c130_at(s.mass, h, 140.0);
+        let (v0, _) = fly(&mut p, &w, 300.0, 1.0, hold_alt(h));
+        println!("flat out at 1,000 ft: {:.0} KTAS, {:.0} KIAS", v0 * KT, p.ias() * KT);
+        assert!(v0 * KT > 290.0 && v0 * KT < 325.0 && p.notes.is_empty(), "{}", v0 * KT);
+
+        // Climb at the maximum take-off weight, clean, 180 KIAS (its climb
+        // speed below 10,000 ft): 1,830-1,900 fpm at sea level.
+        let mut p = c130_at(C130_MTOW, 300.0, 93.0);
+        let (_, vs) = fly(&mut p, &w, 60.0, 1.0, c130_climb_at(180.0));
+        println!("climb at 155,000 lb, 180 KIAS from 1,000 ft: {:.0} fpm", vs * 196.85);
+        assert!(vs * 196.85 > 1_550.0 && vs * 196.85 < 2_250.0, "{}", vs * 196.85);
+
+        // Ceilings: 23,000 ft at 155,000 lb (the 42,000 lb payload), 33,000 ft
+        // light (here 47 t); the service ceiling is where 100 fpm is left.
+        let climb = |kg: f64, alt: f64| {
+            let mut p = Plane::spawn(s, 0.6, -2.1, alt, 0.0, 120.0);
+            p.fuel = c130_fuel_for(kg);
+            (60..200).map(|v| v as f64).map(|v| (p.thrust(1.0, v, alt) - p.drag_level(v, alt, 0.0, 0.0)) * v / (kg * 9.81)).fold(f64::MIN, f64::max) * 196.85
+        };
+        let (c23, c33) = (climb(C130_MTOW, 7_010.0), climb(47_000.0, 10_058.0));
+        println!("best climb left: {c23:.0} fpm at 23,000 ft at 155,000 lb, {c33:.0} fpm at 33,000 ft at 47 t");
+        assert!(c23 > -150.0 && c23 < 450.0 && c33 > -150.0 && c33 < 450.0, "{c23} {c33}");
+
+        // Cruise at 20,000 ft, 280 KTAS (its long-leg cruise), at the
+        // reference mass: about 4,400-5,000 lb/h (62,400 lb takes it 3,995 nm
+        // in ferry at about that speed).
+        let h = 6_096.0;
+        let mut p = c130_at(s.mass, h, 280.0 / KT);
+        let thr = p.throttle;
+        let (va, vs) = fly(&mut p, &w, 120.0, thr, hold_alt(h));
+        let lbh = p.fuel_flow * 3600.0 * 2.2046;
+        println!("cruise at 20,000 ft: {:.0} KTAS, throttle {thr:.2}, alpha {:.1} deg, vs {vs:.1} m/s, {lbh:.0} lb/h; all its fuel at that rate: {:.0} nmi", va * KT, p.alpha.to_degrees(), s.fuel_kg / p.fuel_flow * va / 1852.0);
+        assert!((va * KT - 280.0).abs() < 8.0 && thr < 0.95 && p.notes.is_empty(), "{} {thr}", va * KT);
+        assert!(lbh > 3_900.0 && lbh < 5_600.0, "{lbh}");
+        assert!(p.alpha.to_degrees() > 0.5 && p.alpha.to_degrees() < 5.0);
+
+        // Take-off fuel flow about 2,200-2,500 lb/h a engine (ESFC near 0.5), ground idle
+        // about 750 lb/h each (50 lb a minute for the four, a planning figure).
+        println!("fuel flows {:?} kg/s = {:.0} and {:.0} lb/h", s.fuel_flow, s.fuel_flow[0] * 7936.6, s.fuel_flow[1] * 7936.6);
+        assert!(s.fuel_flow[0] * 7936.6 > 2_600.0 && s.fuel_flow[0] * 7936.6 < 3_600.0);
+        assert!(s.fuel_flow[1] * 7936.6 > 8_800.0 && s.fuel_flow[1] * 7936.6 < 10_400.0);
+
+        // Turboprops answer the throttle quickly: flight idle to 90% of full
+        // thrust in a few seconds (a jet's fans take 5-8).
+        let (h, v) = (300.0, 70.0);
+        let mut p = Plane::spawn(s, 0.6, -2.1, h, 0.0, v);
+        p.throttle = 0.0;
+        p.settle_engine(v, h);
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            assert!(p.step(dt, &Controls { throttle_set: Some(0.0), ..Default::default() }, &w).is_none());
+        }
+        let mut t = 0.0;
+        while p.power * fe.n as f64 * fe.thrust < 0.9 * p.thrust(1.0, p.airspeed().length(), h) && t < 20.0 {
+            assert!(p.step(dt, &Controls { throttle_set: Some(1.0), ..Default::default() }, &w).is_none());
+            t += dt;
+        }
+        println!("flight idle to 90% thrust: {t:.1} s");
+        assert!(t > 1.0 && t < 4.5, "{t}");
+
+        // Full aileron at 200 KIAS: boosted ailerons, light and quick for its
+        // size (60 degree banks are routine), but a transport's roll rate.
+        let mut p = Plane::spawn(s, 0.6, -2.1, 1500.0, 0.0, 200.0 / KT * (RHO0 / density(1500.0)).sqrt());
+        let mut best: f64 = 0.0;
+        for _ in 0..(4.0 / dt) as usize {
+            assert!(p.step(dt, &Controls { roll: 1.0, ..Default::default() }, &w).is_none());
+            best = best.max(p.omega.z.abs());
+        }
+        println!("roll rate at 200 KIAS: {:.0} deg/s", best.to_degrees());
+        assert!(best.to_degrees() > 15.0 && best.to_degrees() < 32.0, "{}", best.to_degrees());
+
+        // The game's final: 100% flaps, gear down, a 3 degree glide, hands off.
+        let (va, notch) = s.approach;
+        let mut p = Plane::spawn(s, 0.6, -2.1, 400.0, 0.0, va);
+        let sink = va * 3f64.to_radians().sin();
+        p.configure(notch, true, sink);
+        let thr = p.throttle;
+        let (v, vs) = fly(&mut p, &w, 30.0, thr, |_| 0.0);
+        println!("approach: throttle {thr:.2}, {:.0} kt, {:.0} fpm, alpha {:.1} deg, 1.35 Vs + 10 = {:.0} kt", v * KT, vs * 196.85, p.alpha.to_degrees(), (1.35 * c130_vs(s.mass, 1.0)) * KT + 10.0);
+        assert!((v - va).abs() < 3.0 && (vs + sink).abs() < 1.0, "{v} {vs}");
+        assert!(!p.stalled && p.notes.is_empty());
+    }
+
+    #[test]
+    fn a_c130h_takes_off_and_climbs() {
+        let w = flat_world();
+        let s = C130;
+        // At 155,000 lb, sea level, 50% flaps (its take-off setting), full power.
+        let mut p = Plane::spawn_ground(s, 37.6, -122.37, 0.0, 0.5, 0.0);
+        p.hold = false;
+        p.t = 2.0;
+        p.fuel = c130_fuel_for(C130_MTOW);
+        p.flap_set = 1;
+        p.flaps = s.flap_frac(1);
+        let dt = 1.0 / 120.0;
+        let start = p.pos;
+        let (mut lifted, mut t, mut want, mut last, mut most) = (None, 0.0, 0.0f64, 0.0, 0.0f64);
+        let (mut at_1000, mut at_10000) = (None, None);
+        let pitch_of = |p: &Plane| p.forward().dot(p.pos.normalize()).asin().to_degrees();
+        while t < 900.0 && at_10000.is_none() {
+            let ias = p.ias() * KT;
+            let pitch_deg = pitch_of(&p);
+            let rate = (pitch_deg - last) / dt;
+            last = pitch_deg;
+            let (_, _, hh) = geo::pos_to_lla(p.pos);
+            if p.on_ground {
+                most = most.max(pitch_deg);
+            }
+            // Rotate at 115 KIAS, 2 degrees a second, to 7 until the wheels
+            // are off, then 10; once climbing, the flaps up at 150 KIAS and
+            // the climb flown at 180 KIAS.
+            let pitch = if lifted.is_some() && hh > 150.0 {
+                if ias > 150.0 {
+                    p.flap_set = 0;
+                }
+                c130_climb_at(180.0)(&p)
+            } else if ias > 115.0 {
+                want = (want.max(pitch_deg + 2.0) + 2.0 * dt).min(if p.on_ground { 7.0 } else { 10.0 });
+                ((want - pitch_deg) * 0.25 - rate * 0.08).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+            let roll_err = -p.right().dot(p.pos.normalize());
+            let c = Controls { throttle: 1.0, pitch: pitch.clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), ..Default::default() };
+            assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
+            if lifted.is_none() && !p.on_ground && t > 5.0 {
+                lifted = Some(((p.pos - start).length(), ias, t));
+                p.toggle_gear();
+            }
+            if at_1000.is_none() && hh > 304.8 {
+                at_1000 = Some(t);
+            }
+            if hh > 3_048.0 {
+                at_10000 = Some(t);
+            }
+            t += dt;
+        }
+        let (dist, vlo, tlo) = lifted.expect("it never left the ground");
+        println!("take-off at 155,000 lb: off after {dist:.0} m ({:.0} ft) and {tlo:.0} s at {vlo:.0} KIAS, at most {most:.1} deg nose up on the runway", dist * 3.28084);
+        // (a take-off run of 3,586 ft, 1,093 m, at 155,000 lb, sea level)
+        assert!(dist > 900.0 && dist < 1_300.0, "{dist}");
+        assert!(vlo > 108.0 && vlo < 132.0, "{vlo}");
+        assert!(most < 8.5, "{most}");
+        let (t1, t10) = (at_1000.expect("never reached 1,000 ft"), at_10000.expect("never reached 10,000 ft"));
+        let fuel_used = c130_fuel_for(C130_MTOW) - p.fuel;
+        println!("1,000 ft after {t1:.0} s; 10,000 ft after {:.1} min ({:.0} fpm on average from 1,000 ft), burning {:.0} lb; {:.0} KIAS, flaps {:.2}, gear {:.2}", t10 / 60.0, 9_000.0 / ((t10 - t1) / 60.0), fuel_used * 2.2046, p.ias() * KT, p.flaps, p.gear);
+        // (1,830-1,900 fpm at sea level, falling off with height: some 6-8 minutes)
+        assert!(t10 - t1 > 4.5 * 60.0 && t10 - t1 < 9.0 * 60.0, "{}", (t10 - t1) / 60.0);
+        assert!(p.flaps < 0.01 && p.gear < 0.01);
+        assert!(p.notes.is_empty() && p.dmg.gear.iter().all(|g| *g), "{:?}", p.notes);
+    }
+
+    #[test]
+    fn a_c130h_lands_short_with_its_propellers_reversed() {
+        let w = flat_world();
+        let s = C130;
+        // Over the threshold at 50 ft and the normal threshold speed (1.35 Vs
+        // power off), 100% flaps, at 130,000 lb; then down: brakes, with and
+        // without the propellers in reverse.
+        let vth = 1.35 * c130_vs(C130_MLW, 1.0);
+        let land = |reverse: bool| {
+            let mut p = Plane::spawn(s, 37.6, -122.37, 15.24, 0.5, vth);
+            p.t = 2.0;
+            p.fuel = c130_fuel_for(C130_MLW);
+            p.configure(2, true, vth * 3f64.to_radians().sin());
+            let dt = 1.0 / 120.0;
+            let start = p.pos;
+            let (mut t, mut down, mut sink) = (0.0, None, 0.0f64);
+            while t < 60.0 {
+                let touched = down.is_some();
+                let c = Controls { throttle: -1.0, brake: touched, reverse: touched && reverse, pitch: if touched { -0.1 } else { 0.1 }, ..Default::default() };
+                let vn = p.vel.dot(p.pos.normalize());
+                assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
+                if down.is_none() && p.on_ground {
+                    down = Some((p.pos, p.ias() * KT));
+                    sink = -vn;
+                }
+                t += dt;
+            }
+            let (down, vtd) = down.expect("it never touched down");
+            let (air, roll) = ((down - start).length(), (p.pos - down).length());
+            println!("landing at 130,000 lb from 50 ft at {:.0} KIAS, reverse {reverse}: {air:.0} m to touch down at {vtd:.0} KIAS sinking {:.0} fpm, {roll:.0} m ({:.0} ft) on the runway; {:.1} m/s after 60 s, reversers {:.2}, notes {:?}", vth * KT, sink * 196.85, roll * 3.28084, p.vel.length(), p.reverser, p.notes);
+            assert!(p.vel.length() < 1.0 && p.notes.is_empty() && p.dmg.gear.iter().all(|g| *g), "{} {:?}", p.vel.length(), p.notes);
+            (air, roll)
+        };
+        let (air, roll) = land(true);
+        let (_, roll_brakes) = land(false);
+        // (some 2,750 ft, 840 m, from 50 ft at 130,000 lb with the props in
+        // reverse; 1,150-2,020 ft on the runway, by weight)
+        assert!(roll > 300.0 && roll < 700.0 && air + roll < 1_100.0, "{air} {roll}");
+        // Reversing propellers take a good share of the work off the brakes.
+        assert!(roll < 0.85 * roll_brakes, "{roll} {roll_brakes}");
+    }
 }

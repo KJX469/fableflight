@@ -952,4 +952,15 @@ damage.cause.flutter = "FLOTTEMENT"
         }
         assert!(missing.is_empty(), "keys missing from eng.lng:\n{}", missing.join("\n"));
     }
+
+    /// The hangar shows each built-in aircraft's blurb through `tr_en`, which
+    /// finds it by its exact English: eng.lng must carry the blurb word for
+    /// word and fr.lng must translate it.
+    #[test]
+    fn every_builtin_aircraft_blurb_is_in_french() {
+        let r = Registry::new(BUILTIN.iter().map(|(id, src)| Catalog::from_source(id, src)).collect());
+        let fr = r.index("fr").unwrap();
+        let missing: Vec<&str> = crate::aircraft::BUILTIN.iter().filter(|s| r.english(fr, s.blurb).is_none_or(|t| t == s.blurb)).map(|s| s.name).collect();
+        assert!(missing.is_empty(), "no French for the blurb of: {missing:?} (eng.lng's text.aircraft.* must match Spec::blurb exactly)");
+    }
 }

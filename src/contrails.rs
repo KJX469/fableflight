@@ -430,6 +430,17 @@ pub fn spec_engines(spec: &Spec, stage: usize) -> Vec<EngineMount> {
                 }
                 return out;
             }
+            if key == "c130" {
+                // Four T56 turboprops: each tailpipe out of its nacelle under the wing's lower
+                // skin (c130::dims::exhaust); a turboprop's overall efficiency about a turbojet's [est].
+                let mut out = Vec::with_capacity(4);
+                for e in 0..2 {
+                    let p = crate::aircraft::c130::dims::exhaust(e);
+                    out.push(EngineMount { pos: Vec3::new(-p.x, p.y, p.z), scale, eta: 0.30, ei_h2o, group: G_LWING });
+                    out.push(EngineMount { pos: p, scale, eta: 0.30, ei_h2o, group: G_RWING });
+                }
+                return out;
+            }
             if key == "concorde" {
                 let z = fe.nozzle_z as f32;
                 return vec![
@@ -900,7 +911,8 @@ impl Contrails {
             if spd < 35.0 {
                 continue;
             }
-            let spec = crate::aircraft::nth(r.aircraft as usize);
+            // (`r.aircraft` is the sender's `Spec::id`, not a place in `list()`.)
+            let spec = crate::aircraft::BUILTIN.iter().copied().find(|s| s.id == r.aircraft as u32).unwrap_or(crate::aircraft::BUILTIN[0]);
             let mounts = spec_engines(spec, 0);
             let env = atmosphere_at(r.pos, wx, doy, mounts[0].eta, mounts[0].ei_h2o);
             if env.strength <= 0.02 {

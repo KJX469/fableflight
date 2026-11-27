@@ -769,6 +769,8 @@ fn origin_line(spec: &Spec) -> String {
 fn engine_line(spec: &Spec) -> String {
     match &spec.engine {
         aircraft::Engine::Piston(p) => t!("hangar.hp_piston", p.power / 745.7),
+        // (Turboprops flown as fans, the C-130's: their shaft power.)
+        aircraft::Engine::Fan(f) if spec.turboprop_shp().is_some() => t!("hangar.shp_turboprop", f.n, spec.turboprop_shp().unwrap_or(0.0)),
         aircraft::Engine::Fan(f) if f.boost > 1.15 => t!("hangar.kn_afterburning", f.n, f.thrust * f.boost / 1000.0),
         aircraft::Engine::Fan(f) => t!("hangar.kn_jet", f.n, f.thrust / 1000.0),
         aircraft::Engine::Rocket(r) => t!("hangar.rocket_engines", r.stages[0].n),
