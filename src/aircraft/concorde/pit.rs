@@ -718,6 +718,15 @@ fn controls(b: &mut Builder, f: &Face) {
         }
     }
 
+    // the parking brake lever on the pedestal's aft step, between the seats: lying aft when off, up when set.
+    let pb = Vec3::new(-0.09, PED_Y1, -22.95);
+    let mut pl = Mesh::default();
+    pl.lathe(&BLK, pb, Vec3::Y, &[[0.018, 0.0], [0.018, 0.006], [0.0, 0.008]], 12, false);
+    pl.tube(&STEEL, &[pb, pb + Vec3::Y * 0.06], &|_| 0.0045, 8, false);
+    pl.rbox(&RED_LENS, pb + Vec3::Y * 0.07, Vec3::new(0.016, 0.012, 0.012), 0.004, Quat::IDENTITY);
+    let piece = b.add("parking brake lever", G_ENGINE, pl, Anim::hinge(Drive::new(Input::ParkingBrake, -0.8).offset(0.8)), pb, Vec3::X, None);
+    b.pieces[piece].hotspot = Some(Hotspot::click(Vec3::Y * 0.07, 0.02, "parking_brake"));
+
     // The landing gear lever: a wheel-shaped knob on an arm, up and down its slot.
     let w = f.sub(GEAR_U, GEAR_V, 0.0);
     let mut gh = Mesh::default();

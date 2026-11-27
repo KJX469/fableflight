@@ -28,6 +28,9 @@
   .empty { padding: 26px 14px; color: var(--dim); text-align: center; }
   footer { margin-top: 26px; color: var(--dim); font-size: 12px; }
   a { color: var(--accent); }
+  #map { display: block; width: 100%; height: auto; }
+  .attr { padding: 6px 14px; font-size: 11px; color: var(--dim); text-align: right; border-top: 1px solid var(--line); }
+  td.pos a { text-decoration: none; }
 </style>
 </head>
 <body>
@@ -42,10 +45,14 @@
       <tbody id="servers"></tbody>
     </table>
   </div>
+  <div id="map-wrap" hidden>
+    <h2 id="h-map">Map</h2>
+    <div class="card"><canvas id="map" width="1024" height="560"></canvas><div class="attr">© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</div></div>
+  </div>
   <h2 id="h-pilots">Pilots</h2>
   <div class="card">
     <table>
-      <thead><tr><th id="h-name">Pilot</th><th id="h-relay">Server</th><th id="h-ac">Aircraft</th><th class="n" id="h-alt">Altitude</th><th class="n" id="h-spd">Speed</th></tr></thead>
+      <thead><tr><th id="h-name">Pilot</th><th id="h-relay">Server</th><th id="h-ac">Aircraft</th><th class="n" id="h-alt">Altitude</th><th class="n" id="h-spd">Speed</th><th class="pos" id="h-pos" hidden>Position</th><th class="n" id="h-hdg" hidden>Heading</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <div class="empty" id="empty" hidden>Nobody in the air right now.</div>
@@ -61,6 +68,8 @@ const T = fr ? {
   net: (n, up) => up + " serveur" + (up > 1 ? "s" : "") + " en ligne sur " + n,
   name: "Pilote", ac: "Avion", alt: "Altitude", spd: "Vitesse", empty: "Personne en vol pour le moment.",
   foot: "Mis à jour toutes les deux secondes. Les positions ne sont pas affichées.", ground: "au sol",
+  footPos: "Mis à jour toutes les deux secondes. Positions à environ un kilomètre près.", map: "Carte", pos: "Position", hdg: "Cap",
+  ns: v => v >= 0 ? "N" : "S", ew: v => v >= 0 ? "E" : "O",
   up: s => "en service depuis " + dur(s), lim: (m, r) => m + " pilotes max · visibles à " + r + " km"
 } : {
   label: n => n === 1 ? "pilot flying" : "pilots flying", connecting: "connecting…", live: "live", down: "relay unreachable",
@@ -68,6 +77,8 @@ const T = fr ? {
   net: (n, up) => up + " of " + n + " server" + (n > 1 ? "s" : "") + " online",
   name: "Pilot", ac: "Aircraft", alt: "Altitude", spd: "Speed", empty: "Nobody in the air right now.",
   foot: "Updated every two seconds. Positions are not shown.", ground: "on the ground",
+  footPos: "Updated every two seconds. Positions to about a kilometre.", map: "Map", pos: "Position", hdg: "Heading",
+  ns: v => v >= 0 ? "N" : "S", ew: v => v >= 0 ? "E" : "W",
   up: s => "up for " + dur(s), lim: (m, r) => "up to " + m + " pilots · seen within " + r + " km"
 };
 if (fr) document.documentElement.lang = "fr";
@@ -79,6 +90,58 @@ const $ = id => document.getElementById(id);
 $("h-servers").textContent = T.servers; $("h-pilots").textContent = T.pilots; $("h-srv").textContent = T.srv; $("h-st").textContent = T.st; $("h-np").textContent = T.np; $("h-relay").textContent = T.srv;
 $("h-name").textContent = T.name; $("h-ac").textContent = T.ac; $("h-alt").textContent = T.alt; $("h-spd").textContent = T.spd;
 $("empty").textContent = T.empty; $("foot").textContent = T.foot; $("state").textContent = T.connecting;
+$("h-map").textContent = T.map; $("h-pos").textContent = T.pos; $("h-hdg").textContent = T.hdg;
+
+// The map: OpenStreetMap's tiles at zoom 2 (Web Mercator, 1024 px across),
+// from 75° N to 60° S, and each pilot as a small arrow along their heading.
+const Z = 2, WORLD = 256 << Z, TOP = 75, BOTTOM = -60;
+const merc = lat => { const s = Math.sin(lat * Math.PI / 180); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * WORLD; };
+const Y0 = merc(TOP), Y1 = merc(BOTTOM);
+const map = $("map"), ctx = map.getContext("2d");
+map.height = Math.round(Y1 - Y0);
+const tiles = [];
+let last = [];
+function loadTiles() {
+  if (tiles.length) return;
+  for (let y = 0; y < 1 << Z; y++) for (let x = 0; x < 1 << Z; x++) {
+    if ((y + 1) * 256 < Y0 || y * 256 > Y1) continue;
+    const img = new Image();
+    img.onload = () => draw(last);
+    img.src = "https://tile.openstreetmap.org/" + Z + "/" + x + "/" + y + ".png";
+    tiles.push({ x, y, img });
+  }
+}
+const dark = () => window.matchMedia("(prefers-color-scheme: dark)").matches;
+function draw(players) {
+  last = players;
+  const css = getComputedStyle(document.documentElement);
+  ctx.fillStyle = css.getPropertyValue("--panel"); ctx.fillRect(0, 0, map.width, map.height);
+  ctx.save();
+  ctx.filter = dark() ? "invert(1) hue-rotate(180deg) brightness(0.75) contrast(0.9)" : "saturate(0.6)";
+  for (const t of tiles) if (t.img.complete && t.img.naturalWidth) ctx.drawImage(t.img, t.x * 256, t.y * 256 - Y0);
+  ctx.restore();
+  const accent = css.getPropertyValue("--accent"), dim = css.getPropertyValue("--dim");
+  ctx.font = "600 13px system-ui, sans-serif"; ctx.textBaseline = "middle";
+  for (const p of players) {
+    if (p.lat === undefined) continue;
+    const x = (p.lon + 180) / 360 * WORLD, y = merc(Math.max(-85, Math.min(85, p.lat))) - Y0;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(p.heading * Math.PI / 180);
+    ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(6, 7); ctx.lineTo(0, 3); ctx.lineTo(-6, 7); ctx.closePath();
+    ctx.fillStyle = p.on_ground ? dim : accent; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.stroke();
+    ctx.restore();
+    ctx.lineWidth = 3; ctx.strokeStyle = dark() ? "rgba(0,0,0,.75)" : "rgba(255,255,255,.85)";
+    ctx.strokeText(p.name, x + 11, y); ctx.fillStyle = css.getPropertyValue("--text"); ctx.fillText(p.name, x + 11, y);
+  }
+}
+function where(p) {
+  const td = document.createElement("td"); td.className = "pos";
+  const a = document.createElement("a");
+  a.href = "https://www.openstreetmap.org/?mlat=" + p.lat + "&mlon=" + p.lon + "#map=10/" + p.lat + "/" + p.lon;
+  a.target = "_blank"; a.rel = "noopener";
+  a.textContent = Math.abs(p.lat).toFixed(2) + "° " + T.ns(p.lat) + ", " + Math.abs(p.lon).toFixed(2) + "° " + T.ew(p.lon);
+  td.appendChild(a); return td;
+}
 function cell(tr, text, num) { const td = document.createElement("td"); td.textContent = text; if (num) td.className = "n"; tr.appendChild(td); }
 async function tick() {
   try {
@@ -107,9 +170,18 @@ async function tick() {
       cell(tr, p.name); cell(tr, p.relay); cell(tr, p.aircraft);
       cell(tr, p.on_ground ? T.ground : Math.round(p.alt_ft).toLocaleString() + " ft", true);
       cell(tr, Math.round(p.speed_kt) + " kt", true);
+      if (s.positions && p.lat !== undefined) {
+        tr.appendChild(where(p));
+        cell(tr, String(Math.round(p.heading) % 360).padStart(3, "0") + "°", true);
+      }
       rows.appendChild(tr);
     }
     $("empty").hidden = s.players.length > 0;
+    // (Positions only where the relay's operator chose to show them.)
+    const pos = !!s.positions;
+    $("map-wrap").hidden = !pos; $("h-pos").hidden = !pos; $("h-hdg").hidden = !pos;
+    $("foot").textContent = pos ? T.footPos : T.foot;
+    if (pos) { loadTiles(); draw(s.players); }
   } catch (e) {
     $("dot").className = "dot off"; $("state").textContent = T.down;
   }

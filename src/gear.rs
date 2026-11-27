@@ -316,6 +316,29 @@ pub fn strut(leg: &Leg, w0: f64, x: f64, rate: f64) -> f64 {
     (spring + stop + damp).clamp(0.0, leg.nf_max)
 }
 
+/// A float's keel on land: the strut (or the float's own give) holds it up
+/// and it slides, the pontoon's skid against the ground with the sliding
+/// friction of what it is on (wet grass slides further than dry concrete).
+/// Below a walking pace the friction eases in so a stopped float holds still.
+pub fn pontoon(c: &Contact) -> Push {
+    let n = c.n;
+    let vn = c.v.dot(n);
+    let nf = strut(c.leg, c.w0, c.pen, -vn);
+    let h = (c.heading - n * c.heading.dot(n)).normalize_or_zero();
+    let s = h.cross(n);
+    let vt = c.v - n * vn;
+    let speed = vt.length();
+    let mu = c.grip.slide.max(0.05);
+    let f_t = if speed > 1e-6 { -vt / speed * mu * nf * (speed / 0.3).min(1.0) } else { DVec3::ZERO };
+    Push { f: n * nf + f_t, nf, slide: 0.0, heading: h, along: vt.dot(h), across: vt.dot(s) }
+}
+
+/// A float's keel in the water against sliding sideways (N per m/s of
+/// sideslip), from the load it carries: its draft and length go with it.
+pub fn keel_k(w0: f64) -> f64 {
+    2.0 * w0
+}
+
 /// The forces of one leg on the ground, stepping its wheels' state.
 pub fn contact(c: &Contact, w: &mut Wheel, spin: &mut f64) -> Push {
     let leg = c.leg;

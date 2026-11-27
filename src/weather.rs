@@ -41,6 +41,9 @@ pub struct Weather {
     pub wind_from: f64,
     /// gustiness, 0..1
     pub gusts: f64,
+    /// the winds aloft a weather model reports (live weather), lowest first;
+    /// empty: made up from the surface wind (see `profile`)
+    pub aloft: Vec<Aloft>,
     /// game seconds per real second for the clock (0 stops it)
     pub time_rate: f64,
     /// days since new moon
@@ -87,6 +90,9 @@ pub struct Weather {
     /// surface relative humidity (0..1) from live weather's temperature and
     /// dew point when available; None with hand-set weather
     pub humidity: Option<f32>,
+    /// how much warmer than the standard atmosphere the day is at sea level
+    /// (k), from the real weather's surface temperature; 0 with hand-set weather
+    pub isa_dev: f64,
 }
 
 /// What kind of convective cell: a shower (towering cumulus or a small
@@ -149,6 +155,15 @@ pub fn storm_top_share(age: f64) -> f64 {
 fn shower_anvil(base: f64, top: f64, age: f64) -> f32 {
     let top = top.max(base + 2200.0);
     (base + (top - base) / storm_top_share(age)) as f32
+}
+
+/// A wind aloft: height above sea level (m), speed (m/s) and the compass
+/// direction it blows from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Aloft {
+    pub alt: f64,
+    pub speed: f64,
+    pub from: f64,
 }
 
 /// What the air around the aircraft is doing beyond the mean wind.
@@ -327,7 +342,7 @@ fn sites(q: DVec3, grid: f64, range: f64, mut f: impl FnMut(DVec3, f64, u32)) {
 impl Weather {
     pub fn new(clouds: f32) -> Self {
         // A light west-south-westerly, as the smoke always drifted before there was a slider for it.
-        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, rain: 0.0, rain_set: None, deck: 0.0, deck_at: None, deck_ground: None, deck_place: None, deck_prev: None, deck_fade: 0.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), placed: Vec::new(), live_cells: Vec::new(), radar_cover: None, deck_goal: None, deck_tau: 6.0, live: false, live_station: String::new(), live_raw: String::new(), real_time: false, showers_only: false, qnh: 1013.25, freezing: None, blowing: 0.0, humidity: None }
+        Self { clouds, cloud_base: 1500.0, cloud_depth: 4500.0, storms: 0.2, alto: 0.25, haze: 1.0, rain: 0.0, rain_set: None, deck: 0.0, deck_at: None, deck_ground: None, deck_place: None, deck_prev: None, deck_fade: 0.0, wind: 4.0, wind_from: 248.0, gusts: 0.15, aloft: Vec::new(), time_rate: 1.0, moon_age: 11.5, cloud_off: DVec3::ZERO, sun: 0.5, thermal_off: DVec3::ZERO, cells: Vec::new(), placed: Vec::new(), live_cells: Vec::new(), radar_cover: None, deck_goal: None, deck_tau: 6.0, live: false, live_station: String::new(), live_raw: String::new(), real_time: false, showers_only: false, qnh: 1013.25, freezing: None, blowing: 0.0, humidity: None, isa_dev: 0.0 }
     }
 
     /// The rain deck's mean base and top, metres above sea level: the heavier
@@ -780,12 +795,103 @@ impl Weather {
         3.912 / (13.558e-6 + (3.996e-6 + 4.4e-6) * self.haze as f64) / 1000.0
     }
 
-    /// The steady wind (where the air moves to) at a point, in the planet frame,
-    /// stronger with height above the ground (a 1/7 power law from 10 m).
+    /// The steady wind (where the air moves to) at a point, in the planet
+    /// frame, `agl` metres above the ground: see `profile`.
     pub fn steady(&self, pos: DVec3, agl: f64) -> DVec3 {
         let (e, n, _) = geo::enu(pos);
+        // (`geo::pos_to_lla` without the longitude, which is not needed.)
+        let r = pos.length();
+        let (lat, alt) = ((pos.z / r).clamp(-1.0, 1.0).asin(), r - geo::R);
+        // (Some callers ask for a height above the ground near the ground:
+        // the sea-level height is then at least that.)
+        let (speed, from) = self.profile(lat, alt.max(agl), agl);
+        let to = (from + 180.0).to_radians();
+        (e * to.sin() + n * to.cos()) * speed
+    }
+
+    /// The wind the cloud field (and the storm cells in it) drift with and
+    /// lean their anvils along: twice the surface wind, in its direction. The
+    /// visible sky keeps this simple rule; the aircraft flies in `profile`.
+    pub fn cloud_drift(&self, pos: DVec3) -> DVec3 {
+        let (e, n, _) = geo::enu(pos);
         let to = (self.wind_from + 180.0).to_radians();
-        (e * to.sin() + n * to.cos()) * self.wind * (agl.max(2.0) / 10.0).powf(1.0 / 7.0).min(2.0)
+        (e * to.sin() + n * to.cos()) * (self.wind * 2.0)
+    }
+
+    /// How stable the lower air is, 0 (a sunny afternoon: convection mixes
+    /// it, the wind is much the same all the way up) to 1 (a clear calm
+    /// night: the ground cools the air above it, the wind near the ground
+    /// drops away from the wind above, and the shear is strong). A strong
+    /// wind stirs it towards neutral.
+    pub fn stability(&self) -> f64 {
+        (1.0 - self.convection()) * (1.0 - 0.7 * smoothstep(6.0, 15.0, self.wind))
+    }
+
+    /// Top of the boundary layer, metres above the ground: the convective
+    /// mixed layer by day, a few hundred metres on a stable night.
+    pub fn bl_top(&self) -> f64 {
+        let s = self.stability();
+        (self.mixed_top() * (1.0 - s) + (200.0 + 50.0 * self.wind).min(900.0) * s).max(150.0)
+    }
+
+    /// The wind's speed (m/s) and the direction it blows from (degrees) at
+    /// latitude `lat` (rad), `alt` metres above sea level, `agl` above the ground.
+    ///
+    /// - Up to the top of the boundary layer it grows from the 10 m wind as a
+    ///   power law, its exponent from about 0.11 (convective) to 0.38 (stable),
+    ///   to 1.4 (convective) .. 2.3 (stable) times the 10 m wind (Stull, An
+    ///   Introduction to Boundary Layer Meteorology, ch. 9; Garratt, The
+    ///   Atmospheric Boundary Layer, 1992).
+    /// - It veers with height through the layer (backs in the southern
+    ///   hemisphere), 12° to 35° from the surface to its top as it gets more
+    ///   stable (the Ekman spiral as observed over land), and a stable night
+    ///   has a low-level jet in the middle of the layer.
+    /// - Above it: the winds aloft a weather model reports (live weather),
+    ///   or else the layer-top wind growing with height (the thermal wind,
+    ///   about 2 m/s per km at mid latitudes, less in the tropics, half as
+    ///   much on a calm day) to the tropopause near 11 km and falling off above it.
+    pub fn profile(&self, lat: f64, alt: f64, agl: f64) -> (f64, f64) {
+        let s = self.stability();
+        let z = agl.max(2.0);
+        let zi = self.bl_top();
+        let expo = 0.11 + 0.27 * s;
+        let ratio = 1.4 + 0.9 * s;
+        let v_top = self.wind * ratio;
+        let hemi = lat.signum() * smoothstep(0.03, 0.15, lat.abs());
+        let veer = (12.0 + 23.0 * s) * hemi;
+        let from_top = self.wind_from + veer;
+        if z <= zi {
+            let mut v = self.wind * (z / 10.0).powf(expo).min(ratio);
+            // The nocturnal low-level jet: above the layer-top wind in the middle of a stable layer.
+            v += v_top * 0.4 * smoothstep(0.5, 1.0, s) * (std::f64::consts::PI * z / zi).sin().powi(2);
+            let frac = ((z / 10.0).ln() / (zi / 10.0).ln()).clamp(0.0, 1.0);
+            return (v, (self.wind_from + veer * frac).rem_euclid(360.0));
+        }
+        // Above the boundary layer, from its top (sea-level height `a0`).
+        let a0 = alt - agl + zi;
+        let vec = |speed: f64, from: f64| {
+            let r = from.to_radians();
+            DVec2::new(r.sin(), r.cos()) * speed
+        };
+        let back = |w: DVec2| (w.length(), w.x.atan2(w.y).to_degrees().rem_euclid(360.0));
+        let top = vec(v_top, from_top);
+        if !self.aloft.is_empty() {
+            // Between the layer top and the reported levels, in components.
+            let mut lo = (a0, top);
+            for l in self.aloft.iter().filter(|l| l.alt > a0) {
+                let w = vec(l.speed, l.from);
+                if alt <= l.alt {
+                    let t = ((alt - lo.0) / (l.alt - lo.0).max(1.0)).clamp(0.0, 1.0);
+                    return back(lo.1 + (w - lo.1) * t);
+                }
+                lo = (l.alt, w);
+            }
+            return back(lo.1);
+        }
+        let shear = (0.5 + 1.5 * smoothstep(0.17, 0.5, lat.abs())) * (0.5 + 0.5 * smoothstep(0.0, 8.0, self.wind));
+        let up = (alt.min(11000.0) - a0).max(0.0) / 1000.0;
+        let v = (v_top + shear * up) * (1.0 - 0.4 * smoothstep(11000.0, 16000.0, alt));
+        (v, from_top.rem_euclid(360.0))
     }
 
     /// Wind with gusts at a point and time: a few incommensurate swells per
@@ -807,7 +913,7 @@ impl Weather {
     /// and the thermals with the wind in the mixed layer below them.
     pub fn advance(&mut self, dt: f64, cam: DVec3) {
         // The cloud field is sampled at (position + offset), so it moves against the offset.
-        self.cloud_off -= self.steady(cam, 2000.0) * dt * 1.6;
+        self.cloud_off -= self.cloud_drift(cam) * dt * 1.6;
         self.thermal_off -= self.steady(cam, 300.0) * dt;
         // Keep the offset small so it never costs precision (the thermal lattice repeats nowhere, so a jump is harmless).
         if self.thermal_off.length() > 2.0e5 {
@@ -890,7 +996,7 @@ impl Weather {
         let top = self.mixed_top();
         let convt = 1.1 * conv * (1.0 - smoothstep(0.85 * top, 1.15 * top, agl)) * smoothstep(0.0, 60.0, agl).max(0.3);
         // In the cloud layer itself (strongest where it is cumulus-like rather than a flat deck).
-        let (_, _, alt) = geo::pos_to_lla(pos);
+        let (lat, _, alt) = geo::pos_to_lla(pos);
         let (base, ctop) = (self.base() as f64, (self.base() + self.depth()) as f64);
         let inside = smoothstep(base - 150.0, base + 100.0, alt) * (1.0 - smoothstep(ctop - 100.0, ctop + 200.0, alt));
         let cloud = inside * self.clouds as f64 * (0.7 + 0.8 * self.convection() + 0.6 * self.storms as f64);
@@ -906,7 +1012,8 @@ impl Weather {
         let st = crate::storm::local(self, pos, agl, t);
         let storm = st.sigma;
         let draft = st.draft;
-        let rest = convt * convt + cloud * cloud + deck * deck + storm * storm + background * background;
+        let cat = self.clear_air(pos, lat, alt);
+        let rest = convt * convt + cloud * cloud + deck * deck + storm * storm + background * background + cat * cat;
         let sigma_w = (mech * mech + rest).sqrt().min(13.0);
         // Near the ground the eddies are as small as the height and the horizontal
         // gusts larger than the vertical; aloft they are a few hundred metres across.
@@ -917,6 +1024,30 @@ impl Weather {
         // out sideways like that; a storm's are as strong across as up.)
         let sigma_h = (mech * mech / k.powf(0.8).clamp(0.25, 1.0) + rest).sqrt().min(13.0);
         Air { sigma_w, sigma_h, len_w, len_h, draft: self.thermal(pos, agl, t) * sunlit * if water { 0.2 } else { 1.0 } + draft, gust: st.gust }
+    }
+
+    /// clear air turbulence (sigma, m/s): where the wind changes fast with
+    /// height aloft, on the flanks of the jet stream, in patches tens of
+    /// kilometres long and a few hundred metres deep. light from about 4 kt per
+    /// 1000 ft of shear, moderate to severe past 8 (the vertical wind shear
+    /// rule of thumb forecasters use, Ellrod and Knapp 1992).
+    pub fn clear_air(&self, pos: DVec3, lat: f64, alt: f64) -> f64 {
+        if !(4_500.0..16_000.0).contains(&alt) {
+            return 0.0;
+        }
+        let wind = |a: f64| {
+            let (v, from) = self.profile(lat, a, a);
+            let r = from.to_radians();
+            DVec2::new(r.sin(), r.cos()) * v
+        };
+        let shear = (wind(alt + 300.0) - wind(alt - 300.0)).length() / 600.0;
+        let strength = smoothstep(0.0065, 0.016, shear);
+        if strength <= 0.0 {
+            return 0.0;
+        }
+        // patches: a slow lattice noise, flattened (wide and shallow).
+        let patch = smoothstep(0.45, 0.75, value_noise(pos / 45_000.0 + DVec3::Y * (alt / 700.0)));
+        4.5 * strength * patch
     }
 
     /// the flight card's weather: real weather and time, the presets, then the day, wind and sky in tiles.
@@ -930,9 +1061,9 @@ impl Weather {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| crate::menu::switch(ui, on));
             });
             let line = if i == 1 {
-                if self.real_time { t!("weather.the_sun_where_you_are", crate::menu::hhmm(local)) } else { t!("weather.set_by_hand_below").into() }
+                if self.real_time { t!("weather.the_sun_where_you_are", crate::menu::hhmm(local)) } else { String::new() }
             } else if !self.live {
-                t!("weather.set_by_hand_below").into()
+                String::new()
             } else if !self.live_station.is_empty() {
                 t!("weather.from_2", self.live_station)
             } else if self.live_raw.is_empty() {
@@ -940,7 +1071,9 @@ impl Weather {
             } else {
                 self.live_raw.clone()
             };
-            note(ui, &line);
+            if !line.is_empty() {
+                note(ui, &line);
+            }
         });
         // the presets as keys across the card.
         let free = !self.live;
@@ -960,55 +1093,54 @@ impl Weather {
         ui.add_space(GAP - ui.spacing().item_spacing.y);
         let clock_free = !self.real_time;
         cells(ui, 2, 268.0, |ui, i| {
+            use crate::menu::{slider_inline as row, Scale};
             ui.spacing_mut().item_spacing.y = 2.0;
+            let pc = |v: f64| format!("{:.0}%", v * 100.0);
             if i == 0 {
                 tag(ui, t!("weather.day"));
+                ui.add_space(2.0);
                 ui.add_enabled_ui(clock_free, |ui| {
                     let mut l = local;
-                    if row(ui, t!("weather.local_time"), crate::menu::hhmm(l), Slider::new(&mut l, 0.0..=23.99)).changed() {
+                    if row(ui, t!("weather.local_time"), &mut l, Scale::new(0.0, 23.99).step(0.25), crate::menu::hhmm).changed() {
                         *utc = (l - lon / 15.0).rem_euclid(24.0);
                     }
-                    let d = date_label(*doy);
-                    row(ui, t!("weather.date"), d, Slider::new(doy, 0.0..=364.0).step_by(1.0));
-                    let rate = self.time_rate;
-                    row(ui, t!("weather.clock"), if rate == 0.0 { t!("weather.stopped").into() } else { format!("{rate:.0}×") }, Slider::new(&mut self.time_rate, 0.0..=3600.0).logarithmic(true).smallest_positive(1.0));
+                    row(ui, t!("weather.date"), doy, Scale::new(0.0, 364.0).step(1.0), date_label);
+                    // the clock: stopped at the far left, then 1× to 3600× in even ratios.
+                    let stopped = t!("weather.stopped");
+                    let mut pos = clock_pos(self.time_rate);
+                    if row(ui, t!("weather.clock"), &mut pos, Scale::new(0.0, 1.0), |p| match clock_rate(p) { r if r == 0.0 => stopped.to_string(), r => format!("{r:.0}×") }).changed() {
+                        self.time_rate = clock_rate(pos);
+                    }
                 });
-                let moon = tr_en(moon_phase(self.moon_age)).to_string();
-                row(ui, t!("weather.moon"), moon, Slider::new(&mut self.moon_age, 0.0..=29.5));
+                row(ui, t!("weather.moon"), &mut self.moon_age, Scale::new(0.0, 29.5), |a| tr_en(moon_phase(a)).to_string());
                 ui.add_space(10.0);
                 tag(ui, t!("weather.wind"));
+                ui.add_space(2.0);
                 ui.add_enabled_ui(free, |ui| {
-                    let mut kt = self.wind * 1.94384;
-                    if row(ui, t!("weather.speed"), format!("{kt:.0} kt"), Slider::new(&mut kt, 0.0..=50.0)).changed() {
-                        self.wind = kt.round() / 1.94384;
+                    let mut kt = (self.wind * 1.94384).round();
+                    if row(ui, t!("weather.speed"), &mut kt, Scale::new(0.0, 50.0).step(1.0), |v| format!("{v:.0} kt")).changed() {
+                        self.wind = kt / 1.94384;
                     }
-                    let from = self.wind_from;
-                    row(ui, t!("weather.from"), format!("{from:03.0}° {}", tr_en(compass(from))), Slider::new(&mut self.wind_from, 0.0..=359.0).step_by(1.0));
-                    let g = self.gusts;
-                    row(ui, t!("weather.gusts"), format!("{:.0}%", g * 100.0), Slider::new(&mut self.gusts, 0.0..=1.0));
+                    row(ui, t!("weather.from"), &mut self.wind_from, Scale::new(0.0, 359.0).step(1.0), |v| format!("{v:03.0}° {}", tr_en(compass(v))));
+                    row(ui, t!("weather.gusts"), &mut self.gusts, Scale::new(0.0, 1.0).step(0.01), pc);
                 });
             } else {
                 tag(ui, t!("weather.sky"));
+                ui.add_space(2.0);
                 ui.add_enabled_ui(free, |ui| {
-                    let pc = |v: f32| format!("{:.0}%", v * 100.0);
-                    let v = self.clouds;
-                    row(ui, t!("weather.cloud_cover_2"), pc(v), Slider::new(&mut self.clouds, 0.0..=1.0));
-                    let v = self.cloud_base;
-                    row(ui, t!("weather.cloud_base_2"), format!("{v:.0} m"), Slider::new(&mut self.cloud_base, 300.0..=4000.0).step_by(50.0));
-                    let v = self.cloud_depth;
-                    row(ui, t!("weather.cloud_depth_2"), format!("{v:.0} m"), Slider::new(&mut self.cloud_depth, 500.0..=8000.0).step_by(50.0));
-                    let v = self.storms;
-                    row(ui, t!("weather.storm_cells_2"), pc(v), Slider::new(&mut self.storms, 0.0..=1.0));
-                    let v = self.alto;
-                    row(ui, t!("weather.mid_cloud"), pc(v), Slider::new(&mut self.alto, 0.0..=1.0));
+                    row(ui, t!("weather.cloud_cover_2"), &mut self.clouds, Scale::new(0.0, 1.0).step(0.01), pc);
+                    row(ui, t!("weather.cloud_base_2"), &mut self.cloud_base, Scale::new(300.0, 4000.0).step(50.0), |v| format!("{v:.0} m"));
+                    row(ui, t!("weather.cloud_depth_2"), &mut self.cloud_depth, Scale::new(500.0, 8000.0).step(50.0), |v| format!("{v:.0} m"));
+                    row(ui, t!("weather.storm_cells_2"), &mut self.storms, Scale::new(0.0, 1.0).step(0.01), pc);
+                    row(ui, t!("weather.mid_cloud"), &mut self.alto, Scale::new(0.0, 1.0).step(0.01), pc);
                     // rain left to the storm cells unless it is set here.
                     let mut r = self.rain_set.unwrap_or(self.rain);
-                    let shown = if self.rain_set.is_none() { t!("weather.auto").to_string() } else { pc(r) };
-                    if row(ui, t!("weather.rain"), shown, Slider::new(&mut r, 0.0..=1.0)).changed() {
+                    let auto = self.rain_set.is_none();
+                    let auto_word = t!("weather.auto");
+                    if row(ui, t!("weather.rain"), &mut r, Scale::new(0.0, 1.0).step(0.01), |v| if auto { menu_word(auto_word) } else { pc(v) }).changed() {
                         self.rain_set = Some(r);
                     }
-                    let v = self.haze;
-                    row(ui, t!("weather.haze"), format!("{v:.1}×"), Slider::new(&mut self.haze, 0.2..=40.0).logarithmic(true));
+                    row(ui, t!("weather.haze"), &mut self.haze, Scale::new(0.2, 40.0).log(), |v| format!("{v:.1}×"));
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -1025,9 +1157,9 @@ impl Weather {
         });
     }
 
-    /// The real-weather switch, and where the report comes from.
+    /// The real-weather switch, and the report it flies.
     fn live_switch(&mut self, ui: &mut egui::Ui) {
-        switch_row(ui, t!("weather.real_weather"), t!("weather.metar_else_open_meteo_radar"), &mut self.live);
+        crate::menu::toggle_row(ui, t!("weather.real_weather"), "", &mut self.live);
         if self.live {
             let text = if self.live_station.is_empty() {
                 if self.live_raw.is_empty() { t!("weather.waiting_for_a_report").to_string() } else { self.live_raw.clone() }
@@ -1036,18 +1168,20 @@ impl Weather {
             } else {
                 self.live_raw.clone()
             };
-            ui.add(egui::Label::new(RichText::new(text).font(egui::FontId::monospace(12.5)).color(crate::menu::DIM)).wrap());
+            // the report as it reads.
+            egui::Frame::new().fill(egui::Color32::from_rgb(11, 14, 20)).corner_radius(crate::menu::R_WIDGET).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(RichText::new(text).font(egui::FontId::monospace(12.5)).color(crate::menu::TEXT)).wrap());
+            });
+            ui.add_space(4.0);
         }
     }
 
-    /// The start screen's version: local time and date at the chosen spot
-    /// (the clock is set from them on take-off), then the sky and the wind.
     /// The start screen's weather: presets, sky and wind.
     pub fn start_weather(&mut self, ui: &mut egui::Ui) {
         self.live_switch(ui);
         ui.add_enabled_ui(!self.live, |ui| {
             self.presets(ui);
-            ui.add_space(4.0);
             self.sky_controls(ui);
             self.wind_controls(ui);
         });
@@ -1055,15 +1189,12 @@ impl Weather {
 
     /// The start screen's time: local time of day and the date.
     pub fn start_time(ui: &mut egui::Ui, hour: &mut f64, doy: &mut f64, real_time: &mut bool) {
-        real_time_switch(ui, real_time);
-        let free = !*real_time;
-        egui::Grid::new("start_time").num_columns(2).min_col_width(92.0).spacing([10.0, 5.0]).show(ui, |ui| {
-            row_label(ui, t!("weather.local_time"));
-            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(hour, 0.0..=23.99).custom_formatter(|v, _| crate::menu::hhmm(v))));
-            ui.end_row();
-            row_label(ui, t!("weather.date"));
-            ui.add_enabled_ui(free, |ui| add(ui, Slider::new(doy, 0.0..=364.0).step_by(1.0).custom_formatter(|v, _| date_label(v))));
-            ui.end_row();
+        use crate::menu::{slider, toggle_row, Scale};
+        toggle_row(ui, t!("weather.real_time"), "", real_time);
+        ui.add_enabled_ui(!*real_time, |ui| {
+            ui.add_space(4.0);
+            slider(ui, t!("weather.local_time"), "", hour, Scale::new(0.0, 23.99).step(0.25), crate::menu::hhmm);
+            slider(ui, t!("weather.date"), "", doy, Scale::new(0.0, 364.0).step(1.0), date_label);
         });
     }
 
@@ -1083,99 +1214,61 @@ impl Weather {
     }
 
     fn sky_controls(&mut self, ui: &mut egui::Ui) {
-        section(ui, t!("weather.sky"), |ui| {
-            row_label(ui, t!("weather.cloud_cover"));
-            add(ui, Slider::new(&mut self.clouds, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-            ui.end_row();
-            row_label(ui, t!("weather.cloud_base"));
-            add(ui, Slider::new(&mut self.cloud_base, 300.0..=4000.0).step_by(50.0).suffix(" m"));
-            ui.end_row();
-            row_label(ui, t!("weather.cloud_depth"));
-            add(ui, Slider::new(&mut self.cloud_depth, 500.0..=8000.0).step_by(50.0).suffix(" m"));
-            ui.end_row();
-            row_label(ui, t!("weather.storm_cells"));
-            add(ui, Slider::new(&mut self.storms, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-            ui.end_row();
-            row_label(ui, t!("weather.mid_level_cloud"));
-            add(ui, Slider::new(&mut self.alto, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-            ui.end_row();
-            row_label(ui, t!("weather.rain"));
-            ui.horizontal(|ui| {
-                let mut r = self.rain_set.unwrap_or(self.rain);
-                if add(ui, Slider::new(&mut r, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed() {
-                    self.rain_set = Some(r);
-                }
-                // Set, a rain deck (nimbostratus) that heavy closes in overhead;
-                // unset, the rain is wherever the storm cells drop it.
-                let mut auto = self.rain_set.is_none();
-                if crate::menu::toggle(ui, &mut auto, t!("weather.auto")).changed() {
-                    self.rain_set = if auto { None } else { Some(self.rain) };
-                }
-            });
-            ui.end_row();
-            row_label(ui, t!("weather.haze"));
-            add(ui, Slider::new(&mut self.haze, 0.2..=40.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.1}×")));
-            ui.end_row();
-            ui.label(RichText::new(t!("weather.visibility")).font(crate::menu::caption()).color(crate::menu::DIM));
-            ui.label(RichText::new(format!("~{:.0} km", self.visibility_km())).font(egui::FontId::monospace(12.5)).color(crate::menu::TEXT));
-            ui.end_row();
+        use crate::menu::{slider, Scale};
+        crate::menu::heading(ui, t!("weather.sky"));
+        ui.add_space(6.0);
+        let pc = |v: f64| format!("{:.0}%", v * 100.0);
+        slider(ui, t!("weather.cloud_cover"), "", &mut self.clouds, Scale::new(0.0, 1.0).step(0.01), pc);
+        slider(ui, t!("weather.cloud_base"), "", &mut self.cloud_base, Scale::new(300.0, 4000.0).step(50.0), |v| format!("{v:.0} m"));
+        slider(ui, t!("weather.cloud_depth"), "", &mut self.cloud_depth, Scale::new(500.0, 8000.0).step(50.0), |v| format!("{v:.0} m"));
+        slider(ui, t!("weather.storm_cells"), "", &mut self.storms, Scale::new(0.0, 1.0).step(0.01), pc);
+        slider(ui, t!("weather.mid_level_cloud"), "", &mut self.alto, Scale::new(0.0, 1.0).step(0.01), pc);
+        // Set, a rain deck (nimbostratus) that heavy closes in overhead;
+        // unset, the rain is wherever the storm cells drop it.
+        let mut auto = self.rain_set.is_none();
+        if crate::menu::toggle_row(ui, t!("weather.rain_auto"), t!("weather.rain_auto_hint"), &mut auto).changed() {
+            self.rain_set = if auto { None } else { Some(self.rain) };
+        }
+        ui.add_enabled_ui(self.rain_set.is_some(), |ui| {
+            let mut r = self.rain_set.unwrap_or(self.rain);
+            if slider(ui, t!("weather.rain"), "", &mut r, Scale::new(0.0, 1.0).step(0.01), pc).changed() {
+                self.rain_set = Some(r);
+            }
+        });
+        slider(ui, t!("weather.haze"), "", &mut self.haze, Scale::new(0.2, 40.0).log(), |v| format!("{v:.1}×"));
+        let vis = self.visibility_km();
+        crate::menu::form_row(ui, t!("weather.visibility"), "", |ui| {
+            ui.label(RichText::new(format!("{vis:.0} km")).font(crate::menu::semibold(14.5)).color(egui::Color32::WHITE));
         });
     }
 
     fn wind_controls(&mut self, ui: &mut egui::Ui) {
-        section(ui, t!("weather.wind"), |ui| {
-            row_label(ui, t!("weather.speed"));
-            let mut kt = self.wind * 1.94384;
-            if add(ui, Slider::new(&mut kt, 0.0..=50.0).fixed_decimals(0).suffix(" kt")).changed() {
-                self.wind = kt / 1.94384;
-            }
-            ui.end_row();
-            row_label(ui, t!("weather.from"));
-            add(ui, Slider::new(&mut self.wind_from, 0.0..=359.0).step_by(1.0).custom_formatter(|v, _| format!("{:03.0}° {}", v, tr_en(compass(v)))));
-            ui.end_row();
-            row_label(ui, t!("weather.gusts"));
-            add(ui, Slider::new(&mut self.gusts, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-            ui.end_row();
-        });
+        use crate::menu::{slider, Scale};
+        crate::menu::heading(ui, t!("weather.wind"));
+        ui.add_space(6.0);
+        let mut kt = (self.wind * 1.94384).round();
+        if slider(ui, t!("weather.speed"), "", &mut kt, Scale::new(0.0, 50.0).step(1.0), |v| format!("{v:.0} kt")).changed() {
+            self.wind = kt / 1.94384;
+        }
+        slider(ui, t!("weather.from"), "", &mut self.wind_from, Scale::new(0.0, 359.0).step(1.0), |v| format!("{:03.0}° {}", v, tr_en(compass(v))));
+        slider(ui, t!("weather.gusts"), "", &mut self.gusts, Scale::new(0.0, 1.0).step(0.01), |v| format!("{:.0}%", v * 100.0));
     }
 
     fn presets(&mut self, ui: &mut egui::Ui) {
-        crate::flightui::pane_section(ui, t!("weather.presets"));
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-            let now = self.summary();
-            for &(name, c, b, d, s, a, h, w, g) in PRESETS {
-                if crate::flightui::chip(ui, tr_en(name), false, !self.live && now == tr_en(name)).clicked() {
-                    (self.clouds, self.cloud_base, self.cloud_depth, self.storms, self.alto, self.haze, self.wind, self.gusts) = (c, b, d, s, a, h, w, g);
-                }
-            }
-        });
+        crate::menu::heading(ui, t!("weather.presets"));
+        ui.add_space(6.0);
+        let now = self.summary();
+        let names: Vec<&str> = PRESETS.iter().map(|p| tr_en(p.0)).collect();
+        let items: Vec<(&str, bool)> = names.iter().map(|n| (*n, !self.live && now == *n)).collect();
+        if let Some(k) = crate::menu::choice_grid(ui, 3, &items) {
+            let (_, c, b, d, s, a, h, w2, g) = PRESETS[k];
+            (self.clouds, self.cloud_base, self.cloud_depth, self.storms, self.alto, self.haze, self.wind, self.gusts) = (c, b, d, s, a, h, w2, g);
+        }
     }
 }
 
 use crate::i18n::{t, tr_en};
-use egui::{RichText, Slider};
-
-/// The "real time" switch above the clock's sliders.
-fn real_time_switch(ui: &mut egui::Ui, on: &mut bool) {
-    switch_row(ui, t!("weather.real_time"), t!("weather.the_sun_where_you_are_2"), on);
-}
-
-/// a switch on its own row with its name at the left.
-fn switch_row(ui: &mut egui::Ui, name: &str, hint: &str, on: &mut bool) {
-    let w = ui.available_width();
-    ui.allocate_ui_with_layout(egui::vec2(w, 36.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_width(w);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(RichText::new(name).font(crate::menu::label()).color(crate::menu::TEXT));
-            ui.label(RichText::new(hint).font(crate::menu::caption()).color(crate::flightui::SOFT));
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            crate::menu::switch(ui, on);
-        });
-    });
-}
+use egui::RichText;
 
 /// The real time now: hours UTC and the day of the year (0 = 1 January,
 /// the 29th of February counted as the 28th), from the system clock.
@@ -1201,6 +1294,21 @@ fn clock_at(secs: f64) -> (f64, f64) {
     (hours, doy as f64)
 }
 
+/// The clock rate's place on its slider: stopped at 0, then 1× to 3600× in even ratios.
+fn clock_pos(rate: f64) -> f64 {
+    if rate < 0.5 { 0.0 } else { 0.04 + 0.96 * (rate.max(1.0).ln() / 3600f64.ln()) }
+}
+
+/// The clock rate at a place on its slider.
+fn clock_rate(pos: f64) -> f64 {
+    if pos < 0.02 { 0.0 } else { 3600f64.powf(((pos - 0.04) / 0.96).clamp(0.0, 1.0)).round().max(1.0) }
+}
+
+/// a word shown as a value: its first letter a capital.
+fn menu_word(s: &str) -> String {
+    crate::menu::sentence(s).trim_end_matches('.').to_string()
+}
+
 /// "Jun 21", or "21 juin" in French.
 pub fn date_label(doy: f64) -> String {
     const LEN: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -1212,45 +1320,6 @@ pub fn date_label(doy: f64) -> String {
     }
     let month = crate::i18n::tr(&format!("date.month_{}", m + 1));
     t!("date.day_month", day = d.min(LEN[m] - 1) + 1, month = month)
-}
-
-/// A headed two-column grid of labelled sliders.
-fn section(ui: &mut egui::Ui, title: &str, rows: impl FnOnce(&mut egui::Ui)) {
-    crate::flightui::pane_section(ui, title);
-    egui::Grid::new(("wx", title)).num_columns(2).min_col_width(104.0).spacing([10.0, 6.0]).show(ui, rows);
-}
-
-/// a slider row in a tile: the name, the track and the value, each in its own column.
-fn row(ui: &mut egui::Ui, name: &str, value: String, slider: Slider) -> egui::Response {
-    let w = ui.available_width();
-    ui.allocate_ui_with_layout(egui::vec2(w, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.allocate_ui_with_layout(egui::vec2(86.0, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.set_min_width(86.0);
-            row_label(ui, name);
-        });
-        let vw = 92.0;
-        ui.spacing_mut().slider_width = (ui.available_width() - vw - 8.0).max(40.0);
-        let r = add(ui, slider.show_value(false));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add(egui::Label::new(RichText::new(value).font(crate::menu::medium(13.5)).color(egui::Color32::WHITE)).truncate());
-        });
-        r
-    })
-    .inner
-}
-
-/// a row's name.
-fn row_label(ui: &mut egui::Ui, s: &str) {
-    ui.label(RichText::new(s).font(crate::menu::caption()).color(crate::flightui::SOFT));
-}
-
-/// A focused slider would also take the arrow keys that fly the aircraft, so it lets go.
-fn add(ui: &mut egui::Ui, s: Slider) -> egui::Response {
-    let r = ui.add(s);
-    if r.drag_stopped() || r.clicked() || r.lost_focus() {
-        r.surrender_focus();
-    }
-    r
 }
 
 #[cfg(test)]
@@ -1287,6 +1356,76 @@ fn compass(deg: f64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_air_turbulence_rides_the_jet_streams_shear() {
+        let mut wx = Weather::new(0.1);
+        let at = |lat: f64, lon: f64, alt: f64| geo::lla_to_pos(lat.to_radians(), lon.to_radians(), alt);
+        let lat45 = 45f64.to_radians();
+        // no reported jet: the gentle default profile has no shear to speak of.
+        let calm = (0..200).map(|i| wx.clear_air(at(45.0, i as f64 * 0.3, 9_800.0), lat45, 9_800.0)).fold(0.0, f64::max);
+        assert_eq!(calm, 0.0);
+        // a jet of 70 m/s at 250 hpa over 35 m/s at 300 hpa: patches of it, not everywhere.
+        wx.aloft = vec![Aloft { alt: 1500.0, speed: 10.0, from: 260.0 }, Aloft { alt: 5600.0, speed: 25.0, from: 270.0 }, Aloft { alt: 9200.0, speed: 35.0, from: 270.0 }, Aloft { alt: 10400.0, speed: 70.0, from: 270.0 }];
+        let s: Vec<f64> = (0..400).map(|i| wx.clear_air(at(45.0, i as f64 * 0.05, 9_800.0), lat45, 9_800.0)).collect();
+        let rough = s.iter().filter(|x| **x > 0.5).count();
+        assert!(rough > 20 && rough < 380, "rough in {rough} of 400");
+        assert!(s.iter().all(|x| *x <= 4.5));
+        // down low and far above, none.
+        assert_eq!(wx.clear_air(at(45.0, 0.0, 3_000.0), lat45, 3_000.0), 0.0);
+        // and it reaches the airframe.
+        let i = s.iter().position(|x| *x > 1.5).expect("a rough patch");
+        let p = at(45.0, i as f64 * 0.05, 9_800.0);
+        let rough = wx.air(p, 9_000.0, 0.0, false).sigma_w;
+        wx.aloft.clear();
+        assert!(rough > wx.air(p, 9_000.0, 0.0, false).sigma_w + 1.0);
+    }
+
+    #[test]
+    fn the_wind_profile_is_continuous_veers_and_shears_with_stability() {
+        let lat = 45f64.to_radians();
+        for (sun, wind) in [(0.9, 5.0), (-0.3, 5.0), (0.5, 14.0), (-0.3, 0.0)] {
+            let mut wx = Weather::new(0.1);
+            (wx.sun, wx.wind, wx.wind_from) = (sun, wind, 200.0);
+            let zi = wx.bl_top();
+            let mut prev = wx.profile(lat, 10.0, 10.0);
+            let mut z = 10.0;
+            while z < 14000.0 {
+                let n = wx.profile(lat, z + 1.0, z + 1.0);
+                assert!((n.0 - prev.0).abs() < 0.3 && (n.0 < 0.5 || ((n.1 - prev.1 + 540.0).rem_euclid(360.0) - 180.0).abs() < 1.0), "sun {sun} wind {wind}: jump at {z} m: {prev:?} -> {n:?} (zi {zi})");
+                prev = n;
+                z += 1.0;
+            }
+            // The 10 m wind is what was set.
+            let (v10, d10) = wx.profile(lat, 10.0, 10.0);
+            assert!((v10 - wind).abs() < 0.05 * wind + 1e-9 && (d10 - 200.0).abs() < 8.0, "{v10} {d10}");
+            println!("sun {sun:4} wind {wind:4}: s {:.2} zi {zi:4.0}  100 m {:?}  zi {:?}  3 km {:?}  10 km {:?}", wx.stability(), wx.profile(lat, 100.0, 100.0), wx.profile(lat, zi, zi), wx.profile(lat, 3000.0, 3000.0), wx.profile(lat, 10000.0, 10000.0));
+        }
+        // Stable air: more shear near the ground than in the afternoon.
+        let mut wx = Weather::new(0.1);
+        (wx.wind, wx.sun, wx.wind_from) = (5.0, 0.9, 200.0);
+        let day = wx.profile(lat, 80.0, 80.0).0;
+        wx.sun = -0.3;
+        let night = wx.profile(lat, 80.0, 80.0).0;
+        assert!(night > day * 1.15, "{day} {night}");
+        // Veering in the north, backing in the south.
+        let top = wx.bl_top();
+        assert!(wx.profile(lat, top, top).1 > 210.0);
+        assert!(wx.profile(-lat, top, top).1 < 190.0);
+    }
+
+    #[test]
+    fn the_winds_aloft_follow_the_report() {
+        let mut wx = Weather::new(0.1);
+        (wx.wind, wx.wind_from, wx.sun) = (6.0, 240.0, 0.6);
+        wx.aloft = vec![Aloft { alt: 1500.0, speed: 12.0, from: 250.0 }, Aloft { alt: 5500.0, speed: 30.0, from: 290.0 }, Aloft { alt: 9300.0, speed: 50.0, from: 300.0 }];
+        let lat = 50f64.to_radians();
+        let at = |a: f64| wx.profile(lat, a, a - 200.0);
+        assert!((at(5500.0).0 - 30.0).abs() < 1e-6 && (at(5500.0).1 - 290.0).abs() < 1e-6);
+        assert!((at(12000.0).0 - 50.0).abs() < 1e-6);
+        let mid = at(7400.0);
+        assert!(mid.0 > 30.0 && mid.0 < 50.0 && mid.1 > 290.0 && mid.1 < 300.0, "{mid:?}");
+    }
 
     #[test]
     fn labels() {
@@ -1539,5 +1678,3 @@ mod tests {
         assert!(hi > 1.0 && lo < -0.2, "{lo} {hi}");
     }
 }
-
-

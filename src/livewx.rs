@@ -47,6 +47,8 @@ pub struct Target {
     /// nimbostratus rain deck); 0 = none
     pub rain: f32,
     pub haze: f32,
+    /// the winds aloft at the model's pressure levels (empty: none to be had)
+    pub aloft: Vec<crate::weather::Aloft>,
     /// m/s, and where from (None: variable)
     pub wind: f64,
     pub wind_from: Option<f64>,
@@ -60,6 +62,9 @@ pub struct Target {
     pub blowing: f32,
     /// surface relative humidity (0..1) from temperature and dew point when reported
     pub humidity: Option<f32>,
+    /// the surface temperature brought down to sea level at the standard
+    /// lapse rate, off the standard 15 c (k; None: not reported)
+    pub isa_dev: Option<f64>,
     /// what it came from, for the weather panel: "EBBR" or "Open-Meteo",
     /// and the report itself (the raw METAR)
     pub station: String,
@@ -104,6 +109,7 @@ impl LiveWx {
     /// the last frame (s; 0 jumps straight to the report, as on the globe).
     pub fn step(&mut self, src: &Arc<Sources>, wx: &mut Weather, at: Option<(f64, f64)>, dt: f64) {
         if !wx.live {
+            wx.aloft.clear();
             self.settled = false;
             if self.owns_rain {
                 self.owns_rain = false;
@@ -114,6 +120,7 @@ impl LiveWx {
             }
             // Hand-set weather: the standard atmosphere.
             wx.qnh = 1013.25;
+            wx.isa_dev = 0.0;
             wx.freezing = None;
             wx.blowing = 0.0;
             wx.humidity = None;
@@ -182,12 +189,19 @@ impl LiveWx {
             (wx.deck_goal, wx.deck_tau) = (None, 6.0);
         }
         self.owns_rain = true;
+        // The winds aloft eased in like the rest (a new report must not jolt
+        // the aircraft), level by level in components.
+        let lat = at.map_or(0.0, |(la, _)| la.to_radians());
+        ease_aloft(wx, &t.aloft, lat, k);
         wx.wind += (t.wind - wx.wind) * k;
         wx.gusts += (t.gusts - wx.gusts) * k;
         if let Some(q) = t.qnh {
             wx.qnh += (q - wx.qnh) * k;
         }
         wx.blowing = t.blowing;
+        if let Some(d) = t.isa_dev {
+            wx.isa_dev += (d - wx.isa_dev) * k;
+        }
         wx.humidity = match (wx.humidity, t.humidity) {
             (Some(a), Some(b)) => Some(a + (b - a) * k as f32),
             (_, b) => b,
@@ -225,7 +239,7 @@ impl LiveWx {
         let age = (now - r.time).clamp(0, RADAR_STALE) as f64;
         let cloud = |lat: f64, lon: f64| {
             let p = geo::lla_to_pos(lat.to_radians(), lon.to_radians(), 0.0);
-            let drift = wx.steady(p, 2000.0) * 1.6 * age;
+            let drift = wx.cloud_drift(p) * 1.6 * age;
             (p.normalize() * 6371.0 + (wx.cloud_off + drift) / 1000.0).normalize() * 6371.0
         };
         // A squall line stands as one (the shaders draw it across the wind
@@ -423,10 +437,19 @@ fn spawn(src: Arc<Sources>, shared: Arc<Mutex<Shared>>) {
                     Some((t, q)) => t.elapsed().as_secs_f64() > REFRESH || dist_km(p, q) > MOVE_KM,
                 };
                 if due {
-                    let res = metar(&src, p).or_else(|e| {
-                        log::info!("live weather: {e}; using Open-Meteo");
-                        open_meteo(&src, p)
-                    });
+                    let res = metar(&src, p)
+                        .or_else(|e| {
+                            log::info!("live weather: {e}; using Open-Meteo");
+                            open_meteo(&src, p)
+                        })
+                        .map(|mut t| {
+                            // The winds aloft from the model, where it answers.
+                            match winds_aloft(&src, p) {
+                                Ok(a) => t.aloft = a,
+                                Err(e) => log::info!("live weather: no winds aloft ({e})"),
+                            }
+                            t
+                        });
                     let mut s = shared.lock();
                     match res {
                         Ok(t) => {
@@ -533,6 +556,7 @@ fn from_metar(m: &serde_json::Value) -> Option<Target> {
     let clouds = if p.showers > 0.0 { clouds.max(0.45) } else { clouds };
     let foggy = ["FG", "BR", "HZ", "FU", "DU", "SA"].iter().any(|w| wx.contains(w));
     Some(Target {
+        aloft: Vec::new(),
         clouds,
         base_m,
         depth_m: depth(clouds, storms),
@@ -548,6 +572,7 @@ fn from_metar(m: &serde_json::Value) -> Option<Target> {
         freezing: freezing_for(m["temp"].as_f64().filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::snow::freezing_level(t, elev)), elev, p.snow),
         blowing: p.blowing,
         humidity: rh_from_td(m["temp"].as_f64(), m["dewp"].as_f64()),
+        isa_dev: isa_dev(m["temp"].as_f64(), elev),
         station,
         raw,
     })
@@ -566,6 +591,11 @@ struct Precip {
     snow: Option<f32>,
     /// snow blown up off the ground: BLSN 1, DRSN (drifting, low) 0.5
     blowing: f32,
+}
+
+/// a surface temperature (c) at `elev` (m) as the sea-level temperature off standard (k).
+fn isa_dev(temp_c: Option<f64>, elev: f64) -> Option<f64> {
+    temp_c.filter(|t| (-80.0..60.0).contains(t)).map(|t| t + crate::snow::LAPSE * elev - 15.0)
 }
 
 /// Surface relative humidity (0..1) from temperature and dew point (°C) via Magnus-Tetens.
@@ -680,6 +710,78 @@ fn haze(vis_km: Option<f64>, foggy: bool) -> f32 {
     }
 }
 
+/// Ease the weather's winds aloft towards the report's `target` levels by
+/// `k` (0..1). A report with a different set of levels first has the wind
+/// now sampled at its heights, so nothing jumps; a report with none (the
+/// model did not answer) eases towards the made-up profile and then drops
+/// the old levels, rather than keeping winds from wherever they were read.
+fn ease_aloft(wx: &mut Weather, target: &[crate::weather::Aloft], lat: f64, k: f64) {
+    use crate::weather::Aloft;
+    // (The levels are a kilometre and more up: the ground is taken at sea level.)
+    let sample = |wx: &Weather, alt: f64| {
+        let (speed, from) = wx.profile(lat, alt, alt);
+        Aloft { alt, speed, from }
+    };
+    let goal: Vec<Aloft> = if target.is_empty() {
+        if wx.aloft.is_empty() {
+            return;
+        }
+        let saved = std::mem::take(&mut wx.aloft);
+        let made_up = saved.iter().map(|l| sample(wx, l.alt)).collect();
+        wx.aloft = saved;
+        made_up
+    } else {
+        target.to_vec()
+    };
+    if wx.aloft.len() != goal.len() {
+        let now: Vec<Aloft> = goal.iter().map(|l| sample(wx, l.alt)).collect();
+        wx.aloft = now;
+    }
+    let v = |l: &Aloft| glam::DVec2::from_angle(l.from.to_radians()) * l.speed;
+    let mut off = 0.0f64;
+    for (a, b) in wx.aloft.iter_mut().zip(&goal) {
+        let w = v(a) + (v(b) - v(a)) * k;
+        a.alt += (b.alt - a.alt) * k;
+        a.speed = w.length();
+        a.from = w.to_angle().to_degrees().rem_euclid(360.0);
+        off = off.max((v(b) - w).length());
+    }
+    if target.is_empty() && off < 0.3 {
+        wx.aloft.clear();
+    }
+}
+
+/// The pressure levels the winds aloft are read at (hPa): about 1.5, 3, 5.5,
+/// 9 and 10.4 km up.
+const LEVELS: [u32; 5] = [850, 700, 500, 300, 250];
+
+/// The winds aloft at the player's spot, from Open-Meteo's model for this hour.
+fn winds_aloft(src: &Sources, (lat, lon): (f64, f64)) -> Result<Vec<crate::weather::Aloft>, String> {
+    let vars: Vec<String> = LEVELS.iter().flat_map(|l| [format!("wind_speed_{l}hPa"), format!("wind_direction_{l}hPa"), format!("geopotential_height_{l}hPa")]).collect();
+    let url = format!("https://api.open-meteo.com/v1/forecast?latitude={lat:.3}&longitude={lon:.3}&hourly={}&forecast_hours=1&wind_speed_unit=ms", vars.join(","));
+    let j = get_json(src, &url)?;
+    let a = aloft_from(&j);
+    if a.is_empty() { Err("unreadable Open-Meteo levels".into()) } else { Ok(a) }
+}
+
+/// The levels Open-Meteo gave (each its first hour), lowest first; a level
+/// missing any of its three values is left out.
+fn aloft_from(j: &serde_json::Value) -> Vec<crate::weather::Aloft> {
+    let h = &j["hourly"];
+    let first = |k: String| h[k.as_str()].get(0).and_then(|v| v.as_f64());
+    let mut out: Vec<crate::weather::Aloft> = LEVELS
+        .iter()
+        .filter_map(|l| {
+            let speed = first(format!("wind_speed_{l}hPa"))?;
+            let from = first(format!("wind_direction_{l}hPa"))?;
+            let alt = first(format!("geopotential_height_{l}hPa"))?;
+            (speed.is_finite() && (0.0..150.0).contains(&speed) && (0.0..20000.0).contains(&alt)).then_some(crate::weather::Aloft { alt, speed, from: from.rem_euclid(360.0) })
+        })
+        .collect();
+    out.sort_by(|a, b| a.alt.total_cmp(&b.alt));
+    out
+}
+
 /// Open-Meteo's model where there is no METAR near.
 fn open_meteo(src: &Sources, (lat, lon): (f64, f64)) -> Result<Target, String> {
     let url = format!(
@@ -746,6 +848,7 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
     let clouds = if matches!(code, 80..=82 | 85 | 86) { clouds.max(0.45) } else { clouds };
     let wind = f("wind_speed_10m")?;
     Some(Target {
+        aloft: Vec::new(),
         clouds,
         base_m: base,
         depth_m: depth(clouds, storms),
@@ -761,6 +864,7 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
         freezing: freezing_for(f("temperature_2m").filter(|t| (-80.0..60.0).contains(t)).map(|t| crate::snow::freezing_level(t, elev)), elev, snow),
         blowing: 0.0,
         humidity: rh_from_td(f("temperature_2m"), f("dew_point_2m")),
+        isa_dev: isa_dev(f("temperature_2m"), elev),
         station: "Open-Meteo".into(),
         raw: String::new(),
     })
@@ -769,6 +873,48 @@ fn from_open_meteo(j: &serde_json::Value) -> Option<Target> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn winds_aloft_ease_in_and_out_without_jumps() {
+        use crate::weather::Aloft;
+        let lat = 50f64.to_radians();
+        let mut wx = Weather::new(0.1);
+        (wx.wind, wx.wind_from) = (6.0, 240.0);
+        let report = vec![Aloft { alt: 1500.0, speed: 12.0, from: 250.0 }, Aloft { alt: 5500.0, speed: 30.0, from: 290.0 }, Aloft { alt: 9300.0, speed: 50.0, from: 300.0 }];
+        let probe = |wx: &Weather| wx.profile(lat, 7000.0, 7000.0).0;
+        // A first report, then a step of it: only a little of the way.
+        let before = probe(&wx);
+        ease_aloft(&mut wx, &report, lat, 0.05);
+        assert_eq!(wx.aloft.len(), 3);
+        assert!((probe(&wx) - before).abs() < 0.1 * (39.0 - before).abs() + 0.5, "{before} -> {}", probe(&wx));
+        ease_aloft(&mut wx, &report, lat, 1.0);
+        assert!(wx.aloft.iter().zip(&report).all(|(a, b)| (a.alt - b.alt).abs() < 1e-9 && (a.speed - b.speed).abs() < 1e-9 && (a.from - b.from).abs() < 1e-9));
+        // The model stops answering: it eases back to the made-up profile, then lets go.
+        let mut last = probe(&wx);
+        for _ in 0..300 {
+            ease_aloft(&mut wx, &[], lat, 0.05);
+            let p = probe(&wx);
+            assert!((p - last).abs() < 2.0, "{last} -> {p}");
+            last = p;
+        }
+        assert!(wx.aloft.is_empty());
+    }
+
+    #[test]
+    fn winds_aloft_from_open_meteo() {
+        // The shape Open-Meteo's hourly answer has (one hour); 500 hPa missing its height.
+        let j = serde_json::json!({"hourly":{"time":["2026-11-19T22:00"],
+            "wind_speed_850hPa":[12.5],"wind_direction_850hPa":[250.0],"geopotential_height_850hPa":[1480.0],
+            "wind_speed_700hPa":[18.0],"wind_direction_700hPa":[262.0],"geopotential_height_700hPa":[3050.0],
+            "wind_speed_500hPa":[27.0],"wind_direction_500hPa":[270.0],"geopotential_height_500hPa":[null],
+            "wind_speed_300hPa":[45.0],"wind_direction_300hPa":[275.0],"geopotential_height_300hPa":[9300.0],
+            "wind_speed_250hPa":[52.0],"wind_direction_250hPa":[-80.0],"geopotential_height_250hPa":[10500.0]}});
+        let a = aloft_from(&j);
+        assert_eq!(a.len(), 4);
+        assert_eq!((a[0].alt, a[0].speed, a[0].from), (1480.0, 12.5, 250.0));
+        assert_eq!(a[3].from, 280.0);
+        assert!(a.windows(2).all(|w| w[0].alt < w[1].alt));
+    }
 
     #[test]
     fn metar() {

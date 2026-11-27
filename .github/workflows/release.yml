@@ -89,13 +89,13 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build
         shell: bash
-        run: cargo build --release --locked --target ${{ matrix.target }} --bins
+        run: cargo build --profile dist --locked --target ${{ matrix.target }} --bins
       - name: Package
         shell: bash
         run: |
           dir="fableflight-$TAG-${{ matrix.name }}"
           mkdir "$dir"
-          bin="target/${{ matrix.target }}/release"
+          bin="target/${{ matrix.target }}/dist"
           if [ "$RUNNER_OS" = "Windows" ]; then
             cp "$bin/fablegame.exe" "$bin/fableflight-mcp.exe" "$bin/fableflight-launcher.exe" "$dir/"
             cp README.md LICENSE "$dir/"
@@ -107,10 +107,25 @@ jobs:
             tar czf "$dir.tar.gz" "$dir"
             echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
           fi
+      # a per-user installer next to the zip on windows x86-64 (inno setup is on the
+      # runner image); the launcher's updater only reads the zip, and a failure here
+      # never holds the release back.
+      - name: Installer (Windows)
+        if: matrix.name == 'windows-x86_64'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          $dir = "fableflight-$env:TAG-${{ matrix.name }}"
+          $ver = "$env:TAG".TrimStart('v')
+          & $iscc "/DAppVersion=$ver" "/DSrcDir=$PWD\$dir" "/DOutName=$dir-setup" "/O$PWD" installer/fableflight.iss
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            fableflight-*-setup.exe
           if-no-files-found: error
 
   release:

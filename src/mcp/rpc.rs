@@ -54,11 +54,10 @@ pub fn read_token(port: u16) -> Option<String> {
 
 fn generate_token() -> String {
     let mut bytes = [0u8; 16];
-    let mut filled = false;
     #[cfg(unix)]
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        filled = f.read_exact(&mut bytes).is_ok();
-    }
+    let filled = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).is_ok();
+    #[cfg(not(unix))]
+    let filled = false;
     if !filled {
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};

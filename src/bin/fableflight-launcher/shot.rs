@@ -21,8 +21,9 @@ pub fn render(path: &Path, page: Page) -> Result<(), String> {
     // FABLE_LAUNCHER_STATE=starting: the footer as a start is under way
     // (a stand-in process, the stages of a start fed in by hand)
     if std::env::var("FABLE_LAUNCHER_STATE").as_deref() == Ok("starting") {
-        let sleeper = if cfg!(windows) { "timeout" } else { "sleep" };
-        if let Ok(run) = crate::run::spawn(Path::new(sleeper), &["20".to_string()], &[], None) {
+        // (windows' timeout won't run without a console, ping waits as well)
+        let (sleeper, args): (&str, Vec<String>) = if cfg!(windows) { ("ping", vec!["-n".into(), "20".into(), "127.0.0.1".into()]) } else { ("sleep", vec!["20".into()]) };
+        if let Ok(run) = crate::run::spawn(Path::new(sleeper), &args, &[], None) {
             for (s, ms) in [("boot", 0), ("window", 300), ("gpu", 450), ("shaders", 700), ("shaders-part", 1500)] {
                 run.tl.lock().stage(s, Duration::from_millis(ms));
             }
@@ -46,7 +47,7 @@ pub fn render(path: &Path, page: Page) -> Result<(), String> {
     loop {
         out = ctx.run_ui(input(t0.elapsed().as_secs_f64()), |ui| app.draw(ui));
         deltas.push(std::mem::take(&mut out.textures_delta));
-        let waiting = matches!(app.releases, crate::Releases::Checking(_)) || app.version_rx.is_some() || (bench && !matches!(app.task, crate::Task::Idle) && t0.elapsed() < Duration::from_secs(400));
+        let waiting = matches!(app.releases, crate::Releases::Checking(..)) || app.version_rx.is_some() || (bench && !matches!(app.task, crate::Task::Idle) && t0.elapsed() < Duration::from_secs(400));
         if !waiting || (!bench && t0.elapsed() > Duration::from_secs(6)) {
             extra += 1;
             if extra > 3 {
@@ -66,6 +67,10 @@ pub fn render(path: &Path, page: Page) -> Result<(), String> {
                 r.update_texture(&device, &queue, *id, img);
             }
         }
+    }
+    // handled, so egui doesn't complain they were dropped.
+    for d in &mut deltas {
+        d.clear();
     }
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("launcher picture"),

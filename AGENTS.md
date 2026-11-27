@@ -9,7 +9,7 @@ These instructions apply throughout this repository.
 - Aircraft creation, substantial aircraft changes, flight-model tuning, complex graphics work, architectural changes, and broad refactors are not simple tasks.
 - Before substantive investigation or changes, check the model identity supplied by the runtime. If you do not meet the requirement, or cannot establish that you do, stop unless the task clearly falls within the simple-work exception. Do not split a complex task into small edits to bypass this rule.
 - When stopping, tell the user: "This task needs a stronger model. Please switch to Opus 5.5, GPT-6 Astra, Fable, or an equivalent or more capable model."
-
+- Agents, sign your model name at the end of your commit messages
 ## Learn from the existing aircraft
 
 Read the closest existing aircraft before adding or substantially changing one. Reuse the project's integration patterns while verifying real-world accuracy independently; existing values are not authoritative aircraft specifications.

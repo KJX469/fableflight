@@ -358,6 +358,13 @@ pub fn packs() -> &'static [Pack] {
     })
 }
 
+/// The people in the balloon baskets (assets/blender/people.py): a pack of
+/// meshes only, with its own texture layers (render.rs `set_people`).
+pub fn people() -> &'static Pack {
+    static P: OnceLock<Pack> = OnceLock::new();
+    P.get_or_init(|| Pack::parse("people", include_bytes!("../assets/balloon_people.bin.gz"), 0))
+}
+
 /// `--no-scenery`: the airfields as the game builds them, no packs.
 pub static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn on() -> bool {

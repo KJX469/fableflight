@@ -75,7 +75,8 @@ fn dry_power() -> f32 { return O.tint.z * step(O.glow.x, 0.001); }
 const WHITE_PAINT = vec3f(0.80, 0.80, 0.78);
 
 struct VOut {
-  @builtin(position) clip: vec4f,
+  // invariant so prepass and shading depth match
+  @builtin(position) @invariant clip: vec4f,
   @location(0) P: vec3f,
   @location(1) N: vec3f,
   @location(2) col: vec4f,
@@ -424,8 +425,8 @@ fn walkway_dr400(Lb: vec3f, aa: f32) -> f32 {
   let L = Lb - vec3f(0.0, 0.0, 0.55);
   let ax = abs(L.x);
   let xc = (L.z + 1.0) / 1.71;
-  if (ax < 0.56 || ax > 1.0 || xc < 0.05 || xc > 0.75 || L.y < -0.66 - 0.0895 * xc) { return 0.0; }
-  let e = min(min(ax - 0.585, 0.975 - ax), min(xc - 0.08, 0.72 - xc) * 1.71);
+  if (ax < 0.59 || ax > 1.03 || xc < 0.05 || xc > 0.75 || L.y < -0.66 - 0.0895 * xc) { return 0.0; }
+  let e = min(min(ax - 0.615, 1.005 - ax), min(xc - 0.08, 0.72 - xc) * 1.71);
   return smoothstep(-aa, aa, e);
 }
 fn livery_dr400(Lb: vec3f, aa: f32, pt: u32) -> vec3f {
@@ -447,7 +448,7 @@ fn livery_dr400(Lb: vec3f, aa: f32, pt: u32) -> vec3f {
       return mix(c, mix(vec3f(0.022, 0.022, 0.024), vec3f(0.055, 0.052, 0.05), worn), wk);
     }
   }
-  let fin = ax < 0.12 && L.y > 0.12 && L.z > 3.1;
+  let fin = ax < 0.12 && L.y > 0.12 && L.z > 2.6;
   if (!fin && ax < 0.6 && L.y < 0.5 && L.y > -0.5 && L.z > -2.42 && L.z < 4.4) {
     let zz = max(L.z - 0.9, 0.0);
     let yc = -0.07 + zz * 0.025;
@@ -459,12 +460,12 @@ fn livery_dr400(Lb: vec3f, aa: f32, pt: u32) -> vec3f {
     c = mix(c, pin_c, red);
   }
   if (fin) {
-    let edge = 0.78 - (L.z - 3.6) * 0.25;
+    let edge = 0.72 - (L.z - 3.5) * 0.25;
     c = mix(c, line_c, smoothstep(edge - aa, edge + aa, L.y));
     c = mix(c, pin_c, smoothstep(aa, -aa, abs(L.y - (edge - 0.05)) - 0.012));
   }
   if (ax > 4.12 && L.y > -0.2) { c = tip_c; }
-  if (ax > 1.45 && L.z > 3.4 && abs(L.y - 0.06) < 0.15) { c = line_c; }
+  if (ax > 1.45 && L.z > 2.7 && abs(L.y) < 0.15) { c = line_c; }
   if (L.z < -2.41) { c = tip_c; }
   return c;
 }
@@ -1600,8 +1601,10 @@ fn plume(in: VOut) -> vec4f {
   let ab = burner();
   let dry = dry_power();
   let L = in.L;
-  // (how far aft of the nozzle, in the Hornet's plume's lengths)
-  let z = (L.z - nozzle_at(L).z) / select(plume_scale(), SR71_PLUME.y, kind() == 7u);
+  // (how far aft of the nozzle, in the Hornet's plume's lengths; min reheat
+  // burns a shorter flame than max, which reaches the full length)
+  let reach = select(1.0, mix(0.55, 1.0, sat((ab - 0.3) / 0.7)), ab > 0.01);
+  let z = (L.z - nozzle_at(L).z) / select(plume_scale(), SR71_PLUME.y, kind() == 7u) / reach;
   let V = normalize(in.P);
   let ndv = abs(dot(normalize(in.N), V));
   let t = G.time.x;
@@ -1667,6 +1670,10 @@ struct Shaded { c: vec4f, n: vec4f, kill: f32, amb: f32 };
   let s = surface(in);
   if (s.kill > 0.5) { discard; }
   return GOut(s.c, s.n, s.amb);
+}
+// depth prepass, writes depth only
+@fragment fn fs_pre(in: VOut) -> GOut {
+  return GOut(vec4f(0.0), vec4f(0.0), 0.0);
 }
 @fragment fn fs_solid(in: VOut) -> GOut {
   let s = surface(in);
@@ -2125,19 +2132,21 @@ fn surface(in: VOut) -> Shaded {
       albedo = vec3f(0.01);
       rough = 0.05;
       let did = u32(in.mat.w + 0.5);
-      if (did >= 60u) {
+      // (a shader specialised to one kind keeps only its own cockpit's screens: the
+      // range is picked per pixel, so without the kind test every deck stays reachable.)
+      if (did >= 60u && (KIND == 99u || KIND == 9u)) {
         // The G650's PlaneView displays, SMCs, MCDUs and readouts (deck650.wgsl).
         emit = display650(did, in.uv, duv) * G.sun_dir.w * mix(0.07, 0.01, night);
         albedo = vec3f(0.010, 0.011, 0.013);
         rough = 0.1;
         ssr = 0.3;
-      } else if (did >= 40u) {
+      } else if (did >= 40u && (KIND == 99u || KIND == 2u || KIND == 3u || KIND == 4u || KIND == 7u)) {
         // The Hornet's DDIs, AMPCD, UFC windows and IFEI (pit18.wgsl).
         emit = display18(did, in.uv, duv) * G.sun_dir.w * mix(0.06, 0.009, night);
         albedo = vec3f(0.010, 0.012, 0.012);
         rough = 0.1;
         ssr = 0.3;
-      } else if (did >= 20u) {
+      } else if (did >= 20u && (KIND == 99u || KIND == 1u)) {
         // The 747's CRTs: bright enough by day, turned down at night.
         emit = display747(did, in.uv, duv) * G.sun_dir.w * mix(0.07, 0.01, night);
         albedo = vec3f(0.012, 0.014, 0.016);
@@ -2229,7 +2238,8 @@ fn surface(in: VOut) -> Shaded {
   let spec = l.sun * ggx(max(dot(N, H), 0.0), a) * vis(ndv, ndl, a) * Fs * ndl * sh * spec_k;
   // Inside the cabin, light bounces around off every surface: a fill that the
   // occlusion term alone would miss.
-  var inside = step(abs(L.x), 0.58) * step(-1.42, L.z) * step(L.z, 1.5) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL);
+  // (a box round the cessna's cabin; kinds 10 and up are not shaped like it)
+  var inside = step(abs(L.x), 0.58) * step(-1.42, L.z) * step(L.z, 1.5) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL && kind() < 10u);
   if (kind() == 1u) { inside = step(abs(L.x), 2.2) * step(-29.0, L.z) * step(L.z, -22.4) * step(1.9, L.y) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE); }
   // The Hornet's cockpit tub, under its canopy.
   if (kind() == 2u) { inside = step(abs(L.x), 0.56) * step(-6.2, L.z) * step(L.z, -3.1) * step(0.0, L.y) * select(0.0, 1.0, pt != P_HORNET); }
@@ -2237,7 +2247,7 @@ fn surface(in: VOut) -> Shaded {
   if (kind() == 4u) { inside = step(abs(L.x), F22_TUB.x) * step(F22_TUB.z, L.z) * step(L.z, F22_TUB.w) * step(F22_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 6u) { inside = step(abs(L.x), CONCORDE_TUB.x) * step(CONCORDE_TUB.z, L.z) * step(L.z, CONCORDE_TUB.w) * step(CONCORDE_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   if (kind() == 9u) { inside = step(abs(L.x), G650_TUB.x) * step(G650_TUB.z, L.z) * step(L.z, G650_TUB.w) * step(G650_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
-  if (kind() == 8u) { inside = step(abs(L.x), 0.56) * step(-0.62, L.z) * step(L.z, 1.66) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL); }
+  if (kind() == 8u) { inside = step(abs(L.x), 0.59) * step(-0.69, L.z) * step(L.z, 1.12) * step(L.y, 0.62) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL); }
   if (kind() == 10u) { inside = step(abs(L.x), 0.58) * step(-1.11, L.z) * step(L.z, 2.69) * step(-0.5, L.y) * step(L.y, 0.78) * select(0.0, 1.0, id != M_LIVERY && pt != P_FUSE && pt != P_COWL && pt != P_WING); }
   if (kind() == 7u) { inside = step(abs(L.x), SR71_TUB.x) * step(SR71_TUB.z, L.z) * step(L.z, SR71_TUB.w) * step(SR71_TUB.y, L.y) * select(0.0, 1.0, pt != P_HORNET); }
   // (a downloaded aircraft has no cabin of ours where its own model is)
@@ -2582,7 +2592,7 @@ fn tex_glass(in: VOut) -> vec4f {
   if (kind() == 4u) { in_cabin = from_inside && abs(eye_l.x) < F22_CABIN[0] && eye_l.y > F22_CABIN[1] && eye_l.y < F22_CABIN[2] && eye_l.z > F22_CABIN[3] && eye_l.z < F22_CABIN[4]; }
   if (kind() == 6u) { in_cabin = from_inside && abs(eye_l.x) < CONCORDE_CABIN[0] && eye_l.y > CONCORDE_CABIN[1] && eye_l.y < CONCORDE_CABIN[2] && eye_l.z > CONCORDE_CABIN[3] && eye_l.z < CONCORDE_CABIN[4]; }
   if (kind() == 9u) { in_cabin = from_inside && abs(eye_l.x) < G650_CABIN[0] && eye_l.y > G650_CABIN[1] && eye_l.y < G650_CABIN[2] && eye_l.z > G650_CABIN[3] && eye_l.z < G650_CABIN[4]; }
-  if (kind() == 8u) { in_cabin = from_inside && abs(eye_l.x) < 0.56 && eye_l.y > -0.52 && eye_l.y < 0.62 && eye_l.z > -0.62 && eye_l.z < 1.66; }
+  if (kind() == 8u) { in_cabin = from_inside && abs(eye_l.x) < 0.59 && eye_l.y > -0.52 && eye_l.y < 0.62 && eye_l.z > -0.69 && eye_l.z < 1.12; }
   if (kind() == 10u) { in_cabin = from_inside && abs(eye_l.x) < 0.58 && eye_l.y > -0.46 && eye_l.y < 0.78 && eye_l.z > -1.1 && eye_l.z < 2.7; }
   if (kind() == 7u) { in_cabin = from_inside && abs(eye_l.x) < SR71_CABIN[0] && eye_l.y > SR71_CABIN[1] && eye_l.y < SR71_CABIN[2] && eye_l.z > SR71_CABIN[3] && eye_l.z < SR71_CABIN[4]; }
   let wind = abs(in.Nl.x) < 0.5;
@@ -2645,6 +2655,11 @@ fn tex_glass(in: VOut) -> vec4f {
   if (kind() == 4u && !in_cabin) {
     rgb += env * (0.10 + 0.25 * F) * vec3f(1.0, 0.76, 0.40);
     trans *= 0.80;
+  }
+  // The Robin's big bubble is faintly smoked: from outside it reads as glass, not as an open cockpit.
+  if (kind() == 8u && !in_cabin) {
+    rgb += env * 0.03;
+    trans *= 0.74;
   }
   // Hairline scratches from years of wiping, fixed in the plastic. Each one
   // scatters sunlight only when it lies across the line to the sun, so the

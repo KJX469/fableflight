@@ -51,7 +51,7 @@ struct Globals {
   // it was begun. The looked-up one is a cross-fade of two maps, with their sun and
   // drift blended the same way.
   cs: array<vec4f, 12>,
-  alto: vec4f,       // mid-level cloud: amount 0..1, height (m)
+  alto: vec4f,       // mid-level cloud: amount 0..1, height (m); the season (season.rs): z the leaves' turn, w dormancy
   // The ocean (ocean.rs): offset of its coordinates + direction the wind blows
   // toward (east, north); wind (m/s), significant wave height (m), whitecap
   // cover, 1; slope covariance (east-east, north-north, east-north) of the
@@ -2679,4 +2679,39 @@ fn shade_lit(P: vec3f, N: vec3f, albedo: vec3f, l: Light, sh: f32) -> vec3f {
   let bounce = vec3f(0.15, 0.14, 0.12) * (l.sun * mu * 0.8 / PI + l.amb) * (0.5 - 0.5 * dot(N, l.upn));
   g_amb = albedo * (l.amb * sky + bounce);
   return albedo * ((l.sun * ndl * sh + moon) / PI + l.amb * sky + bounce + point_light(P, N));
+}
+
+// the season on the vegetation (season.rs, G.alto.zw): z the broadleaf trees'
+// turn (-1 fresh spring green, 0 summer, 1 full autumn), w dormancy (1 bare
+// and brown). broadleaf greens are told from the conifers' by their hue: the
+// conifers keep their dark blue green all year.
+fn season_leaf(albedo: vec3f, seed: f32) -> vec3f {
+  let turn = G.alto.z;
+  let dorm = G.alto.w;
+  if (abs(turn) < 0.001 && dorm < 0.001) { return albedo; }
+  let g = max(albedo.g, 1e-4);
+  let broad = smoothstep(0.42, 0.62, albedo.r / g) * (1.0 - smoothstep(0.62, 0.85, albedo.b / g));
+  let lum = dot(albedo, vec3f(0.3, 0.59, 0.11));
+  var c = albedo;
+  if (turn > 0.0) {
+    // yellow, orange and red by stand of trees, browning late on.
+    let hue = fract(seed * 7.31);
+    let warm = mix(mix(vec3f(1.25, 0.95, 0.18), vec3f(1.45, 0.62, 0.12), smoothstep(0.3, 0.7, hue)), vec3f(1.3, 0.32, 0.12), smoothstep(0.75, 0.95, hue));
+    c = mix(c, warm * lum * 1.6, broad * smoothstep(0.0, 0.6, turn) * (0.55 + 0.45 * fract(seed * 3.7)));
+  } else {
+    c = mix(c, c * vec3f(1.12, 1.18, 0.75), broad * (-turn) * 0.7);
+  }
+  // bare twigs, grey brown.
+  return mix(c, vec3f(0.32, 0.27, 0.22) * max(lum, 0.03) * 1.4, broad * dorm * 0.85);
+}
+
+// grass and crops going to straw and olive brown when dormant, and browning a little in autumn.
+fn season_ground(c: vec3f) -> vec3f {
+  let dorm = G.alto.w;
+  let turn = max(G.alto.z, 0.0);
+  if (dorm < 0.001 && turn < 0.001) { return c; }
+  let green = smoothstep(0.02, 0.18, (c.g - max(c.r, c.b)) / max(c.g, 1e-4));
+  let lum = dot(c, vec3f(0.3, 0.59, 0.11));
+  let o = mix(c, vec3f(1.15, 1.0, 0.62) * lum, green * dorm * 0.7);
+  return mix(o, vec3f(1.1, 0.95, 0.6) * lum, green * turn * 0.25);
 }

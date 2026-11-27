@@ -178,7 +178,7 @@ impl Tool {
                 "type": "object",
                 "properties": {
                     "engaged": { "type": "boolean", "description": "Autopilot on (true) or off (false)." },
-                    "lateral": { "type": "string", "enum": ["hdg", "nav", "apr", "roll"], "description": "Lateral mode." },
+                    "lateral": { "type": "string", "enum": ["hdg", "nav", "gps", "apr", "roll"], "description": "Lateral mode (gps follows the flight plan made on the start screen)." },
                     "vertical": { "type": "string", "enum": ["alt", "vs", "pitch"], "description": "Vertical mode (the glide slope comes with apr)." },
                     "heading_deg": { "type": "number", "minimum": 0.0, "maximum": 360.0, "description": "Heading bug, degrees true." },
                     "altitude_ft": { "type": "number", "minimum": 0.0, "maximum": 80000.0, "description": "Preselected altitude, feet: ALT holds it when reached, VS levels off there." },

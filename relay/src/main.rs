@@ -29,6 +29,18 @@
 //!   names it, or its own datagrams come back) and links with the others.
 //! - `FFMP_PEERS` (none): other relays to reach directly, `host[:port]`
 //!   separated by commas, as well or instead. See below.
+//! - `FFMP_MAX_PER_IP` (32): players at most from one address (a household,
+//!   a club or a mobile carrier's NAT shares one; one address flooding the
+//!   relay with players is held to this);
+//! - `FFMP_BANS` (none): a file of banned addresses, networks and names
+//!   (`bans.rs`), read again whenever it changes;
+//! - `FFMP_STATUS_POSITIONS` (off): the status page also shows where each
+//!   pilot is (to about a kilometre, as the game's world map does) and their
+//!   heading, on a map and in the list. Off, it shows no positions.
+//!
+//! Besides the status page, the HTTP port answers `/healthz` (`ok`, for
+//! health checks) and `/metrics`: this relay's counts in Prometheus' text
+//! format (players, watchers, relays up, packets, what was turned away).
 //!
 //! Federation: relays that list each other pass their own players to each
 //! other ten times a second, so a player on one sees the players near them on
@@ -52,6 +64,7 @@
 #[path = "../../src/mp_proto.rs"]
 #[allow(dead_code)]
 mod proto;
+mod bans;
 
 use proto::{Msg, PlayerState};
 use std::collections::hash_map::RandomState;
@@ -79,6 +92,25 @@ struct Config {
     secret: Option<String>,
     /// where players reach this relay ("host[:port]"), for the server list
     public: Option<String>,
+    /// players at most from one address
+    max_per_ip: usize,
+    /// the bans file (bans.rs)
+    bans: Option<std::path::PathBuf>,
+    /// the status page shows the pilots' positions (coarse, as `proto::Spot`)
+    positions: bool,
+}
+
+/// What was turned away, for /metrics.
+#[derive(Default)]
+struct Dropped {
+    /// from a banned address or name
+    banned: u64,
+    /// a new player with the relay full
+    full: u64,
+    /// a new player with too many from its address
+    per_ip: u64,
+    /// over its packet rate
+    rate: u64,
 }
 
 /// Another relay of the network.
@@ -147,13 +179,16 @@ struct Relay {
     remote: HashMap<(u32, u32), Remote>,
     me: u32,
     fed_seq: u32,
+    bans: bans::Bans,
+    dropped: Dropped,
 }
 
 impl Relay {
     fn new(cfg: Config) -> Self {
         let secret = RandomState::new();
         let me = { let mut h = secret.build_hasher(); std::process::id().hash(&mut h); Instant::now().hash(&mut h); h.finish() as u32 };
-        Relay { cfg, secret, players: HashMap::new(), pending: HashMap::new(), watchers: HashMap::new(), next_id: 1, peers: Vec::new(), remote: HashMap::new(), me, fed_seq: 0 }
+        let bans = bans::Bans::new(cfg.bans.clone());
+        Relay { cfg, secret, players: HashMap::new(), pending: HashMap::new(), watchers: HashMap::new(), next_id: 1, peers: Vec::new(), remote: HashMap::new(), me, fed_seq: 0, bans, dropped: Dropped::default() }
     }
 
     /// Looks the other relays' names up again (their addresses may change).
@@ -289,16 +324,26 @@ impl Relay {
 
     /// One datagram from `addr`; what to send back to it, if anything.
     fn receive(&mut self, addr: SocketAddr, data: &[u8], now: Instant, unix: u64) -> Option<Vec<u8>> {
+        if self.bans.ip(addr.ip()) {
+            self.dropped.banned += 1;
+            return None;
+        }
         if let Some(p) = self.players.get_mut(&addr) {
             let dt = now.saturating_duration_since(p.last).as_secs_f64();
             p.tokens = (p.tokens + dt * RATE).min(BURST);
             if p.tokens < 1.0 {
+                self.dropped.rate += 1;
                 return None;
             }
             p.tokens -= 1.0;
         }
         match Msg::decode(data)? {
             Msg::Hello { name } => {
+                // (A banned name gets no answer: the game keeps saying Hello, in vain.)
+                if self.bans.name(&name) {
+                    self.dropped.banned += 1;
+                    return None;
+                }
                 // Remember the name for a moment (bounded: under a flood, the oldest go).
                 if self.pending.len() >= PENDING_MAX {
                     if let Some(old) = self.pending.iter().min_by_key(|(_, v)| v.1).map(|(k, _)| *k) {
@@ -315,6 +360,11 @@ impl Relay {
                 }
                 if !self.players.contains_key(&addr) {
                     if self.players.len() >= self.cfg.max_players {
+                        self.dropped.full += 1;
+                        return None;
+                    }
+                    if self.players.keys().filter(|a| a.ip() == addr.ip()).count() >= self.cfg.max_per_ip {
+                        self.dropped.per_ip += 1;
                         return None;
                     }
                     // (Its name from its Hello, or from when it watched the world before taking off.)
@@ -448,14 +498,23 @@ impl Relay {
                 let r = (s.pos[0] * s.pos[0] + s.pos[1] * s.pos[1] + s.pos[2] * s.pos[2]).sqrt();
                 let v = s.vel.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
                 let ac = proto::AIRCRAFT.get(s.aircraft as usize).copied().unwrap_or("?");
+                // (Where, only when the operator chose to show it, and only as
+                // coarsely as the game's world map: about a kilometre.)
+                let at = if self.cfg.positions {
+                    let sp = proto::Spot::of(0, "", s);
+                    format!(",\"lat\":{:.2},\"lon\":{:.2},\"heading\":{:.0}", sp.lat_deg(), sp.lon_deg(), sp.heading_deg())
+                } else {
+                    String::new()
+                };
                 format!(
-                    "{{\"relay\":{},\"name\":{},\"aircraft\":{},\"alt_ft\":{:.0},\"speed_kt\":{:.0},\"on_ground\":{}}}",
+                    "{{\"relay\":{},\"name\":{},\"aircraft\":{},\"alt_ft\":{:.0},\"speed_kt\":{:.0},\"on_ground\":{}{}}}",
                     json_str(relay),
                     json_str(name),
                     json_str(ac),
                     (r - proto::PLANET_R) * 3.28084,
                     v * 1.94384,
-                    s.flags & proto::F_GROUND != 0
+                    s.flags & proto::F_GROUND != 0,
+                    at
                 )
             })
             .collect();
@@ -469,7 +528,7 @@ impl Relay {
             format!("{{\"name\":{},\"up\":{},\"self\":false,\"flying\":{}}}", json_str(name), up, if up { n } else { 0 })
         }));
         format!(
-            "{{\"version\":{},\"relay\":{},\"uptime_s\":{},\"max_players\":{},\"range_km\":{:.0},\"packets\":{},\"flying\":{},\"here\":{},\"watching\":{},\"network\":[{}],\"players\":[{}]}}",
+            "{{\"version\":{},\"relay\":{},\"uptime_s\":{},\"max_players\":{},\"range_km\":{:.0},\"packets\":{},\"flying\":{},\"here\":{},\"watching\":{},\"positions\":{},\"network\":[{}],\"players\":[{}]}}",
             json_str(env!("CARGO_PKG_VERSION")),
             json_str(&self.cfg.name),
             started.elapsed().as_secs(),
@@ -479,6 +538,7 @@ impl Relay {
             list.len(),
             here,
             self.watchers.len(),
+            self.cfg.positions,
             network.join(","),
             players.join(",")
         )
@@ -499,6 +559,55 @@ impl Relay {
             format!("{{\"name\":{},\"address\":{},\"up\":{},\"flying\":{}}}", json_str(name), addr(a), up, if up { n } else { 0 })
         }));
         format!("{{\"servers\":[{}]}}", list.join(","))
+    }
+
+    /// Reads the bans file again if it changed, and lets go of whoever it
+    /// now bans (they get no more answers and drop out on their side).
+    fn apply_bans(&mut self) {
+        if !self.bans.reload() {
+            return;
+        }
+        let bans = &self.bans;
+        let out: Vec<SocketAddr> = self.players.iter().filter(|(a, p)| bans.ip(a.ip()) || bans.name(&p.name)).map(|(a, _)| *a).collect();
+        for a in out {
+            if let Some(p) = self.players.remove(&a) {
+                println!("- {} (#{}) banned, {} flying", p.name, p.id, self.players.len());
+            }
+        }
+        self.watchers.retain(|a, w| !(bans.ip(a.ip()) || bans.name(&w.0)));
+        self.pending.retain(|a, p| !(bans.ip(a.ip()) || bans.name(&p.0)));
+    }
+
+    /// This relay's counts in Prometheus' text format, for /metrics.
+    fn metrics(&self, started: Instant, packets: u64) -> String {
+        let label = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        let here = self.players.values().filter(|p| p.state.is_some()).count();
+        let up = self.peers.iter().filter(|p| p.heard.is_some_and(|t| t.elapsed() < Duration::from_secs(5))).count();
+        let mut m = String::new();
+        let mut put = |name: &str, kind: &str, help: &str, lines: &[(String, String)]| {
+            m.push_str(&format!("# HELP fableflight_relay_{name} {help}\n# TYPE fableflight_relay_{name} {kind}\n"));
+            for (labels, v) in lines {
+                m.push_str(&format!("fableflight_relay_{name}{labels} {v}\n"));
+            }
+        };
+        let one = |v: String| vec![(String::new(), v)];
+        put("info", "gauge", "This relay's version and name.", &[(format!("{{version=\"{}\",name=\"{}\"}}", env!("CARGO_PKG_VERSION"), label(&self.cfg.name)), "1".into())]);
+        put("uptime_seconds", "gauge", "Seconds since the relay started.", &one(started.elapsed().as_secs().to_string()));
+        put("players", "gauge", "Players flying on this relay.", &one(here.to_string()));
+        put("max_players", "gauge", "This relay's player limit.", &one(self.cfg.max_players.to_string()));
+        put("watchers", "gauge", "Players on the start screen watching the world map.", &one(self.watchers.len().to_string()));
+        put("network_players", "gauge", "Players flying on the other relays of the network.", &one(self.remote.len().to_string()));
+        put("peers", "gauge", "Other relays of the network, by state.", &[("{state=\"up\"}".into(), up.to_string()), ("{state=\"down\"}".into(), (self.peers.len() - up).to_string())]);
+        put("packets_received_total", "counter", "UDP datagrams received.", &one(packets.to_string()));
+        let d = &self.dropped;
+        put(
+            "dropped_total",
+            "counter",
+            "Datagrams or players turned away, by reason.",
+            &[("{reason=\"banned\"}".into(), d.banned.to_string()), ("{reason=\"full\"}".into(), d.full.to_string()), ("{reason=\"per_ip\"}".into(), d.per_ip.to_string()), ("{reason=\"rate\"}".into(), d.rate.to_string())],
+        );
+        put("bans", "gauge", "1 when a bans file bans anyone.", &one(u8::from(!self.bans.is_empty()).to_string()));
+        m
     }
 
     /// Forgets the players gone quiet, and old Hellos.
@@ -543,9 +652,13 @@ fn json_str(s: &str) -> String {
 /// and fills the table in with text (never as markup).
 const PAGE: &str = include_str!("status.html");
 
-/// The HTTP side: GET / and GET /status.json, nothing else. Each connection
-/// gets two seconds and 2 KB of request.
-fn serve_http(listener: TcpListener, status: Arc<Mutex<(String, String)>>) {
+/// What the HTTP side serves, as of the last second: the status, the server
+/// list and the metrics.
+type Pages = Arc<Mutex<(String, String, String)>>;
+
+/// The HTTP side: GET /, /status.json, /servers.json, /metrics and /healthz,
+/// nothing else. Each connection gets two seconds and 2 KB of request.
+fn serve_http(listener: TcpListener, status: Pages) {
     for conn in listener.incoming() {
         let Ok(mut c) = conn else { continue };
         let status = status.clone();
@@ -554,7 +667,7 @@ fn serve_http(listener: TcpListener, status: Arc<Mutex<(String, String)>>) {
         });
     }
 }
-fn answer(c: &mut TcpStream, status: &Mutex<(String, String)>) -> std::io::Result<()> {
+fn answer(c: &mut TcpStream, status: &Mutex<(String, String, String)>) -> std::io::Result<()> {
     c.set_read_timeout(Some(Duration::from_secs(2)))?;
     c.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut buf = [0u8; 2048];
@@ -565,15 +678,22 @@ fn answer(c: &mut TcpStream, status: &Mutex<(String, String)>) -> std::io::Resul
         "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", PAGE.to_string()),
         "/status.json" => ("200 OK", "application/json", status.lock().map(|s| s.0.clone()).unwrap_or_default()),
         "/servers.json" => ("200 OK", "application/json", status.lock().map(|s| s.1.clone()).unwrap_or_default()),
+        "/metrics" => ("200 OK", "text/plain; version=0.0.4; charset=utf-8", status.lock().map(|s| s.2.clone()).unwrap_or_default()),
+        "/healthz" => ("200 OK", "text/plain; charset=utf-8", "ok\n".to_string()),
         _ => ("404 Not Found", "text/plain; charset=utf-8", "not found\n".to_string()),
     };
-    let head = format!("HTTP/1.1 {code}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'\r\nConnection: close\r\n\r\n", body.len());
+    let head = format!("HTTP/1.1 {code}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' https://tile.openstreetmap.org\r\nConnection: close\r\n\r\n", body.len());
     c.write_all(head.as_bytes())?;
     c.write_all(body.as_bytes())
 }
 
 fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+}
+
+/// A switch from the environment: 1, true, yes or on.
+fn env_on(k: &str) -> bool {
+    std::env::var(k).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 fn unix_now() -> u64 {
@@ -610,7 +730,8 @@ fn main() -> std::io::Result<()> {
         eprintln!("FFMP_PEER_SECRET needs 16 characters at least (the same on every relay): no federation");
         secret = None;
     }
-    let cfg = Config { max_players: env("FFMP_MAX_PLAYERS", 64usize).clamp(1, 10_000), range_m: env("FFMP_RANGE_KM", 150.0f64).clamp(1.0, 20_000.0) * 1000.0, name, secret, public };
+    let bans = std::env::var("FFMP_BANS").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).map(std::path::PathBuf::from);
+    let cfg = Config { max_players: env("FFMP_MAX_PLAYERS", 64usize).clamp(1, 10_000), range_m: env("FFMP_RANGE_KM", 150.0f64).clamp(1.0, 20_000.0) * 1000.0, name, secret, public, max_per_ip: env("FFMP_MAX_PER_IP", 32usize).max(1), bans, positions: env_on("FFMP_STATUS_POSITIONS") };
     let sock = UdpSocket::bind(("0.0.0.0", port))?;
     sock.set_read_timeout(Some(Duration::from_millis(20)))?;
     println!("fableflight-relay {} on udp/{port}: up to {} players, {} km", env!("CARGO_PKG_VERSION"), cfg.max_players, cfg.range_m / 1000.0);
@@ -627,7 +748,7 @@ fn main() -> std::io::Result<()> {
     }
     let started = Instant::now();
     let mut packets: u64 = 0;
-    let status = Arc::new(Mutex::new((relay.status_json(started, 0), relay.servers_json())));
+    let status: Pages = Arc::new(Mutex::new((relay.status_json(started, 0), relay.servers_json(), relay.metrics(started, 0))));
     let http_port: u16 = env("FFMP_HTTP_PORT", 7481);
     if http_port != 0 {
         let listener = TcpListener::bind(("0.0.0.0", http_port))?;
@@ -667,6 +788,7 @@ fn main() -> std::io::Result<()> {
         if now.duration_since(last_expire) >= Duration::from_secs(1) {
             last_expire = now;
             relay.expire(now);
+            relay.apply_bans();
             for (addr, p) in relay.world_packets() {
                 let _ = sock.send_to(&p, addr);
             }
@@ -675,7 +797,7 @@ fn main() -> std::io::Result<()> {
                 relay.resolve_peers();
             }
             if let Ok(mut s) = status.lock() {
-                *s = (relay.status_json(started, packets), relay.servers_json());
+                *s = (relay.status_json(started, packets), relay.servers_json(), relay.metrics(started, packets));
             }
         }
     }
@@ -689,13 +811,13 @@ mod tests {
         PlayerState { seq, aircraft: 0, pos: [6_371_000.0 + 1000.0, x, 0.0], rot: [0.0, 0.0, 0.0, 1.0], ..Default::default() }
     }
     fn relay() -> Relay {
-        Relay::new(Config { max_players: 3, range_m: 150_000.0, name: "here".into(), secret: None, public: Some("here.example:7480".into()) })
+        Relay::new(Config { max_players: 3, range_m: 150_000.0, name: "here".into(), secret: None, public: Some("here.example:7480".into()), max_per_ip: 8, bans: None, positions: false })
     }
     const SECRET: &str = "a secret for the tests";
     const T: u64 = 1_800_000_000;
     /// Relay `name` at 10.0.0.<ip>, federated with the relays at the other ips.
     fn fed_relay(name: &str, peers: &[u8]) -> Relay {
-        let mut r = Relay::new(Config { max_players: 10, range_m: 150_000.0, name: name.into(), secret: Some(SECRET.into()), public: None });
+        let mut r = Relay::new(Config { max_players: 10, range_m: 150_000.0, name: name.into(), secret: Some(SECRET.into()), public: None, max_per_ip: 8, bans: None, positions: false });
         r.peers = peers.iter().map(|ip| PeerRelay { host: format!("10.0.0.{ip}:7480"), addrs: vec![SocketAddr::from(([10, 0, 0, *ip], 7480))], name: String::new(), relay: 0, last_seq: 0, heard: None, found: None }).collect();
         r
     }
@@ -896,7 +1018,7 @@ mod tests {
         let j = b.servers_json();
         assert!(j.contains(r#""address":"10.0.0.1:7480""#) && j.contains(r#"{"name":"C","address":"10.0.0.3:7480","up":true,"flying":1}"#), "{j}");
         // Without the secret, nobody joins.
-        let mut stranger = Relay::new(Config { max_players: 3, range_m: 150_000.0, name: "X".into(), secret: Some("not the network's secret".into()), public: None });
+        let mut stranger = Relay::new(Config { max_players: 3, range_m: 150_000.0, name: "X".into(), secret: Some("not the network's secret".into()), public: None, max_per_ip: 8, bans: None, positions: false });
         stranger.peers = vec![PeerRelay { host: "hub".into(), addrs: vec![from(1)], name: String::new(), relay: 0, last_seq: 0, heard: None, found: None }];
         for (_, d) in stranger.fed_packets(T) {
             hub.receive(from(9), &d, now, T);
@@ -974,4 +1096,76 @@ mod tests {
         }
         assert!(taken <= BURST as u32 + 1, "{taken}");
     }
+
+    #[test]
+    fn one_address_takes_so_many_places() {
+        let mut r = Relay::new(Config { max_players: 10, range_m: 150_000.0, name: "here".into(), secret: None, public: None, max_per_ip: 2, bans: None, positions: false });
+        let now = Instant::now();
+        for n in 1..=3 {
+            join(&mut r, addr(n), &format!("p{n}"), 0.0, now);
+        }
+        assert_eq!(r.players.len(), 2);
+        assert_eq!(r.dropped.per_ip, 1);
+        // (Another address still gets in.)
+        join(&mut r, SocketAddr::from(([10, 0, 0, 2], 40_000)), "other", 0.0, now);
+        assert_eq!(r.players.len(), 3);
+    }
+
+    #[test]
+    fn a_ban_takes_effect_without_a_restart() {
+        let dir = std::env::temp_dir().join(format!("ffmp-relay-bans-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bans.txt");
+        let _ = std::fs::remove_file(&path);
+        let mut r = Relay::new(Config { max_players: 10, range_m: 150_000.0, name: "here".into(), secret: None, public: None, max_per_ip: 8, bans: Some(path.clone()), positions: false });
+        let now = Instant::now();
+        let far = SocketAddr::from(([192, 0, 2, 9], 5000));
+        join(&mut r, addr(1), "Griefer", 0.0, now);
+        join(&mut r, far, "Spammer", 0.0, now);
+        join(&mut r, addr(2), "Pilot", 0.0, now);
+        assert_eq!(r.players.len(), 3);
+        // Banned by name and by network: out at once, and no answer after.
+        std::fs::write(&path, "name: griefer\n192.0.2.0/24\n").unwrap();
+        r.apply_bans();
+        let names: Vec<&str> = r.players.values().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Pilot"]);
+        assert!(r.receive(addr(3), &Msg::Hello { name: "GRIEFER".into() }.encode(), now, T).is_none());
+        assert!(r.receive(far, &Msg::Hello { name: "new name".into() }.encode(), now, T).is_none());
+        assert_eq!(r.dropped.banned, 2);
+        // Lifted: back in.
+        std::fs::write(&path, "# nobody\n").unwrap();
+        r.apply_bans();
+        join(&mut r, far, "Spammer", 0.0, now);
+        assert_eq!(r.players.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metrics_in_prometheus_text() {
+        let (mut r, now) = (relay(), Instant::now());
+        r.cfg.name = "Q\"uote".into();
+        join(&mut r, addr(1), "Dany", 0.0, now);
+        let m = r.metrics(now, 12);
+        assert!(m.contains("fableflight_relay_players 1\n"), "{m}");
+        assert!(m.contains("fableflight_relay_packets_received_total 12\n"));
+        assert!(m.contains("fableflight_relay_dropped_total{reason=\"full\"} 0\n"));
+        assert!(m.contains("name=\"Q\\\"uote\""), "{m}");
+        // Every sample line: a name, maybe labels, a number.
+        for l in m.lines().filter(|l| !l.starts_with('#')) {
+            let v = l.rsplit(' ').next().unwrap();
+            assert!(l.starts_with("fableflight_relay_") && v.parse::<f64>().is_ok(), "{l}");
+        }
+    }
+
+    #[test]
+    fn positions_only_when_the_operator_shows_them() {
+        let (mut r, now) = (relay(), Instant::now());
+        join(&mut r, addr(1), "Dany", 0.0, now);
+        let off = r.status_json(now, 0);
+        assert!(off.contains("\"positions\":false") && !off.contains("\"lat\""), "{off}");
+        r.cfg.positions = true;
+        let on = r.status_json(now, 0);
+        assert!(on.contains("\"positions\":true") && on.contains("\"lat\":") && on.contains("\"heading\":"), "{on}");
+    }
 }
+

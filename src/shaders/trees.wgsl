@@ -419,6 +419,7 @@ fn solid_frag(in: VOut, cut: bool) -> Solid {
       N = normalize(abs(det) * N - sign(det) * (dh.x * r1 + dh.y * r2));
     }
     let n2 = textureSampleLevel(t_noise, s_repeat, in.L * 1.3, 0.0);
+    albedo = season_leaf(albedo, textureSampleLevel(t_noise, s_repeat, (in.P - G.planet.xyz) * 0.004, 0.0).r);
     let clump = mix(0.5, cl * 0.6 + n2.b * 0.4, near);
     albedo *= 0.65 + 0.7 * clump;
     // Under the leaf cards this is the inside of the crown.
@@ -588,6 +589,7 @@ fn blades(uv: vec2f, seed: f32, grow: f32) -> vec4f {
     albedo *= 0.72 + 0.56 * tone;
     albedo = mix(albedo, albedo * vec3f(1.35, 1.1, 0.5), smoothstep(0.9, 1.0, tone) * 0.4);
     albedo *= 0.88 + 0.2 * smoothstep(0.0, 0.5, m.z);
+    albedo = season_leaf(albedo, textureSampleLevel(t_noise, s_repeat, (in.P - G.planet.xyz) * 0.004, 0.0).r);
   }
   // Shade mostly as part of the crown, a little as the leaf's own tilted face.
   let tilt = vec3f(tone, fract(tone * 7.13), fract(tone * 13.7)) - 0.5;
@@ -930,6 +932,7 @@ fn imp_finish(Q: vec3f, C: vec3f, ex: vec4f, ey_sn: vec4f, tint_ball: vec4f, sun
   }
   let tn = mix(vec3f(dot(tint_ball.rgb, vec3f(1.0 / 3.0))), tint_ball.rgb, leaf);
   var albedo = acc.rgb * inv * tn * 2.0;
+  albedo = select(albedo, season_leaf(albedo, textureSampleLevel(t_noise, s_repeat, (Q - G.planet.xyz) * 0.004, 0.0).r), leaf > 0.5);
   if (ey_sn.w > 0.0 && leaf > 0.0) {
     albedo = mix(albedo, SNOW_ALBEDO, ey_sn.w * smoothstep(0.35, 0.9, dot(N, ey)) * 0.55 * leaf);
   }
@@ -1201,6 +1204,7 @@ struct IOutFar {
   }
   let tn = mix(vec3f(dot(in.tint.rgb, vec3f(1.0 / 3.0))), in.tint.rgb, leaf);
   var albedo = A.rgb * inv * tn * 2.0;
+  albedo = select(albedo, season_leaf(albedo, textureSampleLevel(t_noise, s_repeat, (in.Q - G.planet.xyz) * 0.004, 0.0).r), leaf > 0.5);
   if (in.wu.w > 0.0 && leaf > 0.0) {
     albedo = mix(albedo, SNOW_ALBEDO, in.wu.w * smoothstep(0.35, 0.9, dot(N, ey)) * 0.55 * leaf);
   }

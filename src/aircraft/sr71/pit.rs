@@ -519,7 +519,7 @@ fn controls(b: &mut Builder, f: &Face) {
     let mut at = Vec::new();
     for mut p in h.pieces {
         // (Its gear handle is on a panel that is not here.)
-        if p.name == "gear handle" {
+        if p.name == "gear handle" || p.name == "parking brake handle" {
             at.push(None);
             continue;
         }
@@ -539,6 +539,13 @@ fn controls(b: &mut Builder, f: &Face) {
     gh.lathe(&RED_LENS, c - w.ax * 0.012, w.ax, &[[0.0, 0.0], [0.0085, 0.0], [0.0085, 0.024], [0.0, 0.024]], 14, false);
     let piece = b.add("gear handle", G_ENGINE, gh, Anim::slide(Drive::new(Input::GearHandle, -0.028), w.ay), w.o, Vec3::X, None);
     b.pieces[piece].hotspot = Some(Hotspot::click(c - w.o, 0.021, "gear"));
+    // the parking brake: a t handle beside the gear handle, pulled out to set.
+    let pb = f.sub(GEAR_U + 0.045, GEAR_V - 0.03, 0.0);
+    let mut ph = Mesh::default();
+    ph.tube(&STEEL, &[pb.at_h(0.0, 0.0, -0.004), pb.at_h(0.0, 0.0, 0.022)], &|_| 0.004, 10, false);
+    ph.tube(&mt(mat::PLASTIC, 0.08, 0.08, 0.085), &[pb.at_h(-0.018, 0.0, 0.026), pb.at_h(0.018, 0.0, 0.026)], &|_| 0.0055, 10, true);
+    let piece = b.add("parking brake handle", G_ENGINE, ph, Anim::slide(Drive::new(Input::ParkingBrake, 0.03), pb.n()), pb.o, Vec3::X, None);
+    b.pieces[piece].hotspot = Some(Hotspot::click(pb.n() * 0.026, 0.016, "parking_brake"));
 }
 
 /// Looking down or behind from the front seat, the view is mostly of the cockpit.

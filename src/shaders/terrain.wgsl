@@ -1039,6 +1039,7 @@ fn fs_inner(in: VOut, check_photo: bool) -> GOut {
     albedo = mix(img, c, fade);
     N = normalize(N + nd * fade);
   }
+  albedo = season_ground(albedo);
   // Snow lying on the ground (snow.rs): from the height above the snow line,
   // the slope and the way the ground faces, broken by noise into tongues and
   // bare patches near the line. Water returned above; roads and runways are
@@ -1171,7 +1172,7 @@ fn fs_inner(in: VOut, check_photo: bool) -> GOut {
       return GOut(vec4f(img, 1.0), vec4f(max(depth, 0.15), wclass, shore, 1.0), 0.0);
     }
   }
-  var albedo = img;
+  var albedo = season_ground(img);
   let pp = in.P - G.planet.xyz;
   let pr = length(pp);
   let upn = pp / pr;

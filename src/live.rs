@@ -46,6 +46,20 @@ struct Report {
     age: f64,
 }
 
+/// a game-managed flight (aitraffic.rs), handed in like a report.
+pub struct AiReport {
+    pub hex: String,
+    pub call: String,
+    pub ty: String,
+    pub size: u8,
+    pub lat: f64,
+    pub lon: f64,
+    pub alt_m: f64,
+    pub gs: f64,
+    pub trk: f64,
+    pub vs: f64,
+}
+
 pub struct Plane {
     pub hex: String,
     /// callsign ("AFR77BJ"), else the registration or the ICAO address
@@ -117,11 +131,13 @@ pub struct Live {
     /// Aircraft shot down: their ICAO addresses and when, so a fresh ADS-B
     /// report does not put them back in the sky straight away.
     killed: HashMap<String, Instant>,
+    /// game-managed traffic is flying (aitraffic.rs): planes are flown on even with adsb off
+    pub ai: bool,
 }
 
 impl Live {
     pub fn new(on: bool) -> Self {
-        Self { shared: Arc::default(), on: Arc::new(AtomicBool::new(on)), thread: false, last_got: None, last_step: None, planes: Vec::new(), killed: HashMap::new() }
+        Self { shared: Arc::default(), on: Arc::new(AtomicBool::new(on)), thread: false, last_got: None, last_step: None, planes: Vec::new(), killed: HashMap::new(), ai: false }
     }
 
     pub fn enabled(&self) -> bool {
@@ -148,7 +164,7 @@ impl Live {
         let now = Instant::now();
         let dt = self.last_step.map(|t| (now - t).as_secs_f64()).unwrap_or(0.0).min(0.5);
         self.last_step = Some(now);
-        if !self.enabled() {
+        if !self.enabled() && !self.ai {
             return;
         }
         let want = at.map(|p| {
@@ -160,7 +176,7 @@ impl Live {
             s.want = want;
             s.got.as_ref().filter(|(t, _)| Some(*t) != self.last_got).cloned()
         };
-        if !self.thread && want.is_some() {
+        if !self.thread && want.is_some() && self.enabled() {
             self.thread = true;
             spawn(src.clone(), self.shared.clone(), self.on.clone());
         }
@@ -232,6 +248,13 @@ impl Live {
     }
 
     /// A new set of reports, received at `t`.
+    /// game-managed flights, flown in with the real ones.
+    pub fn take_ai(&mut self, flights: &[AiReport]) {
+        self.ai = true;
+        let reports: Vec<Report> = flights.iter().map(|f| Report { hex: f.hex.clone(), call: f.call.clone(), ty: f.ty.clone(), size: f.size, lat: f.lat, lon: f.lon, alt_m: f.alt_m, gs: f.gs, trk: f.trk, vs: f.vs, age: 0.0 }).collect();
+        self.take(Instant::now(), &reports);
+    }
+
     fn take(&mut self, t: Instant, reports: &[Report]) {
         let now = Instant::now();
         for r in reports {

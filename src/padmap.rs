@@ -166,9 +166,10 @@ const LAYOUT: &[(&str, Chord)] = {
         ("flaps_up", b(LB)),
         ("flaps_down", b(RB)),
         ("gear", b(L3)),
-        ("view_reset", b(R3)),
+        ("virtual_cursor", b(R3)),
         ("view_ahead", b(Up)),
-        ("view_down", b(Down)),
+        // held while speaking to atc (atc.rs), as caps lock is on the keys.
+        ("atc_talk", b(Down)),
         ("view_left", b(Left)),
         ("view_right", b(Right)),
         ("camera", b(View)),
@@ -198,6 +199,12 @@ pub fn actions() -> &'static [(&'static str, Option<Chord>)] {
     static ALL: std::sync::OnceLock<Vec<(&'static str, Option<Chord>)>> = std::sync::OnceLock::new();
     ALL.get_or_init(|| {
         let mut v: Vec<_> = LAYOUT.iter().map(|&(id, c)| (id, Some(c))).collect();
+        // views the layout leaves free can still be given a button.
+        for (id, _) in VIEWS {
+            if !v.iter().any(|(a, _)| *a == id) {
+                v.push((id, None));
+            }
+        }
         for a in crate::bind::ACTIONS {
             let skip = NOT_ON_PAD.contains(&a.id) || ROCKET.iter().any(|r| r.1 == a.id) || v.iter().any(|(id, _)| *id == a.id);
             if !skip {
@@ -222,9 +229,14 @@ fn default_of(id: &str) -> Option<Chord> {
 pub enum Does {
     Key(KeyCode),
     View(View),
+    /// the virtual cursor on or off.
+    Cursor,
 }
 
 pub fn does(id: &str, rocket: bool) -> Option<Does> {
+    if id == "virtual_cursor" {
+        return Some(Does::Cursor);
+    }
     if let Some((_, v)) = VIEWS.iter().find(|(v, _)| *v == id) {
         return Some(Does::View(*v));
     }
@@ -241,6 +253,7 @@ pub fn label(id: &str) -> &'static str {
         "view_left" => t!("gamepad.look_left"),
         "view_right" => t!("gamepad.look_right"),
         "view_reset" => t!("gamepad.reset_the_view"),
+        "virtual_cursor" => t!("gamepad.virtual_cursor"),
         "ap" => t!("gamepad.autopilot_rocket_autoland"),
         "master_arm" => t!("gamepad.master_arm_rocket_engines"),
         "target_lock" => t!("gamepad.lock_target_rocket_staging"),
@@ -771,6 +784,21 @@ pub fn spec_of(id: &str) -> String {
     NOW.with(|n| n.borrow().chord(id).map(Chord::spec).unwrap_or_default())
 }
 
+/// The same, with the flying keys as the stick that flies them: pitch,
+/// roll and rudder are axes on the pad, not buttons.
+pub fn spec_for(id: &str) -> String {
+    let axis = match id {
+        "pitch_up" | "pitch_down" => Some(PadAxis::Pitch),
+        "roll_left" | "roll_right" => Some(PadAxis::Roll),
+        "rudder_left" | "rudder_right" => Some(PadAxis::Rudder),
+        _ => None,
+    };
+    match axis {
+        Some(a) => NOW.with(|n| n.borrow().axis(a).map(|s| s.stick.spec()).unwrap_or_default()),
+        None => spec_of(id),
+    }
+}
+
 /// Actions shown on one row of the controls list when they sit together
 /// (all with Y, or all without): their buttons joined, and what they do.
 const GROUPS: &[(&[&str], &str)] = &[
@@ -864,7 +892,9 @@ mod tests {
         assert_eq!(r[0], ("LS".to_string(), "pitch and roll"));
         assert!(r.contains(&("A / B".to_string(), "throttle up / down (hold)")));
         assert!(r.contains(&("Y + Up / Down".to_string(), "trim nose down / up")));
-        assert!(r.contains(&("Dpad".to_string(), "quick views")));
+        // the d-pad: three quick views, and down held to talk to atc.
+        assert_eq!(m.chord("atc_talk"), Some(b(Down)));
+        assert!(r.iter().any(|x| x.0 == "Down") && r.iter().any(|x| x.0 == "Up") && !r.iter().any(|x| x.0 == "Dpad"));
         assert_eq!(does("tail_view", false), Some(Does::Key(KeyCode::F6)));
     }
 

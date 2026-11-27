@@ -954,6 +954,7 @@ impl Game {
             let m = match m {
                 "hdg" => Lat::Hdg,
                 "nav" => Lat::Nav,
+                "gps" => Lat::Gps,
                 "apr" => Lat::Apr,
                 "roll" => Lat::Roll,
                 _ => return Err(format!("unknown lateral mode {m:?}")),
@@ -978,6 +979,9 @@ impl Game {
         }
         if matches!(self.ap.lat, Lat::Nav | Lat::Apr) && self.radios.nav.is_none() {
             notes.push("NAV1 is not tuned: the mode stays armed, flying the heading bug (set_radios)");
+        }
+        if self.ap.lat == Lat::Gps && self.plan.done() {
+            notes.push("no flight plan to follow: GPS stays armed, flying the heading bug");
         }
         Ok(json!({ "ok": true, "notes": notes, "autopilot": self.autopilot_state() }))
     }

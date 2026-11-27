@@ -99,8 +99,12 @@ pub fn install() {
 /// Downloads and checks every file, then moves them into place; nothing is
 /// left half-installed on failure.
 pub fn download(progress: &dyn Fn(u64, u64)) -> Result<(), String> {
+    fetch(&FILES, dir().ok_or("no data folder")?, &notice(), progress)
+}
+
+/// downloads a set of files from the sdk into `d`, checked by size and hash.
+pub fn fetch(files: &[File], d: PathBuf, notice: &str, progress: &dyn Fn(u64, u64)) -> Result<(), String> {
     use std::io::{Read, Write};
-    let d = dir().ok_or("no data folder")?;
     let tmp = d.with_extension("part");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
@@ -110,9 +114,9 @@ pub fn download(progress: &dyn Fn(u64, u64)) -> Result<(), String> {
         .user_agent(crate::fetch::USER_AGENT)
         .build()
         .into();
-    let total = download_size();
+    let total: u64 = files.iter().map(|f| f.size).sum();
     let mut done = 0u64;
-    for f in &FILES {
+    for f in files {
         let url = format!("{BASE}{}", f.path);
         let mut r = agent.get(&url).call().map_err(|e| format!("{}: {e}", f.name))?;
         let mut rd = r.body_mut().with_config().limit(f.size + 1).reader();
@@ -141,7 +145,7 @@ pub fn download(progress: &dyn Fn(u64, u64)) -> Result<(), String> {
             return Err(format!("{}: checksum mismatch", f.name));
         }
     }
-    std::fs::write(tmp.join("NOTICE.txt"), notice()).map_err(|e| e.to_string())?;
+    std::fs::write(tmp.join("NOTICE.txt"), notice).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&d);
     std::fs::rename(&tmp, &d).map_err(|e| e.to_string())?;
     Ok(())
@@ -157,8 +161,12 @@ pub fn remove() {
 
 /// Checks the installed files' hashes (before loading code from them).
 pub fn verify() -> Result<PathBuf, String> {
-    let d = dir().ok_or("no data folder")?;
-    for f in &FILES {
+    check(&FILES, dir().ok_or("no data folder")?)
+}
+
+/// checks a set of installed files' hashes.
+pub fn check(files: &[File], d: PathBuf) -> Result<PathBuf, String> {
+    for f in files {
         let data = std::fs::read(d.join(f.name)).map_err(|e| format!("{}: {e}", f.name))?;
         if hex(ring::digest::digest(&ring::digest::SHA256, &data).as_ref()) != f.sha256 {
             return Err(format!("{}: checksum mismatch; download it again", f.name));
@@ -167,7 +175,7 @@ pub fn verify() -> Result<PathBuf, String> {
     Ok(d)
 }
 
-fn hex(b: &[u8]) -> String {
+pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -298,7 +306,11 @@ pub mod rt {
 
     /// Opens the device through wgpu-hal with FSR 4's extensions and features
     /// added to wgpu's own (only those the GPU has).
-    pub fn open_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor) -> Result<(wgpu::Device, wgpu::Queue), String> {
+    /// `fsr4` adds FSR 4's extensions, `fg` the frame generation queues (framegen.rs),
+    /// whose plan comes back with the device.
+    pub fn open_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor, fsr4: bool, fg: Option<crate::framegen::Families>) -> Result<(wgpu::Device, wgpu::Queue, Option<crate::framegen::Plan>), String> {
+        let plan = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let plan_out = plan.clone();
         unsafe {
             let open = {
                 let hal = adapter.as_hal::<Vulkan>().ok_or("not a Vulkan adapter")?;
@@ -346,8 +358,16 @@ pub mod rt {
                         ext.push(n);
                     }
                 }
-                log::info!("FSR 4 device: adding {:?}", ext);
+                if fsr4 {
+                    log::info!("FSR 4 device: adding {:?}", ext);
+                }
                 let cb = Box::new(move |args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_, '_>| {
+                    if let Some(f) = &fg {
+                        *plan_out.lock() = crate::framegen::add_queues(f, &mut *args.queue_create_infos);
+                    }
+                    if !fsr4 {
+                        return;
+                    }
                     for e in &ext {
                         if !args.extensions.contains(e) {
                             args.extensions.push(e);
@@ -416,7 +436,9 @@ pub mod rt {
                 });
                 hal.open_with_callback(desc.required_features, &desc.required_limits, &desc.memory_hints, Some(cb)).map_err(|e| e.to_string())?
             };
-            adapter.create_device_from_hal(open, desc).map_err(|e| e.to_string())
+            let (d, q) = adapter.create_device_from_hal(open, desc).map_err(|e| e.to_string())?;
+            let p = plan.lock().take();
+            Ok((d, q, p))
         }
     }
 
@@ -718,7 +740,7 @@ pub mod rt {
     pub fn features(_: &wgpu::Adapter) -> wgpu::Features {
         wgpu::Features::empty()
     }
-    pub fn open_device(_: &wgpu::Adapter, _: &wgpu::DeviceDescriptor) -> Result<(wgpu::Device, wgpu::Queue), String> {
+    pub fn open_device(_: &wgpu::Adapter, _: &wgpu::DeviceDescriptor, _: bool, _: Option<crate::framegen::Families>) -> Result<(wgpu::Device, wgpu::Queue, Option<crate::framegen::Plan>), String> {
         Err("FSR 4 needs Windows".into())
     }
     pub struct Runtime {

@@ -3,14 +3,19 @@
 # Players set "Server" to this machine's name in the game (Settings, Multiplayer).
 # Open 7480/udp in the firewall. The status page listens on 127.0.0.1:7481 only:
 # publish it through your reverse proxy (see README).
+# To pick up new relay versions by itself, run autoupdate.sh from cron (see
+# docs/relay.md, Automatic updates).
 services:
   relay:
-    image: ghcr.io/danux-be/fableflight-relay:latest
+    image: ghcr.io/rolandjg/fableflight-relay:latest
     build:
       context: ..
       dockerfile: relay/Dockerfile
     container_name: fableflight-relay
     restart: unless-stopped
+    # (A small init passes "stop" on to the relay, so it stops at once
+    # instead of being killed after 10 s: quicker restarts and updates.)
+    init: true
     environment:
       FFMP_PORT: "7480"
       FFMP_HTTP_PORT: "7481"
@@ -30,6 +35,14 @@ services:
       FFMP_HUB: ""
       # Other relays to reach directly, if any (host[:port], comma-separated).
       FFMP_PEERS: ""
+      # Players at most from one address (a household or a mobile carrier's
+      # NAT shares one).
+      FFMP_MAX_PER_IP: "32"
+      # A file of banned addresses, networks and names, read again when it
+      # changes (see docs/relay.md); mount it, e.g. ./bans.txt:/bans.txt:ro.
+      FFMP_BANS: ""
+      # "1": the status page also shows where the pilots are (to about a km).
+      FFMP_STATUS_POSITIONS: ""
     ports:
       - "7480:7480/udp"
       - "127.0.0.1:7481:7481/tcp"

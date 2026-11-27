@@ -6,3 +6,6 @@ assets/blender/ebaw/export/
 assets/blender/ebaw/data/
 assets/blender/ebaw/__pycache__/
 assets/blender/ebaw/*.blend1
+# relay/autoupdate.sh's log, lock and skip files
+relay/autoupdate.log
+relay/.autoupdate.*

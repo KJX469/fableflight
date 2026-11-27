@@ -19,7 +19,7 @@ use crate::{bind, geo, gmaps, i18n, mp, mp_proto, padmap, t, tiles3d, Game};
 use egui::{pos2, vec2, Align, Align2, Color32, Layout, Painter, Pos2, Rect, RichText, Sense, Stroke, Ui};
 
 /// The widest the content column gets, however wide the window.
-pub const MAX_W: f32 = 780.0;
+pub const MAX_W: f32 = 860.0;
 
 /// A section of the settings screen.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -58,18 +58,6 @@ impl Section {
             Section::Controls => t!("settings.controls"),
             Section::Map => t!("settings.map_and_data"),
             Section::Multiplayer => t!("settings.multiplayer"),
-        }
-    }
-
-    fn blurb(self) -> &'static str {
-        match self {
-            Section::General => t!("settings.language_the_hud_the_minimap"),
-            Section::Graphics => t!("settings.how_hard_the_renderer_works"),
-            Section::Sound => t!("settings.engine_wind_warnings_and_the"),
-            Section::Camera => t!("settings.where_the_camera_starts_and"),
-            Section::Controls => t!("settings.mouse_joysticks_pedals_gamepads_and"),
-            Section::Map => t!("settings.map_imagery_googles_3d_cities"),
-            Section::Multiplayer => t!("settings.fly_with_the_other_players"),
         }
     }
 
@@ -171,44 +159,120 @@ impl Section {
 
 // ---- building blocks for the sections (graphics.rs uses them too)
 
-/// A titled group of settings: a faint card with a small accent title.
-pub fn card(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
+thread_local! {
+    /// the search, lowercased (empty: no search).
+    static FIND: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// rows that matched in the card being drawn.
+    static HITS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// the card's own title matched: all of it shows.
+    static WHOLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// rows drawn so far in the card, for the lines between them.
+    static ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// cards shown in the section being drawn.
+    static CARDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// the search being shown, lowercased.
+fn find() -> String {
+    FIND.with(|f| f.borrow().clone())
+}
+
+fn hit(s: &str, q: &str) -> bool {
+    !q.is_empty() && s.to_lowercase().contains(q)
+}
+
+/// whether `body` would show anything under the search: drawn unseen and counted.
+fn any_hits(ui: &mut Ui, salt: &str, body: &mut dyn FnMut(&mut Ui)) -> bool {
+    HITS.with(|h| h.set(0));
+    let mut probe = ui.new_child(egui::UiBuilder::new().id_salt(("probe", salt)).invisible());
+    body(&mut probe);
+    HITS.with(|h| h.get()) > 0
+}
+
+/// A titled group of settings: a faint card with a small accent title. under a
+/// search only the rows that match show, and the card not at all without one.
+pub fn card(ui: &mut Ui, title: &str, mut body: impl FnMut(&mut Ui)) {
+    let q = find();
+    let whole = q.is_empty() || hit(title, &q);
+    if !whole && !any_hits(ui, title, &mut body) {
+        return;
+    }
+    CARDS.with(|c| c.set(c.get() + 1));
+    if !ui.is_visible() {
+        return;
+    }
+    WHOLE.with(|w| w.set(whole));
+    ROWS.with(|r| r.set(0));
+    // a section of the page under a hairline, as the other menus: no box of its own.
+    let top = ui.cursor().top();
+    ui.painter().hline(ui.available_rect_before_wrap().x_range(), top, Stroke::new(1.0, Color32::from_white_alpha(26)));
     egui::Frame::new()
-        .fill(menu::SURFACE)
-        .stroke(Stroke::new(1.0, menu::LINE))
-        .corner_radius(menu::R_PANEL)
-        .inner_margin(egui::Margin { left: 22, right: 22, top: 16, bottom: 14 })
+        .inner_margin(egui::Margin { left: 0, right: 0, top: 16, bottom: 12 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(menu::section_text(title));
-            ui.add_space(12.0);
+            ui.label(menu::section_text(title).color(DIM));
+            ui.add_space(8.0);
             ui.spacing_mut().item_spacing.y = 6.0;
             body(ui);
         });
-    ui.add_space(16.0);
+    // outside a card only what matches shows.
+    WHOLE.with(|w| w.set(q.is_empty()));
+    ui.add_space(14.0);
 }
 
-/// One `label | control` row: the label (and a short dim hint under it) in
-/// a fixed left column, the control to its right.
+/// one `label | control` row: the label on the left, the control against the
+/// right edge, a faint line between rows. the hint is only searched, not shown.
 pub fn row(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui)) {
+    row_in(ui, label, hint, false, add);
+}
+
+/// a `row` whose label has a "?" with the hint on hover, for a setting that needs explaining.
+pub fn row_help(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui)) {
+    row_in(ui, label, hint, true, add);
+}
+
+fn row_in(ui: &mut Ui, label: &str, hint: &str, show_help: bool, add: impl FnOnce(&mut Ui)) {
+    let q = find();
+    if !q.is_empty() && !WHOLE.with(|w| w.get()) && !hit(label, &q) && !hit(hint, &q) {
+        return;
+    }
+    HITS.with(|h| h.set(h.get() + 1));
+    if !ui.is_visible() {
+        return;
+    }
     let w = ui.available_width();
-    let lw = (w * 0.34).clamp(150.0, 250.0);
+    if ROWS.with(|r| { let n = r.get(); r.set(n + 1); n }) > 0 {
+        let y = ui.cursor().top() - 2.0;
+        ui.painter().hline(ui.cursor().left()..=ui.cursor().left() + w, y, Stroke::new(1.0, Color32::from_white_alpha(10)));
+        ui.add_space(6.0);
+    }
+    let lw = (w * 0.42).clamp(170.0, 320.0);
+    // the control's size last frame: its width pushes it right, its height centres the label on its first line.
+    let id = egui::Id::unique(("settings row size", label));
+    let last = ui.ctx().data(|d| d.get_temp::<egui::Vec2>(id)).unwrap_or(vec2(f32::INFINITY, 32.0));
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(vec2(lw, 0.0), Layout::top_down(Align::Min), |ui| {
-            ui.set_width(lw - 12.0);
-            ui.spacing_mut().item_spacing.y = 1.0;
-            ui.add_space(3.0);
-            ui.add(egui::Label::new(RichText::new(label).font(menu::label()).color(TEXT)).wrap());
-            if !hint.is_empty() {
-                ui.add(egui::Label::new(RichText::new(hint).font(menu::caption()).color(DIM)).wrap());
+            ui.set_width(lw - 16.0);
+            let lh = ui.painter().layout_no_wrap("Ag".into(), menu::label(), TEXT).size().y.max(if show_help { 18.0 } else { 0.0 });
+            // (a row is as tall as the interact height, which would push the name down)
+            ui.spacing_mut().interact_size.y = lh;
+            ui.add_space(((last.y.min(32.0) - lh) * 0.5).max(0.0));
+            menu::field_name(ui, label, if show_help { hint } else { "" });
+        });
+        let cw = (ui.available_width()).max(100.0);
+        ui.allocate_ui_with_layout(vec2(cw, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(cw);
+            // laid out left to right so it reads in order.
+            let right = ui.max_rect().right();
+            let at = Rect::from_min_size(pos2(right - last.x.min(cw), ui.cursor().top()), vec2(cw, f32::INFINITY));
+            let size = ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(Layout::top_down(Align::Min)), |ui| add(ui)).response.rect.size();
+            if (size - last).abs().max_elem() > 0.5 {
+                ui.ctx().data_mut(|d| d.insert_temp(id, size));
+                ui.ctx().request_discard("settings row size");
             }
         });
-        ui.vertical(|ui| {
-            ui.set_width((w - lw - 8.0).max(100.0));
-            add(ui);
-        });
     });
-    ui.add_space(8.0);
+    ui.add_space(6.0);
 }
 
 /// The first cell of a grid row, as wide as a `row`'s label column so
@@ -221,8 +285,15 @@ fn grid_label(ui: &mut Ui, text: &str, card_w: f32) {
     });
 }
 
-/// A dim explanatory line across the card.
+/// A dim explanatory line across the card (left out of a search unless it matches).
 pub fn note(ui: &mut Ui, text: &str) {
+    let q = find();
+    if !q.is_empty() && !WHOLE.with(|w| w.get()) && !hit(text, &q) {
+        return;
+    }
+    if !ui.is_visible() {
+        return;
+    }
     ui.add(egui::Label::new(RichText::new(text).font(menu::caption()).color(DIM)).wrap());
 }
 
@@ -236,6 +307,12 @@ pub fn show(ctx: &egui::Context, game: &mut Game, in_flight: bool) -> bool {
 impl Game {
     pub(crate) fn settings_screen(&mut self, ctx: &egui::Context, in_flight: bool) -> bool {
         let screen = ctx.content_rect();
+        if !in_flight {
+            match menu::page_turn(ctx) {
+                0 => {}
+                d => self.settings_sec = self.settings_sec.cycle(d > 0),
+            }
+        }
         let mut closed = false;
         egui::Area::new(egui::Id::unique("settings_screen")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
             // The backdrop takes every click; the game (or globe) behind is all but hidden.
@@ -251,7 +328,12 @@ impl Game {
             let mut s = ui.new_child(egui::UiBuilder::new().max_rect(side.shrink2(vec2(16.0, 28.0))).layout(Layout::top_down(Align::Min)));
             s.add_space(10.0);
             menu::screen_heading(&mut s, t!("settings.settings"));
-            s.add_space(24.0);
+            s.add_space(18.0);
+            // one box that searches every section.
+            egui::Frame::new().fill(menu::SURFACE).stroke(Stroke::new(1.0, menu::LINE_HI)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin { left: 17, right: 12, top: 12, bottom: 12 }).show(&mut s, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.settings_find).hint_text(t!("settings.search")).frame(egui::Frame::NONE).desired_width(f32::INFINITY).font(menu::label()));
+            });
+            s.add_space(14.0);
             s.spacing_mut().item_spacing.y = 2.0;
             // the chosen tab's marker slides to it.
             let marker = s.painter().add(egui::Shape::Noop);
@@ -261,23 +343,22 @@ impl Game {
                 if self.settings_sec == sec {
                     on_rect = Some(r.rect);
                 }
-                if r.clicked() && self.settings_sec != sec {
+                if r.clicked() {
                     self.settings_sec = sec;
+                    self.settings_find.clear();
                 }
             }
-            if let Some(r) = on_rect {
+            let searching = !self.settings_find.trim().is_empty();
+            if let (Some(r), false) = (on_rect, searching) {
                 let y = ctx.animate_value_with_time(s.scope_id().with("tab_marker"), r.top(), 0.2);
                 let m = Rect::from_min_size(pos2(r.left(), y), r.size());
                 s.painter().set(marker, egui::Shape::rect_filled(m, menu::R_WIDGET, Color32::from_white_alpha(14)));
-                let bar = Rect::from_center_size(pos2(m.left() + 1.5, m.center().y), vec2(3.0, m.height() * 0.5));
-                s.painter().add(egui::Shape::rect_filled(bar, 1.0, ACCENT));
+                s.painter().add(egui::Shape::rect_stroke(m, menu::R_WIDGET, egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.7)), egui::StrokeKind::Inside));
             }
             let foot = Rect::from_min_max(pos2(side.left() + 16.0, side.bottom() - 100.0), pos2(side.right() - 16.0, side.bottom() - 24.0));
             let mut f = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(Layout::bottom_up(Align::Min)));
             if padui::active() {
                 padui::prompts(&mut f, &[("LB / RB", crate::tr_en("section")), ("B", crate::tr_en("back"))], 18.0, 12.0, DIM);
-            } else {
-                f.label(RichText::new(t!("settings.changes_are_saved_as_you")).font(menu::caption()).color(DIM));
             }
             f.add_space(6.0);
             let back = if in_flight { t!("settings.back_to_the_pause_menu") } else { t!("settings.back") };
@@ -289,25 +370,45 @@ impl Game {
             let area = Rect::from_min_max(pos2(side.right() + 1.0, screen.top()), screen.max);
             let mut c = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
             let col_w = (area.width() - 96.0).clamp(320.0, MAX_W);
-            let left = ((area.width() - col_w) * 0.5).max(24.0);
+            // beside the sidebar, not adrift in the middle of a wide window.
+            let left = 48.0f32.min(((area.width() - col_w) * 0.5).max(24.0));
+            let q = self.settings_find.trim().to_lowercase();
+            FIND.with(|f| *f.borrow_mut() = q.clone());
+            WHOLE.with(|w| w.set(q.is_empty()));
             egui::ScrollArea::vertical().id_salt(("settings_scroll", self.settings_sec.name())).auto_shrink([false, false]).show(&mut c, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.add_space(left);
                     ui.vertical(|ui| {
                         ui.set_width(col_w);
                         ui.add_space(44.0);
-                        let sec = self.settings_sec;
-                        menu::page_heading(ui, sec.label(), sec.blurb());
-                        ui.add_space(24.0);
-                        ui.spacing_mut().slider_width = (col_w * 0.36).clamp(160.0, 300.0);
-                        match sec {
-                            Section::General => self.set_general(ui),
-                            Section::Graphics => self.set_graphics(ui),
-                            Section::Sound => self.set_sound(ui),
-                            Section::Camera => self.set_camera(ui, in_flight),
-                            Section::Controls => self.set_controls(ui),
-                            Section::Map => self.set_map(ui),
-                            Section::Multiplayer => self.set_multiplayer(ui, in_flight),
+                        ui.spacing_mut().slider_width = (col_w * 0.32).clamp(160.0, 280.0);
+                        if q.is_empty() {
+                            let sec = self.settings_sec;
+                            menu::page_heading(ui, sec.label(), "");
+                            ui.add_space(24.0);
+                            self.settings_section(ui, sec, in_flight);
+                        } else {
+                            menu::page_heading(ui, t!("settings.search_results"), "");
+                            ui.add_space(20.0);
+                            let mut any = false;
+                            for sec in Section::ALL {
+                                // drawn unseen first: a section with nothing that matches is left out.
+                                CARDS.with(|c| c.set(0));
+                                let mut probe = ui.new_child(egui::UiBuilder::new().id_salt(("section_probe", sec.name())).invisible());
+                                self.settings_section(&mut probe, sec, in_flight);
+                                if CARDS.with(|c| c.get()) == 0 {
+                                    continue;
+                                }
+                                any = true;
+                                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+                                sec.icon(ui.painter(), pos2(r.left() + 10.0, r.center().y), 16.0, ACCENT);
+                                ui.painter().text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, sec.label(), menu::label(), Color32::WHITE);
+                                ui.add_space(6.0);
+                                self.settings_section(ui, sec, in_flight);
+                            }
+                            if !any {
+                                ui.label(RichText::new(t!("settings.search_none")).font(menu::body()).color(DIM));
+                            }
                         }
                         ui.add_space(40.0);
                     });
@@ -316,7 +417,21 @@ impl Game {
             });
             ui.expand_to_include_rect(screen);
         });
+        FIND.with(|f| f.borrow_mut().clear());
         closed
+    }
+
+    /// one section's cards.
+    fn settings_section(&mut self, ui: &mut Ui, sec: Section, in_flight: bool) {
+        match sec {
+            Section::General => self.set_general(ui),
+            Section::Graphics => self.set_graphics(ui),
+            Section::Sound => self.set_sound(ui),
+            Section::Camera => self.set_camera(ui, in_flight),
+            Section::Controls => self.set_controls(ui),
+            Section::Map => self.set_map(ui),
+            Section::Multiplayer => self.set_multiplayer(ui, in_flight),
+        }
     }
 
     /// One sidebar tab: its icon and name, the chosen one marked in the accent colour.
@@ -343,6 +458,14 @@ impl Game {
         card(ui, t!("settings.language"), |ui| {
             row(ui, t!("settings.interface_language"), "", |ui| self.language_picker(ui));
         });
+        card(ui, t!("settings.display"), |ui| {
+            row(ui, t!("settings.full_screen"), t!("settings.f11_or_alt_enter_switches_at"), |ui| {
+                let mut on = self.window.fullscreen().is_some();
+                if menu::switch(ui, &mut on).changed() {
+                    self.set_fullscreen(on);
+                }
+            });
+        });
         card(ui, t!("settings.hud_and_minimap"), |ui| {
             row(ui, "HUD", t!("settings.key_h_in_flight"), |ui| {
                 menu::switch(ui, &mut self.show_hud);
@@ -350,14 +473,14 @@ impl Game {
             row(ui, t!("settings.hud_in_the_cockpit"), t!("settings.off_the_cockpits_own_instruments"), |ui| {
                 ui.add_enabled_ui(self.show_hud, |ui| menu::switch(ui, &mut self.hud_cockpit));
             });
-            row(ui, t!("settings.flight_path_marker"), t!("settings.a_ring_on_the_hud"), |ui| {
+            row_help(ui, t!("settings.flight_path_marker"), t!("settings.a_ring_on_the_hud"), |ui| {
                 ui.add_enabled_ui(self.show_hud, |ui| menu::switch(ui, &mut self.path_marker));
             });
             row(ui, t!("settings.minimap"), t!("settings.key_left_of_1_in"), |ui| {
                 menu::switch(ui, &mut self.minimap.visible);
             });
             row(ui, t!("settings.minimap_size"), t!("settings.it_fits_the_window_and"), |ui| {
-                if ui.add(egui::Slider::new(&mut self.minimap.size.x, 240.0..=640.0).step_by(10.0).suffix(" px")).changed() {
+                if ui.add(egui::Slider::new(&mut self.minimap.size.x, 240.0..=640.0).step_by(10.0).custom_formatter(|v, _| format!("{v:.0} px"))).changed() {
                     self.minimap.size.y = self.minimap.size.x;
                 }
             });
@@ -373,13 +496,16 @@ impl Game {
                     menu::seg(ui, &mut self.minimap.heading_up, true, t!("settings.heading_up"));
                 });
             });
-            row(ui, t!("settings.landing_guidance"), t!("settings.approach_arrows_and_tunnel"), |ui| {
+            row_help(ui, t!("settings.landing_guidance"), t!("settings.approach_arrows_and_tunnel"), |ui| {
                 menu::switch(ui, &mut self.minimap.landing_guidance);
             });
         });
         card(ui, t!("settings.mode"), |ui| {
-            row(ui, t!("settings.arcade_mode"), t!("settings.missiles_boost_on_any_aircraft"), |ui| {
+            row_help(ui, t!("settings.arcade_mode"), t!("settings.missiles_boost_on_any_aircraft"), |ui| {
                 menu::switch(ui, &mut self.arcade);
+            });
+            row(ui, t!("settings.topple_buildings"), t!("settings.a_building_you_crash_into"), |ui| {
+                menu::switch(ui, &mut self.topple_buildings);
             });
         });
         card(ui, t!("settings.air_traffic"), |ui| {
@@ -390,18 +516,22 @@ impl Game {
                 }
             });
         });
-        let t = if padui::active() { t!("settings.in_flight_view_switches_the") } else { t!("settings.shortcuts_in_flight_u_sound") };
-        note(ui, t);
     }
 
     fn set_graphics(&mut self, ui: &mut Ui) {
         let before = self.gfx;
         let size = self.window.inner_size();
         card(ui, t!("settings.preset"), |ui| self.gfx.preset_ui(ui));
-        card(ui, t!("settings.quality"), |ui| self.gfx.quality_ui(ui));
-        card(ui, t!("settings.display"), |ui| self.gfx.display_ui(ui, (size.width, size.height), self.fps));
+        let fg_note = match (&self.r.fg, &self.r.fg_err) {
+            (Some(fg), _) => Some(format!("AMD {}", fg.provider)),
+            (None, Some(e)) => Some(e.clone()),
+            _ => None,
+        };
+        let fps = self.fps;
+        card(ui, t!("settings.display"), |ui| self.gfx.display_ui(ui, (size.width, size.height), fps, fg_note.clone()));
         let cx = crate::graphics::UpscaleCx { gpu: &self.r.gpu, window: (size.width, size.height), active: self.r.up.active(), fsr4_blocked: crate::fsr4::blocked(&self.r.gpu, self.r.up.fsr4_error()), fsr4_provider: self.r.up.fsr4_provider().map(str::to_owned) };
         card(ui, t!("settings.upscaling"), |ui| self.gfx.upscaler_ui(ui, &cx));
+        card(ui, t!("settings.quality"), |ui| self.gfx.quality_ui(ui));
         card(ui, t!("settings.scenery"), |ui| {
             use crate::snow::Mode;
             row(ui, t!("settings.snow_on_the_ground"), t!("settings.automatic_from_the_date_the"), |ui| {
@@ -412,8 +542,6 @@ impl Game {
                 });
             });
         });
-        let on = if self.src.google.photoreal() { t!("settings.on") } else { t!("settings.off_2") };
-        note(ui, &t!("settings.googles_photorealistic_3d_cities_have", on));
         if self.gfx != before {
             self.gfx.save();
         }
@@ -426,6 +554,53 @@ impl Game {
             });
             row(ui, t!("settings.volume"), "", |ui| {
                 ui.add_enabled(self.sound_on, egui::Slider::new(&mut self.volume, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            });
+        });
+        // the controllers heard on the radio, with the voice pack downloaded on request (atc/install.rs).
+        card(ui, t!("settings.atc"), |ui| {
+            row(ui, t!("settings.atc_voices"), t!("settings.atc_voices_hint"), |ui| {
+                menu::switch(ui, &mut self.atc_voices);
+            });
+            // a bluetooth headset drops to call quality while its own mic is open: another mic keeps it in music mode.
+            row_help(ui, t!("settings.atc_microphone"), t!("settings.atc_microphone_hint"), |ui| {
+                let mics = crate::atc::listen::microphones();
+                let default = t!("settings.atc_microphone_default").to_string();
+                let shown = if self.atc_mic.is_empty() { default.clone() } else { self.atc_mic.clone() };
+                let before = self.atc_mic.clone();
+                egui::ComboBox::from_id_salt("atc_mic").width(260.0).selected_text(egui::RichText::new(shown).font(menu::label())).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.atc_mic, String::new(), default);
+                    for m in &mics {
+                        ui.selectable_value(&mut self.atc_mic, m.clone(), m);
+                    }
+                });
+                if self.atc_mic != before {
+                    crate::atc::listen::set_microphone(&self.atc_mic);
+                }
+            });
+            row_help(ui, t!("settings.atc_voice_pack"), t!("settings.atc_voices_about"), |ui| {
+                use crate::atc::install::{self, State};
+                let caption = |ui: &mut Ui, s: &str| {
+                    ui.label(RichText::new(s).font(menu::caption()).color(DIM));
+                };
+                match install::state() {
+                    State::Unsupported => caption(ui, t!("settings.atc_voices_unsupported")),
+                    State::NotInstalled | State::Failed(_) => {
+                        if menu::button(ui, &t!("settings.atc_voices_download", crate::bytes(install::download_size()))).clicked() {
+                            install::install();
+                        }
+                        if let State::Failed(e) = install::state() {
+                            caption(ui, &t!("settings.atc_voices_failed", e));
+                        }
+                    }
+                    State::Downloading(a, b) => {
+                        ui.add(egui::ProgressBar::new(a as f32 / b.max(1) as f32).desired_width(200.0).text(format!("{} / {}", crate::bytes(a), crate::bytes(b))));
+                    }
+                    State::Installed => {
+                        if menu::button(ui, t!("settings.atc_voices_remove")).clicked() {
+                            install::remove();
+                        }
+                    }
+                }
             });
         });
     }
@@ -457,6 +632,22 @@ impl Game {
             row(ui, t!("settings.invert_outside_vertical"), t!("settings.invert_view_hint"), |ui| {
                 menu::switch(ui, &mut self.invert_look_outside_y);
             });
+            // a webcam (or trackir, or a phone) through opentrack: what it says is live.
+            let port = crate::headtrack::port();
+            row_help(ui, t!("settings.head_tracking"), &t!("settings.head_tracking_how", port), |ui| {
+                let on = crate::headtrack::pose().is_some();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    let (dot, text) = if on { (menu::OK, t!("settings.head_tracking_on").to_string()) } else { (menu::DIM, t!("settings.head_tracking_waiting", port).to_string()) };
+                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 3.5, dot);
+                    ui.label(egui::RichText::new(text).font(menu::label()).color(if on { egui::Color32::WHITE } else { menu::DIM }));
+                    if menu::button(ui, t!("settings.get_opentrack")).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab("https://github.com/opentrack/opentrack/releases"));
+                    }
+                });
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            });
         });
     }
 
@@ -475,15 +666,12 @@ impl Game {
         card(ui, t!("settings.joystick_axes"), |ui| self.binds_axes(ui, &words));
         card(ui, t!("settings.buttons_joystick_throttle_wheel"), |ui| self.binds_buttons(ui, &words));
         card(ui, t!("settings.keyboard"), |ui| self.binds_keys(ui, &words));
-        if ui.add_enabled(self.binds.capture.is_none(), egui::Button::new(t!("settings.reset_all_bindings"))).clicked() {
+        if ui.add_enabled_ui(self.binds.capture.is_none(), |ui| menu::button(ui, t!("settings.reset_all_bindings"))).inner.clicked() {
             self.binds = bind::Bindings::default();
             self.keys.clear();
         }
         ui.add_space(14.0);
         card(ui, t!("settings.key_reference"), |ui| {
-            let t = if padui::active() { t!("settings.in_flight_y_view_shows") } else { t!("settings.in_flight_tab_shows_the") };
-            note(ui, t);
-            ui.add_space(6.0);
             menu::controls_list(ui);
         });
     }
@@ -493,29 +681,28 @@ impl Game {
         let has_key = !self.gkey.trim().is_empty();
         let need_key = t!("settings.enter_a_google_maps_platform");
         card(ui, t!("settings.map_imagery"), |ui| {
-            row(ui, t!("settings.google_api_key"), t!("settings.map_tiles_api_billed_to"), |ui| {
+            row_help(ui, t!("settings.google_api_key"), t!("settings.map_tiles_api_billed_to"), |ui| {
                 ui.horizontal(|ui| {
-                    let r = ui.add(egui::TextEdit::singleline(&mut self.gkey).password(!self.gkey_show).hint_text(t!("settings.google_maps_platform_key")).desired_width((ui.available_width() - 60.0).min(380.0)));
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.gkey).password(!self.gkey_show).hint_text(t!("settings.google_maps_platform_key")).font(menu::label()).margin(vec2(10.0, 7.0)).desired_width(260.0));
                     if r.lost_focus() || (r.changed() && self.gkey.trim().is_empty()) {
                         g.set_key(&self.gkey);
                     }
-                    if ui.button(if self.gkey_show { t!("settings.hide") } else { t!("settings.show") }).clicked() {
+                    if menu::choice(ui, if self.gkey_show { t!("settings.hide") } else { t!("settings.show") }, false, 70.0).clicked() {
                         self.gkey_show = !self.gkey_show;
                     }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.hyperlink_to(RichText::new(t!("settings.how_to_get_a_key")).font(menu::caption()), "https://developers.google.com/maps/documentation/tile/get-api-key");
-                    ui.label(RichText::new("·").font(menu::caption()).color(DIM));
-                    ui.hyperlink_to(RichText::new(t!("settings.cloud_console_credentials")).font(menu::caption()), "https://console.cloud.google.com/google/maps-apis/credentials");
+                    if menu::choice(ui, t!("settings.how_to_get_a_key"), false, 0.0).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab("https://developers.google.com/maps/documentation/tile/get-api-key"));
+                    }
                 });
             });
-            row(ui, t!("settings.satellite_imagery"), if has_key { t!("settings.google_maps") } else { need_key }, |ui| {
+            let about = format!("{} {}", menu::sentence(if has_key { t!("settings.google_maps") } else { need_key }), if g.enabled() { t!("settings.terrain_and_roofs_take_googles") } else { t!("settings.off_the_free_default_imagery") });
+            row_help(ui, t!("settings.satellite_imagery"), &about, |ui| {
                 let mut on = g.enabled();
                 if ui.add_enabled_ui(has_key, |ui| menu::switch(ui, &mut on)).inner.changed() {
                     g.set_key(&self.gkey);
                     g.set_enabled(on);
                 }
-                note(ui, if on { t!("settings.terrain_and_roofs_take_googles") } else { t!("settings.off_the_free_default_imagery") });
             });
             let status = g.status.lock().clone();
             if !status.is_empty() {
@@ -524,15 +711,16 @@ impl Game {
         });
         card(ui, t!("settings.photorealistic_3d_cities"), |ui| {
             let mut photo = g.photoreal();
-            row(ui, t!("settings.google_3d_tiles"), if has_key { t!("settings.beta") } else { need_key }, |ui| {
+            let detail = g.detail();
+            let zone_km = tiles3d::Params::of(detail).zone_r / 1000.0;
+            let about = format!("{} {}", menu::sentence(if has_key { t!("settings.beta") } else { need_key }), if photo { t!("settings.googles_photogrammetry_meshes_replace_th", zone_km = zone_km) } else { t!("settings.off_our_own_3d_world").to_string() });
+            row_help(ui, t!("settings.google_3d_tiles"), &about, |ui| {
                 if ui.add_enabled_ui(has_key, |ui| menu::switch(ui, &mut photo)).inner.changed() {
                     g.set_key(&self.gkey);
                     g.set_photoreal(photo);
                 }
             });
-            let detail = g.detail();
-            let zone_km = tiles3d::Params::of(detail).zone_r / 1000.0;
-            row(ui, t!("settings.3d_detail"), "", |ui| {
+            row_help(ui, t!("settings.3d_detail"), &t!("settings.one_billed_session_per_flight", crate::detail_hint(detail)), |ui| {
                 ui.add_enabled_ui(photo, |ui| {
                     let mut d = detail;
                     menu::segments(ui, |ui| {
@@ -549,10 +737,8 @@ impl Game {
                     if d != detail {
                         g.set_detail(d);
                     }
-                    note(ui, &t!("settings.one_billed_session_per_flight", crate::detail_hint(detail)));
                 });
             });
-            note(ui, &if photo { t!("settings.googles_photogrammetry_meshes_replace_th", zone_km = zone_km) } else { t!("settings.off_our_own_3d_world").to_string() });
         });
         card(ui, t!("settings.google_usage"), |ui| {
             let u = g.usage.lock().clone();
@@ -574,7 +760,6 @@ impl Game {
             if u.total_roots > 0 {
                 line(ui, t!("settings.3d_sessions"), t!("settings.this_month_all_time", u.month_roots, u.total_roots));
             }
-            note(ui, t!("settings.counts_only_calls_that_reach"));
         });
         card(ui, t!("settings.real_world_data"), |ui| {
             row(ui, t!("settings.real_weather"), t!("settings.metar_else_open_meteo_radar"), |ui| {
@@ -640,10 +825,16 @@ impl Game {
     }
 
     fn set_multiplayer(&mut self, ui: &mut Ui, in_flight: bool) {
+        card(ui, t!("settings.discord"), |ui| {
+            row(ui, t!("settings.discord_status"), t!("settings.discord_status_hint"), |ui| {
+                menu::switch(ui, &mut self.discord_on);
+            });
+        });
         card(ui, t!("settings.connection"), |ui| {
             // Where it stands, and the one button that changes it.
             let (col, line) = self.mp_line();
-            let sub = if !self.mp_on {
+            // how many fly, if the relay says, else what connecting does.
+            let about = if !self.mp_on {
                 t!("settings.connect_to_see_the_other").to_string()
             } else if in_flight {
                 i18n::plural(self.mp_players.len() as u64, "mp.pilots_nearby")
@@ -654,34 +845,24 @@ impl Game {
             } else {
                 String::new()
             };
-            ui.horizontal(|ui| {
-                let bw = 190.0;
-                ui.allocate_ui_with_layout(vec2((ui.available_width() - bw - 16.0).max(120.0), 46.0), Layout::top_down(Align::Min), |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 18.0), Sense::hover());
-                        ui.painter().circle_filled(r.center(), 4.5, col);
-                        ui.add(egui::Label::new(RichText::new(line).font(menu::label()).color(TEXT)).truncate());
-                    });
-                    if !sub.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(sub).font(menu::caption()).color(DIM)).wrap());
-                    }
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.allocate_ui(vec2(bw, 46.0), |ui| {
-                        let (text, primary) = if self.mp_on { (t!("settings.disconnect"), false) } else { (t!("settings.connect"), true) };
-                        if menu::wide_button(ui, text, Hint::None, primary, true).clicked() {
-                            self.mp_on = !self.mp_on;
-                            self.mp_held = false;
-                        }
-                    });
+            let mut flip = false;
+            row_help(ui, t!("settings.multiplayer_status"), &about, |ui| {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(10.0, 18.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.5, col);
+                    ui.label(RichText::new(line).font(menu::label()).color(TEXT));
+                    ui.add_space(8.0);
+                    let text = if self.mp_on { t!("settings.disconnect") } else { t!("settings.connect") };
+                    flip = menu::choice(ui, text, false, 120.0).clicked();
                 });
             });
-            ui.add_space(10.0);
+            if flip {
+                self.mp_on = !self.mp_on;
+                self.mp_held = false;
+            }
             row(ui, t!("settings.your_name"), t!("settings.shown_to_the_others_left"), |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.mp_name).desired_width(240.0).char_limit(mp_proto::NAME_MAX).hint_text(t!("settings.your_name")));
+                ui.add(egui::TextEdit::singleline(&mut self.mp_name).desired_width(240.0).font(menu::label()).margin(vec2(10.0, 7.0)).char_limit(mp_proto::NAME_MAX).hint_text(t!("settings.your_name")));
             });
-            row(ui, t!("settings.server"), t!("settings.the_servers_form_one_network"), |ui| self.mp_server_picker(ui));
         });
         if !in_flight && self.mp_on && !self.mp_world.is_empty() {
             card(ui, t!("settings.flying_now"), |ui| self.mp_pilots(ui));
@@ -692,13 +873,12 @@ impl Game {
                 for p in self.mp_players.iter().take(12) {
                     let ac = mp_proto::AIRCRAFT.get(p.aircraft as usize).copied().unwrap_or("?");
                     let alt = geo::pos_to_lla(p.pos).2 * 3.28084;
-                    row(ui, &p.name, ac, |ui| {
-                        ui.label(RichText::new(format!("{:.1} km  ·  {:.0} ft  ·  {:.0} kt", (p.pos - me).length() / 1000.0, alt, p.vel.length() * 1.94384)).font(menu::data()).color(TEXT));
+                    row(ui, &format!("{}  ·  {ac}", p.name), "", |ui| {
+                        ui.label(RichText::new(format!("{:.1} km  ·  {:.0} ft  ·  {:.0} kt", (p.pos - me).length() / 1000.0, alt, p.vel.length() * 1.94384)).font(menu::label()).color(TEXT));
                     });
                 }
             });
         }
-        note(ui, t!("settings.only_while_you_are_connected"));
     }
 
     /// The pilots flying on the network (start screen): name, aircraft,
@@ -723,7 +903,7 @@ impl Game {
                     ui.add(egui::Label::new(RichText::new(format!("{place}  ·  {how}")).font(menu::caption()).color(DIM)).truncate());
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button(t!("settings.show_2")).on_hover_text(t!("settings.turn_the_globe_to_them")).clicked() {
+                    if menu::choice(ui, t!("settings.show_2"), false, 70.0).on_hover_text(t!("settings.turn_the_globe_to_them")).clicked() {
                         look = Some((lat, lon));
                     }
                 });
@@ -739,79 +919,6 @@ impl Game {
             self.menu.screen = crate::menu::Screen::Fly;
             self.pad_home = true;
         }
-    }
-
-    /// The server: the network's servers with their pilots and ping,
-    /// "automatic" (the fastest), or an address typed in.
-    fn mp_server_picker(&mut self, ui: &mut Ui) {
-        let dir = self.mp_directory();
-        let (servers, err, stale) = (dir.servers(), dir.error(), dir.stale());
-        let best = dir.best();
-        let auto = self.mp_auto();
-        let current = mp::with_port(&self.mp_server);
-        let listed = servers.iter().any(|s| s.address == current);
-        let label = |s: &mp::ServerEntry| {
-            let state = match (s.up, s.ping_ms) {
-                (false, _) => t!("settings.offline").to_string(),
-                (true, Some(ms)) => format!("{ms} ms"),
-                (true, None) => t!("settings.no_answer").to_string(),
-            };
-            format!("{}  ·  {}  ·  {}", s.name, i18n::plural(s.flying as u64, "mp.pilots"), state)
-        };
-        let selected = if auto {
-            match &best {
-                Some(b) => t!("settings.automatic_2", b.name),
-                None => t!("settings.automatic_the_fastest").to_string(),
-            }
-        } else if let Some(s) = servers.iter().find(|s| s.address == current) {
-            label(s)
-        } else {
-            t!("settings.other", self.mp_server.trim())
-        };
-        let mut pick: Option<String> = None;
-        egui::ComboBox::from_id_salt("mp_server").selected_text(selected).width(ui.available_width().min(340.0)).show_ui(ui, |ui| {
-            if ui.selectable_label(auto, t!("settings.automatic_the_fastest")).clicked() {
-                pick = Some("auto".into());
-            }
-            for s in &servers {
-                ui.add_enabled_ui(s.up, |ui| {
-                    if ui.selectable_label(!auto && s.address == current, label(s)).clicked() {
-                        pick = Some(s.address.clone());
-                    }
-                });
-            }
-            if ui.selectable_label(!auto && !listed, t!("settings.other_address")).clicked() {
-                pick = Some(String::new());
-            }
-        });
-        match pick.as_deref() {
-            Some("") => {
-                self.mp_custom = true;
-                if auto || listed {
-                    self.mp_server.clear();
-                }
-            }
-            Some(a) => {
-                self.mp_custom = false;
-                self.mp_server = a.to_string();
-            }
-            None => {}
-        }
-        if self.mp_custom || (!auto && !listed) {
-            ui.add(egui::TextEdit::singleline(&mut self.mp_server).desired_width(ui.available_width().min(340.0)).char_limit(100).hint_text("host[:port]"));
-        }
-        ui.horizontal(|ui| {
-            let text = match (&err, servers.is_empty()) {
-                (Some(_), false) if stale => t!("settings.last_known_list_the_list").to_string(),
-                (Some(e), _) => t!("settings.server_list_unavailable", e.chars().take(50).collect::<String>()),
-                (None, true) => t!("settings.reading_the_server_list").to_string(),
-                (None, false) => i18n::plural(servers.iter().filter(|s| s.up).count() as u64, "mp.servers_online"),
-            };
-            ui.label(RichText::new(text).font(menu::caption()).color(DIM));
-            if ui.small_button(t!("settings.refresh")).clicked() {
-                self.mp_directory().refresh();
-            }
-        });
     }
 
     // ---- joysticks, pedals and keys (bind.rs)
@@ -831,7 +938,7 @@ impl Game {
         // From the pad: B held calls it off (a tap of B binds B), and how far through that is.
         let from_pad = c.from_pad();
         let cancelling = self.binds.pad_catch.cancelling(self.real);
-        egui::Frame::new().fill(ACCENT.gamma_multiply(0.22)).corner_radius(menu::R_PANEL).inner_margin(10.0).show(ui, |ui| {
+        egui::Frame::new().fill(ACCENT.gamma_multiply(0.22)).corner_radius(menu::R_PANEL).inner_margin(12.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(what).font(menu::body()).color(Color32::WHITE));
@@ -868,13 +975,12 @@ impl Game {
                             }
                         }
                     });
-                    if bound && ui.button(t!("settings.remove_its_bindings")).clicked() {
+                    if bound && menu::button(ui, t!("settings.remove_its_bindings")).clicked() {
                         self.binds.clear_device(&uuid);
                     }
                 });
             });
         }
-        note(ui, t!("settings.a_gamepad_has_its_own"));
     }
 
     /// The gamepad's flying layout (padmap.rs): the sticks and triggers,
@@ -883,7 +989,6 @@ impl Game {
         use bind::Capture;
         use padmap::{AxisSrc, PadAxis, Thumb};
         let busy = self.binds.capture.is_some();
-        note(ui, t!("settings.in_the_menus_the_pad"));
         if self.pad_note.1 > self.real {
             ui.add_space(4.0);
             ui.label(RichText::new(&self.pad_note.0).font(menu::caption()).color(ACCENT));
@@ -979,8 +1084,7 @@ impl Game {
     fn binds_axes(&mut self, ui: &mut Ui, words: &[String]) {
         use bind::{AxisAct, Capture};
         let busy = self.binds.capture.is_some();
-        note(ui, t!("settings.binding_then_its_live_value"));
-        ui.add_space(6.0);
+
         let cw = ui.available_width();
         bind_grid(ui, "bind_axes", |ui| {
             let shown: Vec<_> = AxisAct::ALL.into_iter().filter(|a| menu::matches(words, &[a.label(), &self.binds.describe_axis(*a).unwrap_or_default()])).collect();

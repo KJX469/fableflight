@@ -11,6 +11,7 @@
 //! `damage.rs` describes what has been knocked off. Trees, rooftops, the
 //! ground, over-speed and over-G all take parts off the airframe here, and
 //! the aircraft flies on (as best it can) with what is left.
+use std::sync::atomic::{AtomicU64, Ordering};
 use crate::aircraft::{Engine, Part, Spec, MAX_GEAR};
 use crate::airframe::{Anim, Drive, Input, Piece, Role, G_ENGINE, G_FUSE, G_LWING, G_RWING, G_TAIL};
 use crate::crash::Rng;
@@ -20,6 +21,7 @@ use crate::geo;
 use crate::world::{TreeRef, World};
 use glam::{DMat3, DQuat, DVec3, Mat4, Vec3};
 
+mod heli;
 mod rocket;
 
 #[derive(Default, Clone, Copy)]
@@ -40,6 +42,9 @@ pub struct Controls {
     /// a throttle lever's position (0..1), which then sets the power
     /// outright instead of `throttle` moving it
     pub throttle_set: Option<f64>,
+    /// a lever's position past the military detent (0..1 of the afterburner
+    /// range), from a throttle axis; none: the keys push it through the detent.
+    pub reheat_set: Option<f64>,
 }
 
 /// An aircraft ploughing into a building after hitting its wall. It does not
@@ -59,6 +64,36 @@ struct Bury {
     /// what the first touch was (for the cause)
     cause: &'static str,
 }
+
+/// Where the gust field is sampled on an airframe (body frame), from its
+/// geometry alone: the CG, the wing's quarter chord at stations along each
+/// half, the nose and the tail. Any aircraft has these.
+fn gust_probes(spec: &Spec) -> [DVec3; PROBES] {
+    let wing = |x: f32| {
+        let s = (spec.wing_sect)(x);
+        (s.le + s.cdir * (0.25 * s.c)).as_dvec3()
+    };
+    let mut out = [DVec3::ZERO; PROBES];
+    // Stations along each half (left, then right), at the middle of equal
+    // bits of span.
+    for k in 0..WING_STATIONS {
+        let at = wing(spec.span * (k as f32 + 0.5) / WING_STATIONS as f32);
+        out[1 + k] = DVec3::new(-at.x, at.y, at.z);
+        out[1 + WING_STATIONS + k] = at;
+    }
+    let nose = spec.contacts.iter().map(|c| c.0[2]).fold(0.0f64, f64::min).min(-1.0);
+    let mut tail = spec.tail.fin_base;
+    if tail.z < 1.0 {
+        tail = DVec3::new(0.0, 0.0, -nose);
+    }
+    out[PROBES - 2] = DVec3::new(0.0, 0.0, nose);
+    out[PROBES - 1] = DVec3::new(0.0, tail.y, tail.z);
+    out
+}
+
+/// Gust probes along each wing half, and in all (the CG, both wings, nose and tail).
+const WING_STATIONS: usize = 4;
+const PROBES: usize = 1 + 2 * WING_STATIONS + 2;
 
 pub struct Impact {
     pub pos: DVec3,
@@ -104,15 +139,17 @@ pub struct Plane {
     pub gust: DVec3,
     /// rotational gusts (body frame, rad/s): the air rolling, pitching and yawing across the airframe
     pub gust_rot: DVec3,
-    /// turbulence filter states: translational in the flight-path frame (along, across, up), and rotational
-    gust_a: DVec3,
-    gust_b: DVec3,
-    rot_a: DVec3,
-    rot_b: DVec3,
-    /// small eddies (sharp jolts), and the slow level that gathers the
-    /// turbulence into bursts
-    gust_s: DVec3,
+    /// the turbulence as a field in space (gust.rs), which the aircraft flies through
+    pub gusts: crate::gust::GustField,
+    /// where on the airframe it is sampled (body frame): the CG, the wing
+    /// (stations along each half), then the nose and the tail (see `gust_probes`)
+    probes: [DVec3; PROBES],
+    /// the gust at each probe this step (planet frame)
+    pub probe_gust: [DVec3; PROBES],
+    /// the slow level that gathers the turbulence into bursts
     burst: f64,
+    /// other aircraft's wakes near it (wake.rs), set by the caller each frame
+    pub wake: Vec<crate::wake::Seg>,
     /// the pilot's head swaying on its neck as the airframe is shaken (body frame, m)
     pub head: DVec3,
     /// specific force (what an accelerometer reads: everything but gravity), body frame, m/s²
@@ -140,6 +177,14 @@ pub struct Plane {
     pub parking_brake: bool,
     pub toe_brake: [f64; 2],
     pub landing_lights: bool,
+    /// ice on the airframe, the air it builds in, and the heat against it (icing.rs)
+    pub ice: crate::icing::Ice,
+    pub ice_env: crate::icing::Env,
+    pub pitot_heat: bool,
+    pub anti_ice: bool,
+    pub carb_heat: bool,
+    /// a pushback tug at the nose wheel: the speed it pushes back at (m/s), none when not hooked up
+    pub tow: Option<f64>,
     /// A two-engine jet's L and R fuel control switches ([0]) and battery
     /// switches ([1]) work the one shared `ignition` / `sys.elec.master`:
     /// the shared state is on while either switch of its pair is. True: that
@@ -158,8 +203,12 @@ pub struct Plane {
     pub payload: f64,
     /// a jet's fan speed, fraction of 100% N1
     pub n1: f64,
-    /// how far the afterburners are lit, 0..1 (what is seen and heard of them; the thrust is immediate)
+    /// how far the afterburners are lit, 0..1: min reheat lights them at 0.3, max at 1.
     pub burner: f64,
+    /// the throttle past the military detent, 0..1 of the afterburner range (types with real reheat).
+    pub reheat: f64,
+    /// how long the throttle has been pushed against the detent (s).
+    detent: f64,
     /// which wing a stall would rather drop (slowly wandering, -1..1)
     drop: f64,
     pub rot: DQuat,
@@ -308,11 +357,10 @@ impl Plane {
             air: Air::default(),
             gust: DVec3::ZERO,
             gust_rot: DVec3::ZERO,
-            gust_a: DVec3::ZERO,
-            gust_b: DVec3::ZERO,
-            rot_a: DVec3::ZERO,
-            rot_b: DVec3::ZERO,
-            gust_s: DVec3::ZERO,
+            gusts: crate::gust::GustField::for_chord(pos.x.to_bits() ^ pos.z.to_bits().rotate_left(17), spec.wing_area / spec.b.max(1.0)),
+            probes: gust_probes(spec),
+            probe_gust: [DVec3::ZERO; PROBES],
+            wake: Vec::new(),
             burst: 0.0,
             head: DVec3::ZERO,
             sf: DVec3::new(0.0, 9.81, 0.0),
@@ -329,6 +377,12 @@ impl Plane {
             parking_brake: false,
             toe_brake: [0.0; 2],
             landing_lights: true,
+            ice: Default::default(),
+            ice_env: Default::default(),
+            pitot_heat: false,
+            anti_ice: false,
+            carb_heat: false,
+            tow: None,
             pair_off: [[false; 2]; 2],
             fuel_selector: if spec.id == 10 { FuelSelector::Left } else { FuelSelector::Center },
             engine_hours: 1834.6,
@@ -340,6 +394,8 @@ impl Plane {
             payload: spec.payload[0],
             n1: 0.0,
             burner: 0.0,
+            reheat: 0.0,
+            detent: 0.0,
             drop: 0.0,
             rot: DQuat::IDENTITY,
             omega: DVec3::ZERO,
@@ -490,7 +546,7 @@ impl Plane {
         if let Some(rk) = self.spec.rocket() {
             return self.rocket_mass(rk).0;
         }
-        self.spec.mass + self.fuel - 0.5 * self.spec.fuel_kg + self.payload - self.spec.payload[0]
+        self.spec.mass + self.fuel - 0.5 * self.spec.fuel_kg + self.payload - self.spec.payload[0] + self.ice.mass(self.spec.wing_area)
     }
 
     /// Centre of gravity, as a fraction of the mean aerodynamic chord: where
@@ -554,7 +610,7 @@ impl Plane {
 
     pub fn stall_alpha(&self) -> f64 {
         let s = self.spec;
-        s.stall_alpha - s.stall_flap * self.flaps + s.stall_slat * self.slats
+        s.stall_alpha - s.stall_flap * self.flaps + s.stall_slat * self.slats - self.ice.stall_loss()
     }
     pub fn flap_deg(&self) -> f64 {
         self.flaps * self.spec.flaps.last().copied().unwrap_or(0.0)
@@ -688,6 +744,8 @@ impl Plane {
             Input::Wheel(k) => self.wheel_rot[k as usize] as f32,
             Input::Steer => self.steer_angle() as f32,
             Input::Prop => (self.prop % std::f64::consts::TAU) as f32,
+            // (a fighter's lever reaches the military detent short of the stop; reheat is the travel past it)
+            Input::Throttle if matches!(self.spec.id, 2 | 3 | 4 | 7) => (self.throttle * 0.88 + self.reheat * 0.12) as f32,
             Input::Throttle => self.throttle as f32,
             Input::Trim => self.trim as f32,
             Input::Master => self.sys.elec.master as u8 as f32,
@@ -1375,10 +1433,10 @@ impl Plane {
         (self.rng.range(-1.0, 1.0) + self.rng.range(-1.0, 1.0) + self.rng.range(-1.0, 1.0)) as f64
     }
 
-    /// Turbulence: white noise through two first-order lags in series (a
-    /// smoothed Dryden spectrum), the length scales turned into time by the
-    /// airspeed. `a` is the coarse state, `b` the smoothed one; the second lag
-    /// takes a fifth of the variance, which the output scale gives back.
+    /// Turbulence: the gust field (gust.rs) sampled where the airframe is.
+    /// The mean over the wing is the gust the whole aircraft feels (`gust`);
+    /// how it differs across the airframe is the air rolling, pitching and
+    /// yawing it (`gust_rot`, the gradient's rotational part: Etkin's p_g, q_g, r_g).
     fn turbulence(&mut self, dt: f64, v: f64, upw: DVec3) {
         let air = self.air;
         let vt = v.max(12.0);
@@ -1390,49 +1448,44 @@ impl Plane {
         self.burst = self.burst * eb + (1.0 - eb * eb).sqrt() * nb;
         let a = 0.3 + 0.2 * smooth(1.0, 5.0, air.sigma_w);
         let m = (a * self.burst - a * a).exp().min(3.0);
-        // Two scales of eddy: the big ones (hundreds of metres: slow heaves
-        // the aircraft rides up and down) and small ones a few tens of metres
-        // across that it cannot follow (sharp jolts). The small ones carry a
-        // third of the variance and come and go with the bursts the most.
-        let len = DVec3::new(air.len_h, air.len_h, air.len_w);
-        let sig = DVec3::new(air.sigma_h, air.sigma_h, air.sigma_w);
-        let one = DVec3::ONE;
-        let n = DVec3::new(self.gauss(), self.gauss(), self.gauss());
-        let e1 = (-vt * dt / len).exp();
-        let e2 = (-vt * dt * 4.0 / len).exp();
-        let big = sig * (0.8 * (0.4 + 0.6 * m));
-        self.gust_a = self.gust_a * e1 + big * (one - e1 * e1).max(DVec3::ZERO).sqrt() * n;
-        self.gust_b = self.gust_b * e2 + self.gust_a * (one - e2);
-        let ls = (len / 10.0).clamp(DVec3::splat(6.0), DVec3::splat(45.0));
-        let es = (-vt * dt / ls).exp();
-        let n = DVec3::new(self.gauss(), self.gauss(), self.gauss());
-        self.gust_s = self.gust_s * es + sig * (0.6 * m) * (one - es * es).max(DVec3::ZERO).sqrt() * n;
-        // (A big airframe spans many of the small ones and averages them out.)
-        let span = (ls / (ls + DVec3::splat(0.5 * self.spec.b))).powf(0.5);
-        let g = self.gust_b * 1.118 + self.gust_s * span;
-        // Along and across the flight path, and up.
-        let air_v = self.vel - self.wind;
-        let mut along = air_v - upw * air_v.dot(upw);
-        if along.length_squared() < 1.0 {
-            along = self.forward() - upw * self.forward().dot(upw);
+        self.gusts.set(air.sigma_h * m, air.len_h, air.sigma_w * m, air.len_w);
+        // The field drifts with the air (the mean wind, not its gusts).
+        self.gusts.advance(dt, self.wind, air.sigma_h.max(air.sigma_w));
+        if self.gusts.calm() && self.wake.is_empty() {
+            self.gust = DVec3::ZERO;
+            self.gust_rot = DVec3::ZERO;
+            self.probe_gust = [DVec3::ZERO; PROBES];
+            return;
         }
-        let along = along.normalize_or_zero();
-        let across = along.cross(upw);
-        self.gust = along * g.x + across * g.y + upw * g.z;
-        // Rotational gusts: the vertical gust differs from one wing tip to the
-        // other (roll), from the nose to the tail (pitch), and the side gust
-        // from the nose to the fin (yaw). Eddies about the size of the airframe;
-        // a big aircraft averages more of them out.
-        let lr = self.spec.b * 2.5;
-        let big = (11.0 / self.spec.b).sqrt();
-        // (In bursts, roll upsets too.)
-        let sr = DVec3::new(0.018 * air.sigma_w, 0.020 * air.sigma_h, 0.03 * air.sigma_w) * big * m;
-        let n = DVec3::new(self.gauss(), self.gauss(), self.gauss());
-        let e1 = (-vt * dt / lr).exp();
-        let e2 = (-vt * dt * 4.0 / lr).exp();
-        self.rot_a = self.rot_a * e1 + sr * (1.0 - e1 * e1).max(0.0).sqrt() * n;
-        self.rot_b = self.rot_b * e2 + self.rot_a * (1.0 - e2);
-        self.gust_rot = self.rot_b * 1.118 * smooth(5.0, 25.0, v);
+        let calm = self.gusts.calm();
+        for i in 0..PROBES {
+            let at = self.pos + self.rot * self.probes[i];
+            // The eddies, and any other aircraft's wake vortices.
+            let g = if calm { DVec3::ZERO } else { self.gusts.at(at, upw) };
+            self.probe_gust[i] = g + crate::wake::induced(&self.wake, at);
+        }
+        let g = &self.probe_gust;
+        // The wing's probes: the CG and the stations along each half.
+        const WING: usize = PROBES - 2;
+        self.gust = g[..WING].iter().copied().sum::<DVec3>() / WING as f64;
+        let inv = self.rot.inverse();
+        let d: [DVec3; PROBES] = std::array::from_fn(|i| inv * (g[i] - self.gust));
+        let p = &self.probes;
+        // u(r) - u0 ≈ ω_air × r: across the span (x) the vertical gust gives
+        // ω_z = ∂u_y/∂x (fitted along the whole wing, as its lift spreads
+        // the gust's push); along the fuselage (z) the vertical gust gives
+        // ω_x = -∂u_y/∂z and the side gust ω_y = ∂u_x/∂z.
+        let (mut sxy, mut sxx) = (0.0, 0.0);
+        for i in 0..WING {
+            sxy += p[i].x * d[i].y;
+            sxx += p[i].x * p[i].x;
+        }
+        let (nose, tail) = (WING, WING + 1);
+        let dz = p[tail].z - p[nose].z;
+        let wz = sxy / sxx.max(1e-6);
+        let wx = -(d[tail].y - d[nose].y) / dz;
+        let wy = (d[tail].x - d[nose].x) / dz;
+        self.gust_rot = DVec3::new(wx, wy, wz) * smooth(5.0, 25.0, v);
     }
 
     /// Points on the airframe that meet the ground (body frame), as it is now:
@@ -1568,6 +1621,9 @@ impl Plane {
             self.prop += dt * self.prop_rate;
             return None;
         }
+        if let Some(rt) = &spec.rotor {
+            return self.step_rotor(dt, c, world, rt);
+        }
         if let Engine::Rocket(rk) = &spec.engine {
             return self.step_rocket(dt, c, world, rk);
         }
@@ -1581,6 +1637,35 @@ impl Plane {
             Some(t) => t.clamp(0.0, 1.0),
             None => (self.throttle + c.throttle * dt * 0.6).clamp(0.0, 1.0),
         };
+        // past the military detent the lever works the afterburners: pushed on
+        // against the stop for a moment with the keys, or the top of a throttle axis.
+        if spec.real_boost() {
+            match (c.reheat_set, c.throttle_set) {
+                (Some(r), _) => self.reheat = r.clamp(0.0, 1.0),
+                // (the autothrottle, the copilot and the mouse yoke set dry power only)
+                (None, Some(_)) => self.reheat = 0.0,
+                (None, None) if c.throttle > 0.0 && self.throttle >= 1.0 => {
+                    self.detent += dt;
+                    if self.detent > 0.4 {
+                        self.reheat = (self.reheat + c.throttle * dt * 0.5).min(1.0);
+                    }
+                }
+                (None, None) if c.throttle < 0.0 => {
+                    self.reheat = (self.reheat + c.throttle * dt * 1.5).max(0.0);
+                    self.detent = 0.0;
+                }
+                _ => self.detent = 0.0,
+            }
+            // the lever comes back out of reheat before it leaves military power.
+            if self.reheat > 0.0 {
+                self.throttle = 1.0;
+            }
+        } else {
+            self.reheat = 0.0;
+        }
+        let heat = crate::icing::Heat { pitot: self.pitot_heat, anti_ice: self.anti_ice, carb: self.carb_heat };
+        let tas = self.airspeed().length();
+        self.ice.step(dt, &self.ice_env, heat, tas, matches!(spec.engine, Engine::Piston(_)), self.throttle, !self.on_ground);
         // Control surfaces do not snap.
         let target = DVec3::new(c.pitch, c.yaw, c.roll);
         self.stick += (target - self.stick) * (dt * 7.0).min(1.0);
@@ -1676,9 +1761,12 @@ impl Plane {
                 _ => 1.0,
             };
             let (cl, cd) = lift_drag(spec, alpha, beta, flap_cl, stall, self.flaps, self.gear, self.spoilers, ge);
+            // ice spoils the leading edges: less lift, more drag.
+            let cl = cl * self.ice.lift_k();
             // Ragged stumps and missing fairings all drag.
             let rag = ((spec.span - dm.wing[0]) + (spec.span - dm.wing[1])) as f64 / k as f64;
             let cd = cd
+                + self.ice.drag_add()
                 // An open canopy: the cockpit is a hole in the airframe.
                 + 0.03 * self.canopy
                 + spec.chute.as_ref().map_or(0.0, |ch| ch.cda * self.spoilers / area)
@@ -1814,7 +1902,7 @@ impl Plane {
                 self.cranking = cranking;
                 self.running = self.ignition && self.fuel_selector != FuelSelector::Off && self.fuel > 0.0 && self.mixture > 0.08 && w > 8.0 && eng > 0.0 && !self.sys.fail.engine;
                 let mix = smooth(0.08, 0.45, self.mixture);
-                let q_eng = if self.running { Self::engine_torque(pe, self.charge, rho, c.boost, eng) * mix } else { 0.0 } + if cranking { 120.0 * (1.0 - w / 25.0).max(0.0) } else { 0.0 };
+                let q_eng = if self.running { Self::engine_torque(pe, self.charge, rho, c.boost, eng) * mix * self.ice.engine_k(self.carb_heat) } else { 0.0 } + if cranking { 120.0 * (1.0 - w / 25.0).max(0.0) } else { 0.0 };
                 if self.auto_start > 0.0 {
                     self.auto_start = if self.running && w > 50.0 { 0.0 } else { self.auto_start - dt };
                 }
@@ -1908,16 +1996,23 @@ impl Plane {
                 let kr = if up { fe.spool_up * (0.3 + 0.7 * self.n1) } else { fe.spool_down };
                 self.n1 += (target - self.n1) * (dt * kr).min(1.0);
                 self.prop_rate = self.n1 * fe.n1_rpm * std::f64::consts::TAU / 60.0;
-                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0), h) * self.inlet(mach) * if c.boost { fe.boost } else { self.dry_fade(fe, mach) };
                 // An afterburner (not an airliner's take-off bump) lights with a
                 // thump a moment after it is asked for and dies away as quickly.
-                let lit = c.boost && fe.boost > 1.2 && self.dmg.engine > 0.0 && self.n1 > fe.idle * 0.9;
-                self.burner += ((if lit { 1.0 } else { 0.0 }) - self.burner) * (dt * if lit { 5.0 } else { 8.0 }).min(1.0);
+                // min reheat lights the whole ring, the stages past it add fuel
+                // and thrust up to max (the boost key: max at once).
+                let real = fe.boost > 1.2;
+                let stage = if c.boost { 1.0 } else { self.reheat };
+                let lit = real && stage > 0.0 && self.dmg.engine > 0.0 && self.n1 > fe.idle * 0.9;
+                let want = if lit { 0.3 + 0.7 * stage } else { 0.0 };
+                self.burner += (want - self.burner) * (dt * if want > self.burner { 5.0 } else { 8.0 }).min(1.0);
+                let dry_k = self.dry_fade(fe, mach);
+                let k = if real { dry_k + (fe.boost - dry_k) * self.burner } else if c.boost { fe.boost } else { dry_k };
+                let mut thrust = Self::fan_thrust(fe, self.n1, v.max(0.0), h) * self.inlet(mach) * k;
                 self.power = thrust / (fe.n as f64 * fe.thrust);
                 // The burn follows the thrust made (it lapses with height as the
                 // thrust does): idle to full rated thrust, then the afterburners.
                 let ff = spec.fuel_flow;
-                let dry = (self.power / if c.boost { fe.boost } else { 1.0 }).clamp(0.0, 1.2);
+                let dry = (self.power / k * (dry_k + (1.0 - dry_k) * self.burner)).clamp(0.0, 1.2);
                 // (A turbo-ramjet's afterburners are fed by the air it swallows: their flow lapses with the thrust.)
                 let wet = if spec.inlet_mach > 0.0 { dry.min(1.0) } else { 1.0 };
                 self.fuel_flow = if self.running { ff[0] + (ff[1] - ff[0]) * dry + (ff[2] - ff[1]) * self.burner * wet } else { 0.0 };
@@ -1943,6 +2038,11 @@ impl Plane {
         let cranking = !self.running && (c.starter || self.auto_start > 0.0 || self.starter_on);
         self.sys.update(dt, charging, cranking, true);
 
+        // a pushback tug holds the speed it is set to, backwards (body +z is aft).
+        if let Some(v) = self.tow {
+            let vg = self.rot.inverse() * self.vel;
+            force_b += DVec3::Z * (mass * 1.5 * (v - vg.z)).clamp(-0.25 * mass * 9.81, 0.25 * mass * 9.81);
+        }
         // Ground contact.
         let mut force_w = self.rot * force_b - upw * (mass * 9.81);
         let mut torque_b = DVec3::ZERO;
@@ -2258,6 +2358,37 @@ impl Plane {
                     let pen_n = pen * nrm.dot(upw).max(0.1);
                     let pv = self.vel + self.rot * self.omega.cross(r);
                     let vn = pv.dot(nrm);
+                    // a float on water: buoyant by how deep it sits, the hump of
+                    // the bow wave to get over before it planes on its step, the
+                    // keel against sliding sideways, the water rudders steering.
+                    if water && spec.floats {
+                        if vn < -(leg.fold_vn + 3.0) {
+                            self.lose_gear(gi, "HARD WATER LANDING");
+                            continue;
+                        }
+                        self.on_ground = true;
+                        touching[gi] = true;
+                        self.compress[gi] = pen_n.min(leg.travel);
+                        let nf = (pen_n * leg.k - vn * leg.c).clamp(0.0, leg.nf_max);
+                        let mut fwd = (self.forward() - nrm * self.forward().dot(nrm)).normalize_or_zero();
+                        if leg.steer != 0.0 && pv.length() < 12.0 {
+                            fwd = DQuat::from_axis_angle(nrm, -self.steer_angle() * leg.steer) * fwd;
+                        }
+                        let side = fwd.cross(nrm);
+                        let (vl, vs) = (pv.dot(fwd), pv.dot(side));
+                        let hump = 1.0 + 6.0 * (-((vl.abs() - 8.0) / 4.5).powi(2)).exp();
+                        let f_long = -vl * 55.0 * hump - vl * vl.abs() * 2.5;
+                        let keel = crate::gear::keel_k(loads[gi]);
+                        let f_side = (-vs * keel).clamp(-leg.mu * nf.max(500.0), leg.mu * nf.max(500.0));
+                        let f = nrm * nf + side * f_side + fwd * f_long * (nf / (mass * 9.81 * 0.25)).clamp(0.2, 2.0);
+                        force_w += f;
+                        torque_b += r.cross(self.rot.inverse() * f);
+                        self.wheel_spin[gi] = 0.0;
+                        if pv.length() > 4.0 && self.splashes.len() < 64 {
+                            self.splashes.push((p, pv * 0.5 + nrm * (1.0 + pv.length() * 0.08)));
+                        }
+                        continue;
+                    }
                     // Wheels do nothing in water or against a wall, and a leg driven
                     // in far too hard just goes: the airframe takes the rest.
                     if water || (building.is_some() && pen > 1.0) || pen_n > leg.travel * 4.0 + 0.8 {
@@ -2290,7 +2421,9 @@ impl Plane {
                     let brake = if leg.brakes { self.brake_pressure(c, leg.at.x) } else { 0.0 };
                     let grip = crate::gear::grip(leg, surface, &self.ground_wx, self.water, pv.length(), self.wheels[gi].skid);
                     let w0 = loads[gi];
-                    let push = crate::gear::contact(&crate::gear::Contact { leg, w0, pen: pen_n, v: pv, n: nrm, heading: fwd, brake, grip, dt }, &mut self.wheels[gi], &mut self.wheel_spin[gi]);
+                    let touch = crate::gear::Contact { leg, w0, pen: pen_n, v: pv, n: nrm, heading: fwd, brake, grip, dt };
+                    // (a float on land does not roll: it slides on its keel)
+                    let push = if spec.floats { crate::gear::pontoon(&touch) } else { crate::gear::contact(&touch, &mut self.wheels[gi], &mut self.wheel_spin[gi]) };
                     let f = push.f;
                     let (vs, nf) = (push.across, push.nf);
                     force_w += f;
@@ -2682,24 +2815,79 @@ const ISA_LAYERS: [(f64, f64); 7] = [
     (84_852.0, -0.0020),
 ];
 
+/// the day's air: sea-level pressure (pa) and how much warmer than standard
+/// it is (k), set from the weather each frame (`set_air`). standard until then.
+static AIR_P0: AtomicU64 = AtomicU64::new(101_325f64.to_bits());
+static AIR_DT: AtomicU64 = AtomicU64::new(0f64.to_bits());
+
+/// the day's qnh (hpa) and its sea-level temperature off standard (k). the
+/// lapse rates stay standard, so the whole column is that much warmer or colder.
+pub fn set_air(qnh_hpa: f64, isa_dev: f64) {
+    AIR_P0.store((qnh_hpa.clamp(850.0, 1100.0) * 100.0).to_bits(), Ordering::Relaxed);
+    AIR_DT.store(isa_dev.clamp(-60.0, 45.0).to_bits(), Ordering::Relaxed);
+}
+
+/// the day's air as set: sea-level pressure (pa), temperature off standard (k).
+pub fn air_now() -> (f64, f64) {
+    (f64::from_bits(AIR_P0.load(Ordering::Relaxed)), f64::from_bits(AIR_DT.load(Ordering::Relaxed)))
+}
+
+/// Temperature (K) and pressure (Pa) at geometric altitude `h` (m) in the
+/// day's air (`set_air`; the USSA 1976 until set).
+pub(crate) fn atmosphere(h: f64) -> (f64, f64) {
+    let (p0, dt) = air_now();
+    atmosphere_in(h, p0, dt)
+}
+
+/// pressure altitude (m): where the standard atmosphere has the pressure
+/// found at `h` in the day's air. what an altimeter set to 1013 reads.
+pub fn pressure_alt(h: f64) -> f64 {
+    let (p0, dt) = air_now();
+    pressure_alt_in(h, p0, dt)
+}
+
+/// what an altimeter set to `setting` (hpa) reads at `h` (m): the pressure
+/// altitude less the standard height of the setting. a cold day reads high.
+pub fn indicated_alt(h: f64, setting_hpa: f64) -> f64 {
+    pressure_alt(h) - std_height(setting_hpa * 100.0)
+}
+
+/// `pressure_alt` in the air given by `p0` (pa) and `dt` (k).
+pub(crate) fn pressure_alt_in(h: f64, p0: f64, dt: f64) -> f64 {
+    std_height(atmosphere_in(h, p0, dt).1)
+}
+
+/// the height (m) of pressure `p` (pa) in the standard atmosphere, to a millimetre.
+fn std_height(p: f64) -> f64 {
+    let (mut lo, mut hi) = (-2_000.0f64, 90_000.0f64);
+    for _ in 0..27 {
+        let mid = 0.5 * (lo + hi);
+        if atmosphere_in(mid, 101_325.0, 0.0).1 > p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
 /// Temperature (K) and pressure (Pa) at geometric altitude `h` (m), using
-/// the USSA 1976 geopotential layers. Above 84.852 km, continue isothermally
+/// the USSA 1976 geopotential layers from sea-level pressure `p0` and a
+/// sea-level temperature `dt` off standard. Above 84.852 km, continue isothermally
 /// from the last tabulated layer; aircraft performance checks stay well below
 /// this extension, while it avoids freezing density for high rocket flights.
-pub(crate) fn atmosphere(h: f64) -> (f64, f64) {
+pub(crate) fn atmosphere_in(h: f64, p0: f64, dt: f64) -> (f64, f64) {
     const G0: f64 = 9.80665;
     const R_AIR: f64 = 287.05287;
     const EARTH_RADIUS: f64 = 6_356_766.0;
-    const P0: f64 = 101_325.0;
-    const T0: f64 = 288.15;
 
     // The standard tables use geopotential altitude; convert the simulator's
     // geometric altitude before selecting a layer.
     let h = h.max(-500.0);
     let z = EARTH_RADIUS * h / (EARTH_RADIUS + h);
     let mut base_z = 0.0;
-    let mut base_t = T0;
-    let mut base_p = P0;
+    let mut base_t = 288.15 + dt;
+    let mut base_p = p0;
 
     for &(top_z, lapse) in &ISA_LAYERS {
         let layer_z = z.min(top_z);
@@ -2724,18 +2912,18 @@ pub(crate) fn atmosphere(h: f64) -> (f64, f64) {
     (base_t, p)
 }
 
-/// Air density (kg/m³) at geometric altitude `h` (m) in the USSA 1976.
+/// Air density (kg/m³) at geometric altitude `h` (m) in the day's air.
 pub fn density(h: f64) -> f64 {
     let (t, p) = atmosphere(h);
     p / (287.05287 * t)
 }
 
-/// Static pressure as a fraction of sea level's, in the USSA 1976.
+/// Static pressure as a fraction of standard sea level's, in the day's air.
 pub fn pressure_ratio(h: f64) -> f64 {
     atmosphere(h).1 / 101_325.0
 }
 
-/// Speed of sound (m/s) at geometric altitude `h` in the USSA 1976.
+/// Speed of sound (m/s) at geometric altitude `h` in the day's air.
 pub fn sound_speed(h: f64) -> f64 {
     let (t, _) = atmosphere(h);
     (1.4 * 287.05287 * t).sqrt()
@@ -2894,6 +3082,39 @@ mod tests {
     use crate::aircraft::{b747, c172};
     use std::sync::Arc;
 
+    #[test]
+    fn the_days_air_shifts_the_atmosphere() {
+        // standard when nothing is set, so every check flown at isa still is.
+        for h in [0.0, 1_500.0, 11_000.0, 20_000.0] {
+            assert_eq!(atmosphere(h), atmosphere_in(h, 101_325.0, 0.0));
+            assert!((pressure_alt_in(h, 101_325.0, 0.0) - h).abs() < 0.5, "{h}");
+        }
+        // a hot day high up: at 5000 ft and isa+20 the wing and engine feel
+        // nearly 7000 ft.
+        let rho = |h: f64, dt: f64| {
+            let (t, p) = atmosphere_in(h, 101_325.0, dt);
+            p / (287.05287 * t)
+        };
+        let hot = rho(1_524.0, 20.0);
+        let (mut lo, mut hi) = (0.0, 6_000.0);
+        for _ in 0..40 {
+            let m = 0.5 * (lo + hi);
+            if rho(m, 0.0) > hot { lo = m } else { hi = m }
+        }
+        // the rule of thumb works from the pressure altitude: 120 ft per degree above standard there.
+        let pa = pressure_alt_in(1_524.0, 101_325.0, 20.0);
+        let warm = atmosphere_in(1_524.0, 101_325.0, 20.0).0 - atmosphere_in(pa, 101_325.0, 0.0).0;
+        let rule_ft = pa * 3.28084 + 118.8 * warm;
+        let da_ft = lo * 3.28084;
+        assert!((da_ft - rule_ft).abs() < 250.0 && da_ft > 6_500.0, "density altitude {da_ft:.0} ft, rule {rule_ft:.0} ft");
+        // a low qnh: the altimeter on 1013 reads about 27 ft per hpa high at the field.
+        let pa_ft = pressure_alt_in(0.0, 100_300.0, 0.0) * 3.28084;
+        assert!((270.0..290.0).contains(&pa_ft), "{pa_ft:.0} ft");
+        // and a cold day reads high aloft: the true altitude is below the indicated one.
+        let cold = pressure_alt_in(3_000.0, 101_325.0, -20.0);
+        assert!(cold > 3_150.0, "{cold:.0} m");
+    }
+
     const C172: &Spec = &c172::SPEC;
     const B747: &Spec = &b747::SPEC;
     const DR400: &Spec = &crate::aircraft::dr400::SPEC;
@@ -2975,6 +3196,10 @@ mod tests {
         }
     }
 
+    fn wake_right_vortex(s: &crate::wake::Seg) -> DVec3 {
+        s.right_vortex()
+    }
+
     fn empty_world() -> World {
         let dir = std::env::temp_dir().join("fablegame-test-cache");
         let src = Arc::new(crate::sources::Sources::new(crate::fetch::Fetcher::new(dir, true), String::new()));
@@ -3033,7 +3258,7 @@ mod tests {
                 // the stick does a lot at Mach 1: the test pilot goes gently
                 let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
                 let roll_err = -p.right().dot(p.pos.normalize());
-                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, ..Default::default() };
+                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, reheat_set: Some(if boost { 1.0 } else { 0.0 }), ..Default::default() };
                 assert!(p.step(dt, &c, &w).is_none());
                 if i as f64 * dt > 60.0 {
                     gmax = gmax.max((p.g_load - 1.0).abs());
@@ -3113,7 +3338,7 @@ mod tests {
                 // the stick does a lot at speed: the test pilot goes gently
                 let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
                 let roll_err = -p.right().dot(p.pos.normalize());
-                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, ..Default::default() };
+                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, reheat_set: Some(if boost { 1.0 } else { 0.0 }), ..Default::default() };
                 assert!(p.step(dt, &c, &w).is_none());
                 if i as f64 * dt > 60.0 {
                     gmax = gmax.max((p.g_load - 1.0).abs());
@@ -3145,7 +3370,7 @@ mod tests {
             // hold the speed with the nose
             let v = p.airspeed().length();
             let roll_err = -p.right().dot(p.pos.normalize());
-            let c = Controls { pitch: ((v - 180.0) * 0.02 - p.omega.x * 1.0).clamp(-0.5, 0.5), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost: true, ..Default::default() };
+            let c = Controls { pitch: ((v - 180.0) * 0.02 - p.omega.x * 1.0).clamp(-0.5, 0.5), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost: true, reheat_set: Some(1.0), ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none());
             vs = p.vel.dot(p.pos.normalize());
         }
@@ -3208,7 +3433,7 @@ mod tests {
                 // the stick does a lot at speed: the test pilot goes gently
                 let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
                 let roll_err = -p.right().dot(p.pos.normalize());
-                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, ..Default::default() };
+                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, reheat_set: Some(if boost { 1.0 } else { 0.0 }), ..Default::default() };
                 assert!(p.step(dt, &c, &w).is_none());
                 if i as f64 * dt > 60.0 {
                     gmax = gmax.max((p.g_load - 1.0).abs());
@@ -3286,7 +3511,7 @@ mod tests {
             // Rotate at 190 kt to 10 degrees nose up and hold it there.
             let pitch_deg = p.forward().dot(p.pos.normalize()).asin().to_degrees();
             let pitch = if v * KT > 190.0 { ((10.0 - pitch_deg) * 0.15 - p.omega.x * 1.0).clamp(-1.0, 1.0) } else { 0.0 };
-            let c = Controls { throttle: 1.0, boost: true, pitch, ..Default::default() };
+            let c = Controls { throttle: 1.0, boost: true, reheat_set: Some(1.0), pitch, ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             if lifted.is_none() && !p.on_ground && t > 5.0 {
                 lifted = Some(((p.pos - start).length(), v, t));
@@ -3312,7 +3537,7 @@ mod tests {
             let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
             let roll_err = -p.right().dot(p.pos.normalize());
             let pitch = ((p.ias() * KT - 450.0) * 0.004 - p.vel.dot(p.pos.normalize()) * 0.0005) * 8.0 * gentle - p.omega.x * 1.0;
-            let c = Controls { pitch: pitch.clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost: true, ..Default::default() };
+            let c = Controls { pitch: pitch.clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost: true, reheat_set: Some(1.0), ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none());
             t += dt;
             let (_, _, h) = geo::pos_to_lla(p.pos);
@@ -3335,7 +3560,7 @@ mod tests {
             for i in 0..(secs / dt) as usize {
                 let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
                 let roll_err = -p.right().dot(p.pos.normalize());
-                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, ..Default::default() };
+                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, reheat_set: Some(if boost { 1.0 } else { 0.0 }), ..Default::default() };
                 assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
                 top = top.max(p.mach());
                 if i as f64 * dt > 60.0 {
@@ -3381,7 +3606,7 @@ mod tests {
             let vs = p.vel.dot(p.pos.normalize());
             let pitch = if phase == 1 { ((p.eas() * KT - 450.0) * 0.004 - vs * 0.0005) * 8.0 * gentle - p.omega.x * 1.0 } else { hold(&p) * gentle };
             let roll_err = -p.right().dot(p.pos.normalize());
-            let c = Controls { pitch: pitch.clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost: true, ..Default::default() };
+            let c = Controls { pitch: pitch.clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost: true, reheat_set: Some(1.0), ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             t += dt;
         }
@@ -3436,7 +3661,7 @@ mod tests {
         let (mut t, mut t25) = (0.0, None);
         while t < 300.0 {
             let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
-            let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: wings_level(&p), throttle: 1.0, ..Default::default() };
+            let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: wings_level(&p), throttle: 1.0, reheat_set: Some(0.0), ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             t += dt;
             if t25.is_none() && p.mach() < 2.5 {
@@ -3457,7 +3682,7 @@ mod tests {
         let mut worst: f64 = 0.0;
         for _ in 0..(120.0 / dt) as usize {
             let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
-            let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: wings_level(&p), throttle: 1.0, ..Default::default() };
+            let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: wings_level(&p), throttle: 1.0, reheat_set: Some(0.0), ..Default::default() };
             if p.step(dt, &c, &w).is_some() {
                 break;
             }
@@ -3516,7 +3741,7 @@ mod tests {
                 4 => up_at(&p, 450.0, gentle),
                 _ => hold(&p) * gentle,
             };
-            let c = Controls { pitch: pitch.clamp(-1.0, 1.0), roll: wings_level(&p), throttle: 1.0, boost: true, ..Default::default() };
+            let c = Controls { pitch: pitch.clamp(-1.0, 1.0), roll: wings_level(&p), throttle: 1.0, boost: true, reheat_set: Some(1.0), ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "phase {phase} at {t:.0} s: {:?}", p.notes);
             assert!(p.notes.is_empty(), "phase {phase} at {t:.0} s: {:?}", p.notes);
             t += dt;
@@ -3645,7 +3870,7 @@ mod tests {
         while t < 90.0 {
             if ticks % 12 == 0 {
                 let (pd, kt) = (pitch_deg(&p), p.vel.length() * KT);
-                c = Controls { throttle: 1.0, boost: true, ..Default::default() };
+                c = Controls { throttle: 1.0, boost: true, reheat_set: Some(1.0), ..Default::default() };
                 if kt > 200.0 {
                     pulled.get_or_insert(t);
                     // nose to 10 degrees, then to whatever holds 400 kt in the climb
@@ -3684,14 +3909,14 @@ mod tests {
             let mut p = Plane::spawn(bird, 0.6, -2.1, alt, 0.0, v);
             p.fuel = 20_000.0;
             for _ in 0..(2.0 / dt) as usize {
-                assert!(p.step(dt, &Controls { roll: 1.0, boost: alt > 20_000.0, ..Default::default() }, &w).is_none());
+                assert!(p.step(dt, &Controls { roll: 1.0, boost: alt > 20_000.0, reheat_set: Some(if alt > 20_000.0 { 1.0 } else { 0.0 }), ..Default::default() }, &w).is_none());
                 rate = rate.max(p.omega.z.abs().to_degrees());
             }
             let mut p = Plane::spawn(bird, 0.6, -2.1, alt, 0.0, v);
             p.fuel = 20_000.0;
             let mut g: f64 = 0.0;
             for _ in 0..(2.0 / dt) as usize {
-                assert!(p.step(dt, &Controls { pitch: 1.0, boost: alt > 20_000.0, ..Default::default() }, &w).is_none(), "{:?}", p.notes);
+                assert!(p.step(dt, &Controls { pitch: 1.0, boost: alt > 20_000.0, reheat_set: Some(if alt > 20_000.0 { 1.0 } else { 0.0 }), ..Default::default() }, &w).is_none(), "{:?}", p.notes);
                 g = g.max(p.g_load);
             }
             (rate, g, p.notes.clone())
@@ -3711,7 +3936,7 @@ mod tests {
             if ticks % 12 == 0 {
                 let (_, _, h) = geo::pos_to_lla(p.pos);
                 let vs = p.vel.dot(up(&p));
-                c = Controls { boost: true, ..Default::default() };
+                c = Controls { boost: true, reheat_set: Some(1.0), ..Default::default() };
                 c.roll = key(30.0 - bank_deg(&p) + p.omega.z.to_degrees() * 0.6, 1.5);
                 c.pitch = key((alt - h) * 0.02 - vs * 0.25 - p.omega.x.to_degrees() * 2.0, 1.0);
             }
@@ -3796,7 +4021,7 @@ mod tests {
                 most = most.max(pitch_deg);
             }
             let pitch = if v * KT > 199.0 { ((want - pitch_deg) * 0.25 - rate * 0.08).clamp(-1.0, 1.0) } else { 0.0 };
-            let c = Controls { throttle: 1.0, boost: true, pitch, ..Default::default() };
+            let c = Controls { throttle: 1.0, boost: true, reheat_set: Some(1.0), pitch, ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
             if lifted.is_none() && !p.on_ground && t > 5.0 {
                 lifted = Some(((p.pos - start).length(), v, t, pitch_deg));
@@ -3827,7 +4052,7 @@ mod tests {
                 // the stick does a lot at speed: the test pilot goes gently
                 let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
                 let roll_err = -p.right().dot(p.pos.normalize());
-                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, ..Default::default() };
+                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, reheat_set: Some(if boost { 1.0 } else { 0.0 }), ..Default::default() };
                 assert!(p.step(dt, &c, &w).is_none());
                 if i as f64 * dt > 60.0 {
                     gmax = gmax.max((p.g_load - 1.0).abs());
@@ -3864,7 +4089,7 @@ mod tests {
             while p.mach() < 1.7 && t < 900.0 {
                 let gentle = (120.0 / p.airspeed().length()).powi(2).min(1.0);
                 let roll_err = -p.right().dot(p.pos.normalize());
-                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, ..Default::default() };
+                let c = Controls { pitch: (hold(&p) * gentle).clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), throttle: 1.0, boost, reheat_set: Some(if boost { 1.0 } else { 0.0 }), ..Default::default() };
                 assert!(p.step(dt, &c, &w).is_none());
                 t += dt;
             }
@@ -4517,6 +4742,105 @@ mod tests {
         println!("approach: throttle {thr:.2}, {:.0} kt, {:.0} fpm, {:.0} rpm", v * KT, vs * 196.85, rpm(&p));
         assert!((v - 36.0).abs() < 3.0, "{v}");
         assert!((vs + sink).abs() < 1.0, "{vs}");
+    }
+
+    /// The gust field's rotational gusts across each airframe against the
+    /// MIL-F-8785C roll gust: its spectrum Φ_p(ω) = σ_w² 0.8 (πL/4b)^(1/3) /
+    /// (V L (1 + (4bω/πV)²)) integrates to σ_p² = σ_w² 0.8 π² (πL/4b)^(1/3) / (8 b L),
+    /// for every built-in aircraft: in that ballpark, smaller for a bigger
+    /// airframe, and finite everywhere.
+    #[test]
+    fn gust_gradients_follow_the_airframe() {
+        let mut rows = Vec::new();
+        for spec in crate::aircraft::BUILTIN {
+            let v = spec.cruise.clamp(40.0, 120.0);
+            let mut p = Plane::spawn(spec, 0.6, -2.1, 1500.0, 0.0, v);
+            let (sw, len) = (1.5, 300.0);
+            p.air = Air { sigma_w: sw, sigma_h: sw, len_w: len, len_h: len, draft: 0.0, ..Default::default() };
+            let up = p.pos.normalize();
+            let dt = 1.0 / 180.0;
+            let (mut r2, mut q2, mut y2, mut w2, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for _ in 0..(600.0 / dt) as usize {
+                p.pos += p.forward() * (v * dt);
+                p.turbulence(dt, v, up);
+                assert!(p.gust.is_finite() && p.gust_rot.is_finite(), "{}", spec.keys[0]);
+                r2 += p.gust_rot.z * p.gust_rot.z;
+                q2 += p.gust_rot.x * p.gust_rot.x;
+                y2 += p.gust_rot.y * p.gust_rot.y;
+                w2 += p.gust.dot(up).powi(2);
+                n += 1.0;
+            }
+            let b = spec.b;
+            let pi = std::f64::consts::PI;
+            let mil = sw * (0.8 * pi * pi / (8.0 * b * len) * (pi * len / (4.0 * b)).powf(1.0 / 3.0)).sqrt();
+            let (sp, sq, sr, swm) = ((r2 / n).sqrt(), (q2 / n).sqrt(), (y2 / n).sqrt(), (w2 / n).sqrt());
+            println!("{:10} b {b:5.1} V {v:5.1}: roll {sp:.4} (MIL {mil:.4})  pitch {sq:.4}  yaw {sr:.4}  w {swm:.2}", spec.keys[0]);
+            rows.push((spec.keys[0], b, sp, mil));
+        }
+        for (k, _, sp, mil) in &rows {
+            // (A delta's long chord averages out more than the formula, which
+            // knows only the span, allows for: the Sears taper.)
+            assert!(*sp > 0.4 * mil && *sp < 1.6 * mil, "{k}: roll gust {sp} vs {mil}");
+        }
+        let roll = |k: &str| rows.iter().find(|r| r.0 == k).unwrap().2;
+        assert!(roll("747") < 0.5 * roll("c172"));
+    }
+
+    /// Into a heavy jet's wake, flying along it with one wing under a
+    /// vortex, hands off: it rolls hard, and a small aircraft far harder than
+    /// a big one, from geometry alone. Every built-in aircraft comes through
+    /// it with finite numbers.
+    #[test]
+    fn a_heavy_jets_wake_rolls_a_light_aircraft() {
+        use crate::wake::{Source, Wakes};
+        let w = empty_world();
+        let (lat, lon) = (0.6f64, -2.1f64);
+        let alt = 1500.0;
+        let mut worst = Vec::new();
+        for spec in crate::aircraft::BUILTIN {
+            let v = spec.cruise.clamp(40.0, 110.0);
+            // A wide-body passed this way along heading 0 (north) 40 s ago, 20 m higher.
+            let mut wk = Wakes::default();
+            let p0 = geo::lla_to_pos(lat, lon, alt + 20.0);
+            let (_, n, _) = geo::enu(p0);
+            let mut t = 0.0;
+            let mut sp = p0 - n * 1500.0;
+            while t < 40.0 {
+                let src = Source { id: 1, pos: sp, vel: n * 75.0, span: 64.4, mass: 230_000.0 };
+                wk.step(0.1, t, &[src], |_, _| DVec3::ZERO, |_| Some(0.0), 0.0, p0);
+                sp += n * 7.5;
+                t += 0.1;
+            }
+            // Put the aircraft's left wing tip into the right-hand vortex, heading north.
+            let mut p = Plane::spawn(spec, lat, lon, alt, 0.0, v);
+            let up = p.pos.normalize();
+            let segs = wk.near(p.pos, 400.0, t);
+            let mut best = (f64::MAX, DVec3::ZERO);
+            for s in &segs {
+                // (the vortex line's position, through the pair's middle and its right)
+                let c = wake_right_vortex(s);
+                let d = (c - p.pos) - n * (c - p.pos).dot(n);
+                if d.length() < best.0 {
+                    best = (d.length(), d);
+                }
+            }
+            p.pos += best.1 + p.right() * (0.7 * spec.span as f64);
+            let _ = up;
+            let (mut bank, mut rate) = (0.0f64, 0.0f64);
+            let dt = 1.0 / 180.0;
+            for _ in 0..(4.0 / dt) as usize {
+                p.wake = wk.near(p.pos, 150.0 + spec.b, t);
+                p.step(dt, &Controls::default(), &w);
+                assert!(p.pos.is_finite() && p.omega.is_finite(), "{}", spec.keys[0]);
+                bank = bank.max(p.right().dot(p.pos.normalize()).abs().asin().to_degrees());
+                rate = rate.max(p.omega.z.abs().to_degrees());
+            }
+            println!("{:10} span {:5.1}: bank {bank:5.1} deg, roll rate {rate:5.1} deg/s", spec.keys[0], spec.b);
+            worst.push((spec.keys[0], bank));
+        }
+        let bank = |k: &str| worst.iter().find(|r| r.0 == k).unwrap().1;
+        assert!(bank("c172") > 25.0, "{}", bank("c172"));
+        assert!(bank("747") < 0.5 * bank("c172"));
     }
 
     #[test]

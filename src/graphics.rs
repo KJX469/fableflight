@@ -19,8 +19,8 @@
 //! Google's photorealistic 3D tiles are not part of this: they are switched on
 //! and given their own detail level in the map imagery settings (gmaps.rs).
 use crate::i18n::t;
-use crate::menu::{self, DIM};
-use crate::settings_ui::{note, row};
+use crate::menu;
+use crate::settings_ui::{row, row_help};
 use egui::RichText;
 
 pub use crate::graphics_core::*;
@@ -178,7 +178,21 @@ impl Graphics {
     /// The preset row and what the chosen preset does (the settings
     /// screen's Graphics section, settings_ui.rs).
     pub fn preset_ui(&mut self, ui: &mut egui::Ui) {
-        row(ui, t!("graphics.preset"), t!("graphics.preset_hint"), |ui| {
+        // what the chosen preset is for, under the "?".
+        let mut about = match self.matches() {
+            Some(p) => format!("{} {}", menu::sentence(t!("graphics.preset_hint")), match p {
+                Preset::VeryLow => t!("graphics.very_low_note"),
+                Preset::Low => t!("graphics.low_note"),
+                Preset::Medium => t!("graphics.medium_note"),
+                Preset::High => t!("graphics.high_note"),
+                Preset::Ultra => t!("graphics.ultra_note"),
+            }),
+            None => t!("graphics.preset_hint").to_string(),
+        };
+        if INTEGRATED.load(std::sync::atomic::Ordering::Relaxed) && matches!(self.matches(), Some(Preset::Medium | Preset::High | Preset::Ultra) | None) {
+            about = format!("{} {}", menu::sentence(&about), t!("graphics.integrated_note"));
+        }
+        row_help(ui, t!("graphics.preset"), &about, |ui| {
             ui.horizontal(|ui| {
                 let cur = self.matches();
                 let mut pick = cur;
@@ -190,34 +204,19 @@ impl Graphics {
                 if let (Some(p), true) = (pick, pick != cur) {
                     self.apply(p);
                 }
-                if cur.is_none() {
-                    ui.label(RichText::new(t!("graphics.custom")).font(menu::label()).color(DIM));
-                }
             });
         });
-        note(ui, match self.matches() {
-            Some(Preset::VeryLow) => t!("graphics.very_low_note"),
-            Some(Preset::Low) => t!("graphics.low_note"),
-            Some(Preset::Medium) => t!("graphics.medium_note"),
-            Some(Preset::High) => t!("graphics.high_note"),
-            Some(Preset::Ultra) => t!("graphics.ultra_note"),
-            _ => t!("graphics.custom_note"),
-        });
-        if INTEGRATED.load(std::sync::atomic::Ordering::Relaxed) && matches!(self.matches(), Some(Preset::Medium | Preset::High | Preset::Ultra) | None) {
-            note(ui, t!("graphics.integrated_note"));
-        }
-        row(ui, t!("graphics.dynamic"), t!("graphics.dynamic_hint"), |ui| {
+        row_help(ui, t!("graphics.dynamic"), t!("graphics.dynamic_hint"), |ui| {
             menu::switch(ui, &mut self.dynamic);
         });
         if self.dynamic {
-            row(ui, t!("graphics.dynamic_target"), t!("graphics.dynamic_target_hint"), |ui| {
+            row_help(ui, t!("graphics.dynamic_target"), t!("graphics.dynamic_note"), |ui| {
                 menu::segments(ui, |ui| {
                     for f in DYN_FPS {
                         menu::seg(ui, &mut self.dyn_fps, f, &if f == 0 { t!("graphics.dynamic_display").to_owned() } else { f.to_string() });
                     }
                 });
             });
-            note(ui, t!("graphics.dynamic_note"));
         }
     }
 
@@ -234,117 +233,110 @@ impl Graphics {
                 }
             });
         };
-        let dim = |ui: &mut egui::Ui, s: String| {
-            ui.label(RichText::new(s).font(menu::caption()).color(DIM));
-        };
-        row(ui, t!("graphics.shadows"), "", |ui| {
-            levels(ui, &mut self.shadows, true);
-            if self.shadows != Level::Off {
-                let r = self.shadow_res();
-                dim(ui, t!("graphics.shadow_map", r = r));
-            }
-        });
-        row(ui, t!("graphics.clouds"), "", |ui| {
-            levels(ui, &mut self.clouds, true);
-            if self.clouds == Level::Off {
-                dim(ui, t!("graphics.clouds_off").into());
-            }
-        });
-        row(ui, t!("graphics.cloud_shadows"), t!("graphics.cloud_shadows_hint"), |ui| {
+        // the hint, then what the setting does now, both under the "?".
+        let help = |hint: &str, now: String| if hint.is_empty() { now } else if now.is_empty() { hint.to_string() } else { format!("{} {}", menu::sentence(hint), menu::sentence(&now)) };
+        let shadows = if self.shadows != Level::Off { t!("graphics.shadow_map", r = self.shadow_res()) } else { String::new() };
+        row(ui, t!("graphics.shadows"), &help("", shadows), |ui| levels(ui, &mut self.shadows, true));
+        let clouds = if self.clouds == Level::Off { t!("graphics.clouds_off").to_string() } else { String::new() };
+        row(ui, t!("graphics.clouds"), &help("", clouds), |ui| levels(ui, &mut self.clouds, true));
+        let cs = if self.clouds_on() && self.cloud_shadows { if self.cloud_shadow_slices() > 16 { t!("graphics.cloud_shadows_slow").to_string() } else { t!("graphics.cloud_shadows_16").to_string() } } else { String::new() };
+        row(ui, t!("graphics.cloud_shadows"), &help(t!("graphics.cloud_shadows_hint"), cs), |ui| {
             ui.add_enabled_ui(self.clouds_on(), |ui| menu::switch(ui, &mut self.cloud_shadows));
-            if self.clouds_on() && self.cloud_shadows {
-                dim(ui, if self.cloud_shadow_slices() > 16 { t!("graphics.cloud_shadows_slow").into() } else { t!("graphics.cloud_shadows_16").into() });
-            }
         });
-        row(ui, t!("graphics.storm_cells"), t!("graphics.storm_cells_hint"), |ui| {
-            levels(ui, &mut self.storms, false);
-            dim(ui, match self.storms {
-                Level::Off | Level::Low => t!("graphics.storms_low").into(),
-                Level::Medium => t!("graphics.storms_medium").into(),
-                Level::High => t!("graphics.storms_high").into(),
-                Level::Ultra => t!("graphics.storms_ultra").into(),
-            });
-        });
+        let storms = match self.storms {
+            Level::Off | Level::Low => t!("graphics.storms_low").to_string(),
+            Level::Medium => t!("graphics.storms_medium").to_string(),
+            Level::High => t!("graphics.storms_high").to_string(),
+            Level::Ultra => t!("graphics.storms_ultra").to_string(),
+        };
+        row(ui, t!("graphics.storm_cells"), &help(t!("graphics.storm_cells_hint"), storms), |ui| levels(ui, &mut self.storms, false));
         row(ui, t!("graphics.contrails"), t!("graphics.contrails_hint"), |ui| {
             menu::switch(ui, &mut self.contrails);
         });
         row(ui, t!("graphics.terrain_detail"), "", |ui| levels(ui, &mut self.terrain, false));
-        row(ui, t!("graphics.scenery_distance"), "", |ui| {
-            levels(ui, &mut self.scenery, false);
-            dim(ui, t!("graphics.scenery_reach", 7.5 * self.reach()));
-        });
-        row(ui, t!("graphics.city_detail"), "", |ui| {
-            levels(ui, &mut self.city, false);
-            let k = self.city_k();
-            dim(ui, t!("graphics.city_reach", 1.3 * k, 550.0 * k));
-        });
-        row(ui, t!("graphics.tree_detail"), "", |ui| {
-            levels(ui, &mut self.trees, false);
-            dim(ui, t!("graphics.tree_reach", self.tree_far() / 1000.0, 120.0 * self.tree_imp_k()));
-        });
-        row(ui, t!("graphics.traffic"), t!("graphics.traffic_hint"), |ui| {
+        row(ui, t!("graphics.scenery_distance"), &help("", t!("graphics.scenery_reach", 7.5 * self.reach())), |ui| levels(ui, &mut self.scenery, false));
+        let k = self.city_k();
+        row(ui, t!("graphics.city_detail"), &help("", t!("graphics.city_reach", 1.3 * k, 550.0 * k)), |ui| levels(ui, &mut self.city, false));
+        row(ui, t!("graphics.tree_detail"), &help("", t!("graphics.tree_reach", self.tree_far() / 1000.0, 120.0 * self.tree_imp_k())), |ui| levels(ui, &mut self.trees, false));
+        let (share, far, _) = self.car_density();
+        let cars = if share > 0.0 { t!("graphics.traffic_share", share * 100.0, far / 1000.0) } else { t!("graphics.no_cars").to_string() };
+        row(ui, t!("graphics.traffic"), &help(t!("graphics.traffic_hint"), cars), |ui| {
             menu::segments(ui, |ui| {
                 for l in [Level::Off, Level::Low, Level::Medium, Level::High] {
                     menu::seg(ui, &mut self.cars, l, l.label());
                 }
             });
-            let (share, far, _) = self.car_density();
-            dim(ui, if share > 0.0 { t!("graphics.traffic_share", share * 100.0, far / 1000.0) } else { t!("graphics.no_cars").into() });
         });
-        row(ui, t!("graphics.birds"), t!("graphics.birds_hint"), |ui| {
+        let (flocks, birds) = crate::birds::caps(self.birds);
+        let birds = if flocks > 0 { t!("graphics.birds_caps", flocks, birds) } else { t!("graphics.no_birds").to_string() };
+        row(ui, t!("graphics.birds"), &help(t!("graphics.birds_hint"), birds), |ui| {
             menu::segments(ui, |ui| {
                 for l in [Level::Off, Level::Low, Level::Medium, Level::High] {
                     menu::seg(ui, &mut self.birds, l, l.label());
                 }
             });
-            let (flocks, birds) = crate::birds::caps(self.birds);
-            dim(ui, if flocks > 0 { t!("graphics.birds_caps", flocks, birds) } else { t!("graphics.no_birds").to_string() });
         });
-        row(ui, t!("graphics.ambient_occlusion"), t!("graphics.ambient_occlusion_hint"), |ui| {
+        let n = crate::balloons::cap(self.balloons);
+        let balloons = if n > 0 { t!("graphics.balloons_caps", n) } else { t!("graphics.no_balloons").to_string() };
+        row(ui, t!("graphics.balloons"), &help(t!("graphics.balloons_hint"), balloons), |ui| {
+            menu::segments(ui, |ui| {
+                for l in [Level::Off, Level::Low, Level::Medium, Level::High] {
+                    menu::seg(ui, &mut self.balloons, l, l.label());
+                }
+            });
+        });
+        let km = crate::turbines::reach(self.turbines) / 1000.0;
+        let turbines = if km > 0.0 { t!("graphics.turbines_caps", km) } else { t!("graphics.no_turbines").to_string() };
+        row(ui, t!("graphics.turbines"), &help(t!("graphics.turbines_hint"), turbines), |ui| {
+            menu::segments(ui, |ui| {
+                for l in [Level::Off, Level::Low, Level::Medium, Level::High] {
+                    menu::seg(ui, &mut self.turbines, l, l.label());
+                }
+            });
+        });
+        row_help(ui, t!("graphics.ambient_occlusion"), t!("graphics.ambient_occlusion_hint"), |ui| {
             menu::switch(ui, &mut self.ao);
         });
-        row(ui, t!("graphics.water"), t!("graphics.water_hint"), |ui| {
+        let water = match self.water {
+            Level::Off | Level::Low => t!("graphics.water_low").to_string(),
+            Level::Medium => t!("graphics.water_medium").to_string(),
+            Level::High | Level::Ultra => t!("graphics.water_high").to_string(),
+        };
+        row(ui, t!("graphics.water"), &help(t!("graphics.water_hint"), water), |ui| {
             menu::segments(ui, |ui| {
                 for l in [Level::Low, Level::Medium, Level::High] {
                     menu::seg(ui, &mut self.water, l, l.label());
                 }
             });
-            dim(ui, match self.water {
-                Level::Off | Level::Low => t!("graphics.water_low").into(),
-                Level::Medium => t!("graphics.water_medium").into(),
-                Level::High | Level::Ultra => t!("graphics.water_high").into(),
-            });
         });
-        row(ui, t!("graphics.msaa"), t!("graphics.msaa_hint"), |ui| {
+        let now = crate::render::msaa();
+        let restart = if self.msaa as u32 != now { t!("graphics.msaa_restart", if now == 1 { t!("graphics.level_off").to_string() } else { format!("{now}×") }) } else { String::new() };
+        row_help(ui, t!("graphics.msaa"), &help(t!("graphics.msaa_hint"), restart), |ui| {
             menu::segments(ui, |ui| {
                 for (n, name) in [(1u8, t!("graphics.level_off")), (2, "2×"), (4, "4×")] {
                     menu::seg(ui, &mut self.msaa, n, name);
                 }
             });
-            let now = crate::render::msaa();
-            if self.msaa as u32 != now {
-                dim(ui, t!("graphics.msaa_restart", if now == 1 { t!("graphics.level_off").to_string() } else { format!("{now}×") }));
-            }
         });
     }
 
     /// Render resolution, anti-aliasing, vsync and the frame limit. `window`
     /// is the window's size in pixels (for the resolution readout), `fps`
     /// the frame rate now.
-    pub fn display_ui(&mut self, ui: &mut egui::Ui, window: (u32, u32), fps: f64) {
-        row(ui, t!("graphics.render_resolution"), t!("graphics.render_resolution_hint"), |ui| {
-            let (w, h) = window;
-            let (rw, rh) = ((w as f32 * self.scale).round() as u32, (h as f32 * self.scale).round() as u32);
+    pub fn display_ui(&mut self, ui: &mut egui::Ui, window: (u32, u32), _fps: f64, fg_note: Option<String>) {
+        let (w, h) = window;
+        let (rw, rh) = ((w as f32 * self.scale).round() as u32, (h as f32 * self.scale).round() as u32);
+        let what = if self.scale > 1.001 { t!("graphics.supersampled").to_owned() } else if self.scale < 0.999 { t!("graphics.upscaled_with", crate::upscale::active(self.upscaler, self.scale).name()) } else { t!("graphics.native").to_owned() };
+        let about = format!("{} {}", menu::sentence(t!("graphics.render_resolution_hint")), menu::sentence(&format!("{rw}×{rh}, {what}")));
+        row_help(ui, t!("graphics.render_resolution"), &about, |ui| {
             // (the temporal upscalers never supersample)
             let top = if self.upscaler.temporal() { 1.0 } else { SCALE_MAX };
             self.scale = self.scale.min(top);
             // (clamped and stepped only when dragged, so AMD's 59% and 67% stay exact)
             ui.add(egui::Slider::new(&mut self.scale, SCALE_MIN..=top).step_by(0.05).clamping(egui::SliderClamping::Edits).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-            let what = if self.scale > 1.001 { t!("graphics.supersampled").to_owned() } else if self.scale < 0.999 { t!("graphics.upscaled_with", crate::upscale::active(self.upscaler, self.scale).name()) } else { t!("graphics.native").to_owned() };
-            ui.label(RichText::new(format!("{rw}×{rh}, {what}")).font(menu::caption()).color(DIM));
         });
         let aa = if crate::upscale::active(self.upscaler, self.render_scale()).temporal() { t!("graphics.anti_aliasing_hint_replaced") } else { t!("graphics.anti_aliasing_hint") };
-        row(ui, t!("graphics.anti_aliasing"), aa, |ui| {
+        row_help(ui, t!("graphics.anti_aliasing"), aa, |ui| {
             menu::switch(ui, &mut self.taa);
         });
         row(ui, "VSync", if self.vsync { t!("graphics.vsync_on") } else { t!("graphics.vsync_off") }, |ui| {
@@ -357,7 +349,32 @@ impl Graphics {
                 }
             });
         });
-        note(ui, &t!("graphics.fps_now", fps = fps));
+        row_help(ui, t!("graphics.dynamic_res"), t!("graphics.dynamic_res_hint"), |ui| {
+            menu::switch(ui, &mut self.dynamic_res);
+        });
+        use crate::fsr4::State;
+        let fg_state = crate::framegen::state();
+        let status = match (&fg_state, &fg_note) {
+            (State::Failed(e), _) => e.clone(),
+            (_, Some(n)) => n.clone(),
+            _ => String::new(),
+        };
+        let about = if status.is_empty() { t!("graphics.framegen_hint").to_string() } else { format!("{} {}", menu::sentence(t!("graphics.framegen_hint")), menu::sentence(&status)) };
+        row_help(ui, t!("graphics.framegen"), &about, |ui| {
+            ui.horizontal(|ui| match fg_state {
+                State::Installed => {
+                    menu::switch(ui, &mut self.framegen);
+                }
+                State::Downloading(done, total) => {
+                    ui.label(RichText::new(format!("{} / {}", crate::bytes(done), crate::bytes(total))).font(menu::label()).color(menu::TEXT));
+                }
+                _ => {
+                    if menu::button(ui, &format!("Download ({})", crate::bytes(crate::framegen::download_size()))).clicked() {
+                        crate::framegen::install();
+                    }
+                }
+            });
+        });
     }
 }
 
@@ -427,7 +444,13 @@ impl Graphics {
     /// machine, and FSR 4.1's download (settings_ui.rs).
     pub fn upscaler_ui(&mut self, ui: &mut egui::Ui, cx: &UpscaleCx) {
         let advice = recommend(cx.gpu.vendor, &cx.gpu.name, cx.gpu.device_type, cx.window, cx.fsr4_blocked.is_none());
-        row(ui, "Upscaler", "how frames below 100% reach the window's size", |ui| {
+        let running = if cx.active == self.upscaler || crate::upscale::active(self.upscaler, self.render_scale()) == cx.active {
+            format!("In use: {}.", cx.active.name())
+        } else {
+            format!("In use: {} ({} needs the render resolution below 100%).", cx.active.name(), self.upscaler.name())
+        };
+        let about = format!("{} {} {running} ★ marks the one suggested for {}.", menu::sentence("how frames below 100% reach the window's size"), self.upscaler.about(), cx.gpu.name);
+        row_help(ui, "Upscaler", &about, |ui| {
             let before = self.upscaler;
             menu::segments(ui, |ui| {
                 for u in Upscaler::ALL {
@@ -438,15 +461,11 @@ impl Graphics {
             if self.upscaler != before && self.upscaler.temporal() {
                 self.scale = self.scale.min(1.0);
             }
-            let now = if cx.active == self.upscaler || crate::upscale::active(self.upscaler, self.render_scale()) == cx.active {
-                format!("in use: {}", cx.active.name())
-            } else {
-                format!("in use: {} ({} needs the render resolution below 100%)", cx.active.name(), self.upscaler.name())
-            };
-            ui.label(RichText::new(now).font(menu::caption()).color(DIM));
         });
-        row(ui, "Quality mode", "AMD's render resolutions", |ui| {
-            let (w, h) = cx.window;
+        let (w, h) = cx.window;
+        let k = self.render_scale();
+        let about = format!("AMD's render resolutions. Now {:.0}%: {}×{} from {w}×{h}.", k * 100.0, (w as f32 * k).round(), (h as f32 * k).round());
+        row_help(ui, "Quality mode", &about, |ui| {
             menu::segments(ui, |ui| {
                 for (name, k) in QUALITY_MODES {
                     if k >= 1.0 && !self.upscaler.temporal() {
@@ -460,57 +479,38 @@ impl Graphics {
                     }
                 }
             });
-            let k = self.render_scale();
-            ui.label(RichText::new(format!("{:.0}% · {}×{} from {w}×{h}", k * 100.0, (w as f32 * k).round(), (h as f32 * k).round())).font(menu::caption()).color(DIM));
         });
-        note(ui, self.upscaler.about());
         if self.upscaler == Upscaler::Fsr4 {
             self.fsr4_ui(ui, cx);
         }
-        ui.add_space(6.0);
-        let mode = QUALITY_MODES.iter().find(|(_, k)| (k - advice.scale).abs() < 0.005).map_or("", |(n, _)| n);
-        row(ui, "Suggested here", &format!("for {}", cx.gpu.name), |ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new(format!("{} at {mode} ({:.0}%): {}.", advice.upscaler.name(), advice.scale * 100.0, advice.why)).font(menu::caption()).color(DIM));
-                let here = self.upscaler == advice.upscaler && (self.scale - advice.scale).abs() < 0.005;
-                if !here && ui.button("Use the suggestion").clicked() {
-                    self.upscaler = advice.upscaler;
-                    self.scale = advice.scale;
-                }
-            });
-        });
     }
 
     fn fsr4_ui(&mut self, ui: &mut egui::Ui, cx: &UpscaleCx) {
         use crate::fsr4::{self, State};
-        row(ui, "FSR 4.1 runtime", &format!("AMD FSR SDK {} · not part of the game", fsr4::SDK), |ui| {
-            ui.vertical(|ui| {
-                if let Some(p) = &cx.fsr4_provider {
-                    ui.label(RichText::new(format!("Running: AMD's runtime picked {p}.")).font(menu::caption()).color(DIM));
-                }
-                if let Some(why) = &cx.fsr4_blocked {
-                    ui.label(RichText::new(format!("Can't run here: {why}. FSR 3.1 runs instead.")).font(menu::caption()).color(DIM));
-                }
-                match fsr4::state() {
-                    State::NotInstalled | State::Failed(_) => {
-                        if let State::Failed(e) = fsr4::state() {
-                            ui.label(RichText::new(format!("Download failed: {e}")).font(menu::caption()).color(DIM));
-                        }
-                        let label = format!("Download from AMD ({})", crate::bytes(fsr4::download_size()));
-                        if ui.button(label).clicked() {
-                            fsr4::install();
-                        }
-                        ui.label(RichText::new("Fetched from AMD's FSR SDK v2.4.0 release on GitHub, checked against pinned SHA-256 sums. AMD's licence (binary use; no reverse engineering) comes with it and is shown after the download.").font(menu::caption()).color(DIM));
+        let mut about = format!("AMD FSR SDK {}, not part of the game: fetched from AMD's release on GitHub, checked against pinned SHA-256 sums, under AMD's licence.", fsr4::SDK);
+        if let Some(p) = &cx.fsr4_provider {
+            about += &format!(" Running: AMD's runtime picked {p}.");
+        }
+        if let Some(why) = &cx.fsr4_blocked {
+            about += &format!(" Can't run here: {why}. FSR 3.1 runs instead.");
+        }
+        let st = fsr4::state();
+        if let State::Failed(e) = &st {
+            about += &format!(" Download failed: {e}.");
+        }
+        row_help(ui, "FSR 4.1 runtime", &about, |ui| {
+            ui.horizontal(|ui| match st {
+                State::NotInstalled | State::Failed(_) => {
+                    if menu::button(ui, &format!("Download ({})", crate::bytes(fsr4::download_size()))).clicked() {
+                        fsr4::install();
                     }
-                    State::Downloading(a, b) => {
-                        ui.add(egui::ProgressBar::new(a as f32 / b.max(1) as f32).text(format!("Downloading… {} / {}", crate::bytes(a), crate::bytes(b))));
-                    }
-                    State::Installed => {
-                        let folder = fsr4::dir().map(|d| d.display().to_string()).unwrap_or_default();
-                        ui.label(RichText::new(format!("Installed (FSR {}, AMD's licence in {folder}).", fsr4::VERSION)).font(menu::caption()).color(DIM));
-                        if ui.button("Remove").clicked() {
-                            fsr4::remove();
-                        }
+                }
+                State::Downloading(a, b) => {
+                    ui.label(RichText::new(format!("{} / {}", crate::bytes(a), crate::bytes(b))).font(menu::label()).color(menu::TEXT));
+                }
+                State::Installed => {
+                    if menu::button(ui, "Remove").clicked() {
+                        fsr4::remove();
                     }
                 }
             });

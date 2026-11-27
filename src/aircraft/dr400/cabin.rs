@@ -19,11 +19,14 @@ pub const PANEL_Z: f32 = -1.08;
 pub const FLOOR_Y: f32 = -0.52;
 /// The canopy's apex, and where the windscreen meets the sliding bubble.
 pub const CANOPY_TOP: f32 = 0.60;
-pub const SCREEN_Z: f32 = -0.80;
+pub const SCREEN_Z: f32 = -0.40;
+/// Where the canopy is highest.
+const APEX_Z: f32 = -0.26;
 /// The footwell's front wall, just aft of the firewall.
 const TOE_Z: f32 = FIREWALL_Z + 0.05;
 
-const PANEL_COL: Mat = mt(mat::PLASTIC, 0.030, 0.031, 0.034);
+/// The Robin's panel and console: a medium grey, the instruments black in it.
+const PANEL_COL: Mat = mt(mat::PLASTIC, 0.105, 0.11, 0.12);
 const TRIM: Mat = mt(mat::PLASTIC, 0.30, 0.295, 0.28);
 /// Dark leatherette: seat bolsters, armrests, the sill pads.
 const VINYL: Mat = mt(mat::PLASTIC, 0.038, 0.039, 0.043);
@@ -119,8 +122,16 @@ pub fn sill(z: f32) -> Vec2 {
 pub fn canopy_top(z: f32) -> f32 {
     let (z0, z1) = (CANOPY[0] - 0.02, CANOPY[1] + 0.02);
     let base = sec(z).top;
-    let up = smoothstep(z0, -0.40, z).powf(0.75) * (1.0 - smoothstep(0.25, z1, z).powf(1.4));
-    base + (CANOPY_TOP - base) * up
+    // Up from the cowl deck to the apex over the windscreen frame, then
+    // easing down to meet the spine behind the rear seats.
+    if z < APEX_Z {
+        let deck = sec(z0).top;
+        let up = smoothstep(z0, APEX_Z, z).powf(0.75);
+        return (deck + (CANOPY_TOP - deck) * up).max(base);
+    }
+    let line = CANOPY_TOP - 0.142 * (z - APEX_Z) - 0.03 * smoothstep(APEX_Z, 0.5, z);
+    let top = line.max(base);
+    top + (base - top) * smoothstep(CANOPY[1] - 0.06, z1, z)
 }
 /// A point on the canopy at station z, u from the right sill (0) over the top (1) to the left sill (2).
 pub fn canopy_pt(z: f32, u: f32) -> Vec3 {
@@ -130,8 +141,8 @@ pub fn canopy_pt(z: f32, u: f32) -> Vec3 {
     let (sn, cs) = th.sin_cos();
     let e = |v: f32, n: f32| v.signum() * v.abs().powf(2.0 / n);
     // A bubble: a little fuller than the sill line at shoulder height.
-    let bulge = 1.0 + 0.04 * (u * PI).sin();
-    Vec3::new(-s.x * bulge * e(sn, 2.4), s.y + (top - s.y) * e(cs, 2.4), z)
+    let bulge = 1.0 + 0.05 * (u * PI).sin();
+    Vec3::new(-s.x * bulge * e(sn, 3.6), s.y + (top - s.y) * e(cs, 3.6), z)
 }
 
 /// Half width inside the walls at station z, height y (below the sill).
