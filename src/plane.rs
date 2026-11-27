@@ -6727,7 +6727,7 @@ mod tests {
             let roll_err = -p.right().dot(p.pos.normalize());
             let c = Controls { throttle: 1.0, pitch: pitch.clamp(-1.0, 1.0), roll: (-roll_err * 3.0 + p.omega.z * 0.5).clamp(-1.0, 1.0), ..Default::default() };
             assert!(p.step(dt, &c, &w).is_none(), "{:?}", p.notes);
-            if lifted.is_none() && !p.on_ground && t > 5.0 {
+            if lifted.is_none() && !p.on_ground && !p.on_hull && t > 5.0 {
                 lifted = Some(((p.pos - start).length(), ias, t));
             }
             // Gear up once it is climbing away (a positive rate, clear of the
